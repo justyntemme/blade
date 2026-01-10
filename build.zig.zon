@@ -1,0 +1,13 @@
+.{
+    .name = .blade,
+    .version = "0.0.1",
+    .dependencies = .{
+        .zigtui = .{
+            .url = "git+https://github.com/adxdits/zigtui.git#485c44524fab20ebddfeb04a0488a8e87fd0b72a",
+            .hash = "zigtui-0.1.0-U55PSOQ6AgCe5sAvi5WcB33guMsAktNxfuOVJKpbqAzz",
+        },
+    },
+    .minimum_zig_version = "0.15.2",
+    .paths = .{""},
+    .fingerprint = 0x217c01e8719e1c5a,
+}
