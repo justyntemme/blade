@@ -1,25 +1,26 @@
+#+STARTUP: indent
 
 * External variables
 
-   When looking to use a object from an external repoistory
-    i wanted to make sure it was easy to see where those
-    objects belonged to, and to make clear that they 
-    were from external sources. See example below 
+When looking to use a object from an external repoistory
+i wanted to make sure it was easy to see where those
+objects belonged to, and to make clear that they
+were from external sources. See example below
 
-  #+BEGIN_SRC zig
-  const _Rect = tui.render.Rect;
-  const _Style = tui.style.Style;
-  const _Modifier = tui.style.Modifier;
-  #+END_SRC
+#+BEGIN_SRC zig
+const _Rect = tui.render.Rect;
+const _Style = tui.style.Style;
+const _Modifier = tui.style.Modifier;
+#+END_SRC
 
-  We use _ as an indicator that these resources are imported
-   from an external module. This also ensures that if tui ever 
-   changes their API, we have less places in the code to change.
+We use _ as an indicator that these resources are imported
+from an external module. This also ensures that if tui ever
+changes their API, we have less places in the code to change.
 
 * Allocators
+Tset text belonged
+  testing 
 
-  We use an arena allocator for the procMap  
-  as we wipe away the entire map every redraw, and pass over
-  the new map pointer
-
-
+We use an arena allocator for the procMap
+as we wipe away the entire map every redraw, and pass over
+the new map pointer
