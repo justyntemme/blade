@@ -1,6 +1,5 @@
-* Design Patterns
 
-** External variables
+* External variables
 
    When looking to use a object from an external repoistory
     i wanted to make sure it was easy to see where those
