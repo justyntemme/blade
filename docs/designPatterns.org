@@ -20,5 +20,12 @@ changes their API, we have less places in the code to change.
 * Allocators
 We use an arena allocator for the procMap
 as we wipe away the entire map every redraw, and pass over
-the new map pointer
+the new map pointer.
 
+* Layout management
+we use an internal (well plan to use) layout engine instead of something 
+like Clay, because we feel the project is not sophisticated enough in 
+functionality to require a full library. I feel that it makes most sense
+to build an internal layout engine specific to our needs that is slim 
+and built into the project rather than a library we must rely on. This
+may change in the future if feature sets grow beyond what can easily be managed.
