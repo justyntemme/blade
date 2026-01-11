@@ -3,7 +3,7 @@ const c = @cImport({
     @cInclude("libproc.h");
     @cInclude("sys/proc_info.h");
 });
-const pid_t = c.pid_t;
+pub const pid_t = c.pid_t;
 pub const Proc = struct { PID: pid_t, Sname: [256:0]u8, Path: [4096]u8 };
 const ProcError = error{
     FailedToGetProcessCount,
