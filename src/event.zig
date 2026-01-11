@@ -9,6 +9,12 @@ pub fn handleEvent(app: *state.AppState, event: anytype) void {
                         'q' => app.running = false,
                         'k' => app.up(),
                         'j' => app.down(),
+                        'u' => {
+                            for (0..5) |_| app.up();
+                        },
+                        'd' => {
+                            for (0..5) |_| app.down();
+                        },
                         else => {},
                     }
                 },
