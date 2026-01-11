@@ -20,6 +20,18 @@ pub const AppState = struct {
             }
         }
     }
+    pub fn down(self: *AppState) void {
+        if (self.selected_item < self.view.items.len -| 1) {
+            self.selected_item += 1;
+        }
+    }
+
+    pub fn up(self: *AppState) void {
+        if (self.selected_item > 0) {
+            self.selected_item -= 1;
+        }
+    }
+
     pub fn init(allocator: std.mem.Allocator) AppState {
         return .{
             .allocator = allocator,
