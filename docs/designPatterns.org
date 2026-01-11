@@ -14,5 +14,6 @@
   #+END_SRC
 
   We use _ as an indicator that these resources are imported
-   from an external module
+   from an external module. This also ensures that if tui ever 
+   changes their API, we have less places in the code to change.
 
