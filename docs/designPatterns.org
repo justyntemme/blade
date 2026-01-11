@@ -16,3 +16,8 @@
    from an external module. This also ensures that if tui ever 
    changes their API, we have less places in the code to change.
 
+* Allocators
+
+  We use an arena allocator for the *view* array 
+
+
