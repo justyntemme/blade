@@ -10,7 +10,7 @@ const ProcError = error{
     FailedToGetProcessList,
 };
 pub fn getProcList() !std.AutoHashMap(pid_t, Proc) {
-    std.debug.print("Entrypoint -> getProcList\n", .{});
+    // std.debug.print("Entrypoint -> getProcList\n", .{});
     const allocator = std.heap.page_allocator;
 
     var procMap: std.AutoHashMap(pid_t, Proc) = .init(allocator);
@@ -21,7 +21,7 @@ pub fn getProcList() !std.AutoHashMap(pid_t, Proc) {
         return error.FailedToGetProcessCount;
     }
 
-    std.debug.print("PID Count {d}\n", .{pid_count});
+    // std.debug.print("PID Count {d}\n", .{pid_count});
 
     const buffer_size: usize = @intCast(pid_count);
     const pids = try allocator.alloc(pid_t, buffer_size);
@@ -41,7 +41,7 @@ pub fn getProcList() !std.AutoHashMap(pid_t, Proc) {
     }
     const actual_count = @as(usize, @intCast(bytes_returned)) / @sizeOf(pid_t);
 
-    std.debug.print("Found {d} processes:\n\n", .{actual_count});
+    // std.debug.print("Found {d} processes:\n\n", .{actual_count});
 
     // Get info for each process
     for (pids[0..actual_count]) |pid| {
