@@ -1,13 +1,18 @@
 
 
 ** External variables
-   When looking to use a object from an external repoistory
-   i wanted to make sure it was easy to see where those
-   objects belonged to, and to make clear that they 
-   were from external sources. See example below 
 
-#+BEGIN_SRC zig
-const _Rect = tui.render.Rect;
-const _Style = tui.style.Style;
-const _Modifier = tui.style.Modifier;
-#+END_SRC
+   When looking to use a object from an external repoistory
+    i wanted to make sure it was easy to see where those
+    objects belonged to, and to make clear that they 
+    were from external sources. See example below 
+
+  #+BEGIN_SRC zig
+  const _Rect = tui.render.Rect;
+  const _Style = tui.style.Style;
+  const _Modifier = tui.style.Modifier;
+  #+END_SRC
+
+  We use _ as an indicator that these resources are imported
+   from an external module
+
