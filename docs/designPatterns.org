@@ -18,26 +18,8 @@ from an external module. This also ensures that if tui ever
 changes their API, we have less places in the code to change.
 
 * Allocators
-Tset text belonged
-  testing testing testing
-  testing
-
-testing testing testing
-  testing testing testing 
-  testing
-
 We use an arena allocator for the procMap
 as we wipe away the entire map every redraw, and pass over
 the new map pointer
 
 
-* point 
-testing testing testing
-more test more test
-
-
-  testing testing testing 
-  testing testing 
-
-teting testing testing 
-  testing
