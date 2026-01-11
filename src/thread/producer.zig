@@ -17,7 +17,7 @@ pub fn run(args: ThreadArgs) void {
         fetchAndSend(args.queue) catch |err| {
             std.debug.print("Producer Error: {}\n", .{err});
         };
-        std.time.sleep(POLL_INTERVAL_MS * std.time.ns_per_ms);
+        std.Thread.sleep(POLL_INTERVAL_MS * std.time.ns_per_ms);
     }
 }
 
@@ -28,7 +28,7 @@ fn fetchAndSend(queue: *channel.BatchQueue) !void {
         .map = std.AutoHashMap(proc.pid_t, *proc.Proc).init(std.heap.page_allocator),
     };
     var rawMap = try proc.getProcList();
-    rawMap.deinit();
+    defer rawMap.deinit();
     const arena_alloc = batch.arena.allocator();
     var iter = rawMap.iterator();
     while (iter.next()) |entry| {

@@ -1,6 +1,6 @@
 const std = @import("std");
 const spsc = @import("spsc_queue");
-const proc = @import("proc/proc.zig");
+const proc = @import("../proc/proc.zig");
 
 // Batch represents proc data with its own memory arena
 // Ownership transfers through queue - consumer calls deinit
@@ -16,7 +16,7 @@ pub const Batch = struct {
 
 // Queue for batch transfer
 // cap of 4 - consumer drains faster than producer fills
-pub const BatchQueue = spsc.SpscQueue(Batch, .{});
+pub const BatchQueue = spsc.SpscQueue(Batch, false);
 
 // init
 pub fn initQueue(allocator: std.mem.Allocator) !BatchQueue {
