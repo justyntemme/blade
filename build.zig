@@ -24,7 +24,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     if (target.result.os.tag == .macos) {
-        // Use external proc library on mac to get system procsk
+        //Darwin// Use external proc library for proc list
         exe.linkSystemLibrary("proc");
     }
     b.installArtifact(exe);

@@ -1,7 +1,7 @@
 const std = @import("std");
 const tui = @import("zigtui");
-const state = @import("state.zig");
-const proc = @import("proc/proc.zig");
+const state = @import("../state.zig");
+const proc = @import("../proc/proc.zig");
 
 const _Rect = tui.render.Rect;
 const _Style = tui.style.Style;
