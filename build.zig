@@ -7,23 +7,26 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-
+    const spsc = b.dependency("spsc_queue", .{
+        .target = target,
+        .optimize = optimize,
+    });
     const exe = b.addExecutable(.{
         .name = "Blade",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
-            // .root_source_file = b.path("src/example.zig"),
             .target = b.graph.host,
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "zigtui", .module = zigtui.module("zigtui") },
+                .{ .name = "spsc_queue", .module = spsc.module("spsc_queue") },
             },
         }),
     });
-    // Import ZigTUI module
-    // Use external proc library on mac to get system procs
-    exe.linkSystemLibrary("proc");
-    // Your executable
+    if (target.result.os.tag == .macos) {
+        // Use external proc library on mac to get system procsk
+        exe.linkSystemLibrary("proc");
+    }
     b.installArtifact(exe);
     const run_exe = b.addRunArtifact(exe);
 
