@@ -46,8 +46,8 @@ pub const CalculatedLayout = struct {
     pub fn get(self: *const CalculatedLayout, id: []const u8) ?Rect {
         return self.rects.get(id);
     }
-    pub fn definit(self: *CalculatedLayout) void {
-        self.rects.definit();
+    pub fn deinit(self: *CalculatedLayout) void {
+        self.rects.deinit();
     }
 };
 
@@ -92,6 +92,14 @@ fn sumPercentSizes(items: []const Item, available: u16) LayoutError!u16 {
         }
     }
     return total;
+}
+
+fn calculateGrowSize(weight: f32, total_weight: f32, remaining: u16) u16 {
+    if (total_weight == 0) return 0;
+
+    const ratio = weight / total_weight;
+    const size = ratio * @as(f32, @floatFromInt(remaining));
+    return @intFromFloat(size);
 }
 
 // Tests
@@ -146,4 +154,19 @@ test "sumPercentSizes returns error for invalid percent" {
 
     const result = sumPercentSizes(&items, 200);
     try std.testing.expectError(error.InvalidPercent, result);
+}
+
+test "calculateGrowSize distributes proportionally" {
+    // 1/3 of 90 = 30
+    const size_a = calculateGrowSize(1.0, 3.0, 90);
+    try std.testing.expectEqual(@as(u16, 30), size_a);
+
+    // 2/3 of 90 = 60
+    const size_b = calculateGrowSize(2.0, 3.0, 90);
+    try std.testing.expectEqual(@as(u16, 60), size_b);
+}
+
+test "calculateGrowSize returns zero when total weight is zero" {
+    const size = calculateGrowSize(1.0, 0, 100);
+    try std.testing.expectEqual(@as(u16, 0), size);
 }

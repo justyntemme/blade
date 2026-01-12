@@ -46,7 +46,7 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
             _Style{ .fg = .white };
         var pid_buf: [8]u8 = undefined;
         const pid_str = std.fmt.bufPrint(&pid_buf, "{d:<7}", .{p.PID}) catch "???";
-        const name = std.mem.sliceTo(&p.Sname, 0);
+        const name = std.mem.sliceTo(&p.s_name, 0);
         const path = std.mem.sliceTo(&p.Path, 0);
         buf.setString(inner.x, y, pid_str, style);
         buf.setString(inner.x + 8, y, name, style);

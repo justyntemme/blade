@@ -8,12 +8,12 @@ pub const AppState = struct {
     selected_item: usize = 0,
     scroll_offset: usize = 0,
     // procs: std.AutoHashMap(proc.pid_t, proc.Proc),
-    currentBatch: ?channel.Batch = null,
+    current_Batch: ?channel.Batch = null,
     view: std.ArrayList(*proc.Proc) = .{},
     pub fn rebuildView(self: *AppState) void {
         self.view.clearRetainingCapacity();
 
-        if (self.currentBatch) |*batch| {
+        if (self.current_Batch) |*batch| {
             var iter = batch.map.iterator();
             while (iter.next()) |entry| {
                 self.view.append(self.allocator, entry.value_ptr.*) catch {};
@@ -41,17 +41,17 @@ pub const AppState = struct {
 
     pub fn deinit(self: *AppState) void {
         self.view.deinit(self.allocator);
-        if (self.currentBatch) |*batch| {
+        if (self.current_Batch) |*batch| {
             batch.deinit();
         }
     }
-    pub fn recieveBatch(self: *AppState, newBatch: channel.Batch) void {
+    pub fn recieveBatch(self: *AppState, new_Batch: channel.Batch) void {
         // Free old batch -- will use to track
         // CPU percentage later but for now just free
-        if (self.currentBatch) |*old| {
+        if (self.current_Batch) |*old| {
             old.deinit();
         }
-        self.currentBatch = newBatch;
+        self.current_Batch = new_Batch;
 
         self.rebuildView();
     }

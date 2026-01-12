@@ -4,7 +4,7 @@ const c = @cImport({
     @cInclude("sys/proc_info.h");
 });
 pub const pid_t = c.pid_t;
-pub const Proc = struct { PID: pid_t, Sname: [256:0]u8, Path: [4096]u8 };
+pub const Proc = struct { pid: pid_t, s_name: [256:0]u8, path: [4096]u8 };
 const ProcError = error{
     FailedToGetProcessCount,
     FailedToGetProcessList,
@@ -13,7 +13,7 @@ pub fn getProcList() !std.AutoHashMap(pid_t, Proc) {
     // std.debug.print("Entrypoint -> getProcList\n", .{});
     const allocator = std.heap.page_allocator;
 
-    var procMap: std.AutoHashMap(pid_t, Proc) = .init(allocator);
+    var proc_map: std.AutoHashMap(pid_t, Proc) = .init(allocator);
 
     const pid_count = c.proc_listpids(c.PROC_ALL_PIDS, 0, null, 0);
     if (pid_count <= 0) {
@@ -59,23 +59,23 @@ pub fn getProcList() !std.AutoHashMap(pid_t, Proc) {
         const path_len = c.proc_pidpath(pid, &path_buf, path_buf.len);
 
         if (info_size > 0) {
-            const Cname = std.mem.sliceTo(&proc_info.pbi_name, 0);
+            const c_name = std.mem.sliceTo(&proc_info.pbi_name, 0);
             var proc = Proc{
-                .PID = pid,
-                .Sname = undefined,
-                .Path = undefined,
+                .pid = pid,
+                .s_name = undefined,
+                .path = undefined,
             };
-            @memcpy(proc.Sname[0..Cname.len], Cname);
-            proc.Sname[Cname.len] = 0;
+            @memcpy(proc.s_name[0..c_name.len], c_name);
+            proc.s_name[c_name.len] = 0;
             if (path_len != -1) {
-                @memcpy(proc.Path[0..@intCast(path_len)], path_buf[0..@intCast(path_len)]);
-                proc.Path[@intCast(path_len)] = 0;
+                @memcpy(proc.path[0..@intCast(path_len)], path_buf[0..@intCast(path_len)]);
+                proc.path[@intCast(path_len)] = 0;
             } else {
                 return error.FailedToGetProcessCount;
             }
-            try procMap.put(pid, proc);
+            try proc_map.put(pid, proc);
         }
     } // for each PID
 
-    return procMap;
+    return proc_map;
 }
