@@ -35,7 +35,6 @@ pub fn main() !void {
     var thread_running = std.atomic.Value(bool).init(true);
 
     //thread shutdown
-    // var thread_running = std.atomic.Value(bool).init(true);
     const thread_args = producer.ThreadArgs{
         .queue = &queue,
         .running = &thread_running,

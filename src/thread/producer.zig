@@ -26,7 +26,6 @@ pub fn run(args: ThreadArgs) void {
             args.condition.timedWait(args.mutex, POLL_INTERVAL_MS) catch {};
         }
         args.mutex.unlock();
-        // std.Thread.sleep(POLL_INTERVAL_MS * std.time.ns_per_ms);
     }
 }
 
