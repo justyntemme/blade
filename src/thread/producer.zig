@@ -3,12 +3,14 @@ const std = @import("std");
 const proc = @import("../proc/proc.zig");
 const channel = @import("channel.zig");
 
-const POLL_INTERVAL_MS: u64 = 3000;
+const POLL_INTERVAL_MS: u64 = 3 * std.time.ns_per_s;
 
 // producer thread params. pointers MUST remain valid for threads lifetime
 pub const ThreadArgs = struct {
     queue: *channel.BatchQueue,
     running: *std.atomic.Value(bool),
+    condition: *std.Thread.Condition,
+    mutex: *std.Thread.Mutex,
 };
 
 //entrypoint
@@ -17,7 +19,14 @@ pub fn run(args: ThreadArgs) void {
         fetchAndSend(args.queue) catch |err| {
             std.debug.print("Producer Error: {}\n", .{err});
         };
-        std.Thread.sleep(POLL_INTERVAL_MS * std.time.ns_per_ms);
+
+        //Sleep w interupt
+        args.mutex.lock();
+        if (args.running.load(.acquire)) {
+            args.condition.timedWait(args.mutex, POLL_INTERVAL_MS) catch {};
+        }
+        args.mutex.unlock();
+        // std.Thread.sleep(POLL_INTERVAL_MS * std.time.ns_per_ms);
     }
 }
 

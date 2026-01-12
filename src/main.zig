@@ -29,11 +29,18 @@ pub fn main() !void {
     var queue = try channel.initQueue(allocator);
     defer queue.deinit();
 
-    //thread shutdown
+    // Thread synch
+    var mutex: std.Thread.Mutex = .{};
+    var condition: std.Thread.Condition = .{};
     var thread_running = std.atomic.Value(bool).init(true);
+
+    //thread shutdown
+    // var thread_running = std.atomic.Value(bool).init(true);
     const thread_args = producer.ThreadArgs{
         .queue = &queue,
         .running = &thread_running,
+        .condition = &condition,
+        .mutex = &mutex,
     };
     const handle = try std.Thread.spawn(.{}, producer.run, .{thread_args});
 
@@ -56,6 +63,7 @@ pub fn main() !void {
         try terminal.draw(ctx, render.render);
     }
     thread_running.store(false, .release);
+    condition.signal();
     handle.join();
     try terminal.showCursor();
 }
