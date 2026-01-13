@@ -5,6 +5,7 @@ const LayoutError = error{
     NegativeGrow,
     OutOfMemory,
 };
+
 pub const Direction = enum {
     row,
     column,
@@ -143,6 +144,17 @@ pub fn calculate(
         //store result
         try result.rects.put(item.id, item_rect);
 
+        if (item.children) |child_container| {
+            var child_layout = try calculate(allocator, child_container.*, item_rect);
+            defer child_layout.deinit();
+
+            // merge result into parent
+            var child_iter = child_layout.rects.iterator();
+            while (child_iter.next()) |entry| {
+                try result.rects.put(entry.key_ptr.*, entry.value_ptr.*);
+            }
+        }
+
         //move to next item
         main_pos += item_main_size;
     }
@@ -274,4 +286,46 @@ test "calculate positions column items correctly" {
     const footer = layout.get("footer").?;
     try std.testing.expectEqual(@as(u16, 21), footer.y);
     try std.testing.expectEqual(@as(u16, 3), footer.height);
+}
+
+test "calculate handles nested containers" {
+    // Two rows beside a sidebar (classic layout)
+    const inner_column = Container.column(&[_]Item{
+        .{ .id = "row1", .sizing = .{ .grow = 1.0 } },
+        .{ .id = "row2", .sizing = .{ .grow = 1.0 } },
+    });
+
+    const container = Container.row(&[_]Item{
+        .{ .id = "left_panel", .sizing = .{ .grow = 2.0 }, .children = &inner_column },
+        .{ .id = "sidebar", .sizing = .{ .grow = 1.0 } },
+    });
+
+    const available = Rect{ .x = 0, .y = 0, .width = 90, .height = 30 };
+
+    var layout = try calculate(std.testing.allocator, container, available);
+    defer layout.deinit();
+
+    // Left panel: 2/3 of 90 = 60 width
+    const left = layout.get("left_panel").?;
+    try std.testing.expectEqual(@as(u16, 0), left.x);
+    try std.testing.expectEqual(@as(u16, 60), left.width);
+
+    // Sidebar: 1/3 of 90 = 30 width
+    const sidebar = layout.get("sidebar").?;
+    try std.testing.expectEqual(@as(u16, 60), sidebar.x);
+    try std.testing.expectEqual(@as(u16, 30), sidebar.width);
+
+    // Row1: inside left_panel, top half
+    const row1 = layout.get("row1").?;
+    try std.testing.expectEqual(@as(u16, 0), row1.x);
+    try std.testing.expectEqual(@as(u16, 0), row1.y);
+    try std.testing.expectEqual(@as(u16, 60), row1.width);
+    try std.testing.expectEqual(@as(u16, 15), row1.height);
+
+    // Row2: inside left_panel, bottom half
+    const row2 = layout.get("row2").?;
+    try std.testing.expectEqual(@as(u16, 0), row2.x);
+    try std.testing.expectEqual(@as(u16, 15), row2.y);
+    try std.testing.expectEqual(@as(u16, 60), row2.width);
+    try std.testing.expectEqual(@as(u16, 15), row2.height);
 }
