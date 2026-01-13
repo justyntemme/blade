@@ -10,6 +10,7 @@ const _Modifier = tui.style.Modifier;
 const app_layout = layout.Container.column(&[_]layout.Item{
     .{ .id = "header", .sizing = .{ .fixed = 1 } },
     .{ .id = "process_list", .sizing = .{ .grow = 1.0 } },
+    .{ .id = "footer_bar", .sizing = .{ .fixed = 1 } },
 });
 
 pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
@@ -30,6 +31,7 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
 
     const header_rect = calculated.get("header") orelse return;
     const list_rect = calculated.get("process_list") orelse return;
+    const footer_rect = calculated.get("footer_bar") orelse return;
 
     const block = tui.widgets.Block{
         .title = "Processes",
@@ -67,5 +69,10 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
         buf.setString(list_rect.x + list_rect.width / 2, y, path, style);
         y += 1;
     }
+
+    buf.setString(footer_rect.x, footer_rect.y, "/ to search search, q to quit, m for menu // <^v>\n", _Style{
+        .fg = .gray,
+    });
+
     block.render(area, buf);
 }
