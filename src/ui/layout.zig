@@ -102,6 +102,49 @@ fn calculateGrowSize(weight: f32, total_weight: f32, remaining: u16) u16 {
     return @intFromFloat(size);
 }
 
+pub fn calculate(
+    allocator: std.mem.Allocator,
+    container: Container,
+    available: Rect,
+) LayoutError!CalculatedLayout {
+    var result = CalculatedLayout{
+        .rects = std.StringHashMap(Rect).init(allocator),
+        .allocator = allocator,
+    };
+    // pass 1 measure
+    const fixed_total = sumFixedSizes(container.items);
+    const percent_total = try sumPercentSizes(container.items, available.width);
+    const total_weight = try sumGrowWeights(container.items);
+    const remaining = available.width -| fixed_total -| percent_total;
+
+    //pass 2 position
+    var x_position = available.x;
+
+    for (container.items) |item| {
+        const item_width: u16 = switch (item.sizing) {
+            .fixed => |size| size,
+            .percent => |p| @intFromFloat(p * @as(f32, @floatFromInt(available.width))),
+            .grow => |weight| calculateGrowSize(weight, total_weight, remaining),
+        };
+
+        //create Rect for item
+        const item_rect = Rect{
+            .x = x_position,
+            .y = available.y,
+            .width = item_width,
+            .height = available.height,
+        };
+
+        //store result
+        try result.rects.put(item.id, item_rect);
+
+        //move to next item
+        x_position += item_width;
+    }
+
+    return result;
+}
+
 // Tests
 test "sumGrowWeights returns error for negative weight" {
     const items = [_]Item{
