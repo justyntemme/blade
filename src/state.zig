@@ -9,6 +9,7 @@ pub const AppState = struct {
     scroll_offset: usize = 0,
     // procs: std.AutoHashMap(proc.pid_t, proc.Proc),
     current_Batch: ?channel.Batch = null,
+    mode: enum { normal, search } = .normal,
     view: std.ArrayList(*proc.Proc) = .{},
     pub fn rebuildView(self: *AppState) void {
         self.view.clearRetainingCapacity();

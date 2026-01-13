@@ -94,10 +94,14 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
         buf.setString(path_col.x, y, path, style);
         y += 1;
     }
-
-    buf.setString(footer_rect.x, footer_rect.y, "/ to search search, q to quit, m for menu // <^v>\n", _Style{
-        .fg = .gray,
-    });
-
+    if (app.mode == .search) {
+        buf.setString(footer_rect.x, footer_rect.y, "/searchtext_", _Style{
+            .fg = .gray,
+        });
+    } else {
+        buf.setString(footer_rect.x, footer_rect.y, "/ to search search, q to quit, m for menu // <^v>\n", _Style{
+            .fg = .gray,
+        });
+    }
     block.render(area, buf);
 }

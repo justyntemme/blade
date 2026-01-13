@@ -6,9 +6,10 @@ pub fn handleEvent(app: *state.AppState, event: anytype) void {
             switch (key.code) {
                 .char => |c| {
                     switch (c) {
-                        'q' => app.running = false,
-                        'k' => app.up(),
-                        'j' => app.down(),
+                        '/' => app.mode = .search,
+                        'q' => if (app.mode != .search ) { .app.running = false; } else {},
+                        'k' => if (app.mode != .search ) { .app.up(); } else {},
+                        'j' => if (app.mode != .search ) { .app.down(); } else {},
                         'u' => {
                             for (0..5) |_| app.up();
                         },
@@ -18,7 +19,8 @@ pub fn handleEvent(app: *state.AppState, event: anytype) void {
                         else => {},
                     }
                 },
-                .esc => app.running = false,
+                //If in search then reset to normal mode, if in normal mode exit program 
+                .esc => if (app.mode != .search) {app.running = false;} else {app.mode = .normal },
                 .up => {
                     app.up();
                 },
