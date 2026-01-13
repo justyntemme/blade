@@ -3,6 +3,7 @@ const std = @import("std");
 const LayoutError = error{
     InvalidPercent,
     NegativeGrow,
+    OutOfMemory,
 };
 pub const Direction = enum {
     row,
@@ -111,35 +112,39 @@ pub fn calculate(
         .rects = std.StringHashMap(Rect).init(allocator),
         .allocator = allocator,
     };
+    const is_row = container.direction == .row;
+    // determine sizes based on direction
+    const main_size = if (is_row) available.width else available.height;
+    const cross_size = if (is_row) available.height else available.width;
     // pass 1 measure
     const fixed_total = sumFixedSizes(container.items);
-    const percent_total = try sumPercentSizes(container.items, available.width);
+    const percent_total = try sumPercentSizes(container.items, main_size);
     const total_weight = try sumGrowWeights(container.items);
-    const remaining = available.width -| fixed_total -| percent_total;
+
+    const remaining = main_size -| fixed_total -| percent_total;
 
     //pass 2 position
-    var x_position = available.x;
-
+    var main_pos: u16 = if (is_row) available.x else available.y;
     for (container.items) |item| {
-        const item_width: u16 = switch (item.sizing) {
+        const item_main_size: u16 = switch (item.sizing) {
             .fixed => |size| size,
-            .percent => |p| @intFromFloat(p * @as(f32, @floatFromInt(available.width))),
+            .percent => |p| @intFromFloat(p * @as(f32, @floatFromInt(main_size))),
             .grow => |weight| calculateGrowSize(weight, total_weight, remaining),
         };
 
         //create Rect for item
         const item_rect = Rect{
-            .x = x_position,
-            .y = available.y,
-            .width = item_width,
-            .height = available.height,
+            .x = if (is_row) main_pos else available.x,
+            .y = if (is_row) available.y else main_pos,
+            .width = if (is_row) item_main_size else cross_size,
+            .height = if (is_row) available.height else item_main_size,
         };
 
         //store result
         try result.rects.put(item.id, item_rect);
 
         //move to next item
-        x_position += item_width;
+        main_pos += item_main_size;
     }
 
     return result;
@@ -212,4 +217,61 @@ test "calculateGrowSize distributes proportionally" {
 test "calculateGrowSize returns zero when total weight is zero" {
     const size = calculateGrowSize(1.0, 0, 100);
     try std.testing.expectEqual(@as(u16, 0), size);
+}
+
+test "calculate positions row items correctly" {
+    const container = Container.row(&[_]Item{
+        .{ .id = "fixed", .sizing = .{ .fixed = 20 } },
+        .{ .id = "grow1", .sizing = .{ .grow = 1.0 } },
+        .{ .id = "grow2", .sizing = .{ .grow = 2.0 } },
+    });
+
+    const available = Rect{ .x = 0, .y = 0, .width = 100, .height = 30 };
+
+    var layout = try calculate(std.testing.allocator, container, available);
+    defer layout.deinit();
+
+    // Fixed item: starts at 0, width 20
+    const fixed_rect = layout.get("fixed").?;
+    try std.testing.expectEqual(@as(u16, 0), fixed_rect.x);
+    try std.testing.expectEqual(@as(u16, 20), fixed_rect.width);
+    try std.testing.expectEqual(@as(u16, 30), fixed_rect.height);
+
+    // Grow items split remaining 80 cells (1:2 ratio = 26:53)
+    const grow1_rect = layout.get("grow1").?;
+    try std.testing.expectEqual(@as(u16, 20), grow1_rect.x); // starts after fixed
+    try std.testing.expectEqual(@as(u16, 26), grow1_rect.width); // 80 * 1/3
+
+    const grow2_rect = layout.get("grow2").?;
+    try std.testing.expectEqual(@as(u16, 46), grow2_rect.x); // starts after grow1
+    try std.testing.expectEqual(@as(u16, 53), grow2_rect.width); // 80 * 2/3
+}
+
+test "calculate positions column items correctly" {
+    const container = Container.column(&[_]Item{
+        .{ .id = "header", .sizing = .{ .fixed = 5 } },
+        .{ .id = "content", .sizing = .{ .grow = 1.0 } },
+        .{ .id = "footer", .sizing = .{ .fixed = 3 } },
+    });
+
+    const available = Rect{ .x = 0, .y = 0, .width = 80, .height = 24 };
+
+    var layout = try calculate(std.testing.allocator, container, available);
+    defer layout.deinit();
+
+    // Header: starts at y=0, height=5, full width
+    const header = layout.get("header").?;
+    try std.testing.expectEqual(@as(u16, 0), header.y);
+    try std.testing.expectEqual(@as(u16, 5), header.height);
+    try std.testing.expectEqual(@as(u16, 80), header.width);
+
+    // Content: starts at y=5, fills remaining (24-5-3=16)
+    const content = layout.get("content").?;
+    try std.testing.expectEqual(@as(u16, 5), content.y);
+    try std.testing.expectEqual(@as(u16, 16), content.height);
+
+    // Footer: starts at y=21, height=3
+    const footer = layout.get("footer").?;
+    try std.testing.expectEqual(@as(u16, 21), footer.y);
+    try std.testing.expectEqual(@as(u16, 3), footer.height);
 }
