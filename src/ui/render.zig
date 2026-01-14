@@ -23,7 +23,7 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
     const app = draw_ctx.state;
     const area = buf.getArea();
 
-    var calculated = layout.calculate(
+    var calculated = try layout.calculate(
         draw_ctx.allocator,
         app_layout,
         layout.Rect{
@@ -32,11 +32,17 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
             .width = area.width -| 2,
             .height = area.height -| 2,
         },
-    ) catch return;
+    ); // ) catch return;
     defer calculated.deinit();
 
-    const header_rect = calculated.get("header") orelse return;
-    const list_rect = calculated.get("process_list") orelse return;
+    const header_rect = calculated.get("header") orelse {
+        buf.setString(0, 0, "Missing layout ID: header", _Style{ .fg = .red });
+        return;
+    };
+    const list_rect = calculated.get("process_list") orelse {
+        buf.setString(0, 0, "Missing layout ID: process_list", _Style{ .fg = .red });
+        return;
+    };
     var columns = layout.calculate(
         draw_ctx.allocator,
         column_layout,
@@ -50,11 +56,23 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
 
     defer columns.deinit();
 
-    const pid_col = columns.get("pid") orelse return;
-    const name_col = columns.get("name") orelse return;
-    const path_col = columns.get("path") orelse return;
+    const pid_col = columns.get("pid") orelse return {
+        buf.setString(0, 0, "Missing PID", _Style{ .fg = .red });
+        return;
+    };
+    const name_col = columns.get("name") orelse {
+        buf.setString(0, 0, "Missing Name", _Style{ .fg = .red });
+        return;
+    };
+    const path_col = columns.get("path") orelse {
+        buf.setString(0, 0, "Missing path", _Style{ .fg = .red });
+        return;
+    };
 
-    const footer_rect = calculated.get("footer_bar") orelse return;
+    const footer_rect = calculated.get("footer_bar") orelse {
+        buf.setString(0, 0, "footer_bar", _Style{ .fg = .red });
+        return;
+    };
 
     const block = tui.widgets.Block{
         .title = "Processes",
@@ -85,7 +103,7 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
         else
             _Style{ .fg = .white };
         var pid_buf: [8]u8 = undefined;
-        const pid_str = std.fmt.bufPrint(&pid_buf, "{d:<7}", .{p.pid}) catch "???";
+        const pid_str = std.fmt.bufPrint(&pid_buf, "{d:<7}", .{p.pid}) catch "err/???\\err";
         const name = std.mem.sliceTo(&p.s_name, 0);
         const path = std.mem.sliceTo(&p.path, 0);
 
