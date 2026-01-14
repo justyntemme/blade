@@ -113,13 +113,58 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
         y += 1;
     }
     if (app.mode == .search) {
-        buf.setString(footer_rect.x, footer_rect.y, "/searchtext_", _Style{
-            .fg = .gray,
-        });
+        renderSearchInput(buf, footer_rect, app);
     } else {
-        buf.setString(footer_rect.x, footer_rect.y, "/ to search search, q to quit, m for menu // <^v>\n", _Style{
-            .fg = .gray,
-        });
+        // });
+        renderHelpBar(buf, footer_rect);
     }
     block.render(area, buf);
+}
+
+fn renderHelpBar(buf: *tui.render.Buffer, rect: layout.Rect) void {
+
+    // DEBUG: see actual width
+    // std.debug.print("rect.width = {}, rect.x = {}\n", .{ rect.width, rect.x });
+    std.debug.print("", .{});
+    var line_buf: [512]u8 = [_]u8{' '} ** 512;
+    const help_text = "/ to search search, q to quit, m for menu // <^v>";
+    @memcpy(line_buf[0..help_text.len], help_text);
+
+    const width: usize = @min(rect.width, line_buf.len);
+    buf.setString(rect.x, rect.y, line_buf[0..width], _Style{ .fg = .gray });
+}
+
+fn renderSearchInput(
+    buf: *tui.render.Buffer,
+    rect: layout.Rect,
+    app: *const state.AppState,
+) void {
+    var line_buf: [512]u8 = [_]u8{' '} ** 512;
+
+    const prompt_style = _Style{ .fg = .yellow };
+    const text_style = _Style{ .fg = .white };
+    const cursor_style = _Style{
+        .fg = .yellow,
+        .modifier = _Modifier{ .slow_blink = true },
+    };
+
+    // Build the line
+    line_buf[0] = '/';
+
+    const query = app.searchSlice();
+    if (query.len > 0) {
+        // buf.setString(rect.x + 1, rect.y, query, text_style);
+        @memcpy(line_buf[1 .. 1 + query.len], query);
+    }
+    line_buf[1 + query.len] = '_';
+
+    //render full width in one call
+    const width: usize = @min(rect.width, line_buf.len);
+
+    buf.setString(rect.x, rect.y, line_buf[0..width], text_style);
+
+    buf.setString(rect.x, rect.y, "/", prompt_style);
+
+    const cursor_x: u16 = rect.x + 1 + @as(u16, @intCast(query.len));
+    buf.setString(cursor_x, rect.y, "_", cursor_style);
 }
