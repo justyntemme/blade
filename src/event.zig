@@ -1,6 +1,6 @@
 const state = @import("state.zig");
 
-pub fn handleEvent(app: *state.AppState, event: anytype) void {
+pub fn handleEvent(app: *state.AppState, event: anytype) !void {
     switch (event) {
         .key => |key| {
             switch (key.code) {
@@ -37,10 +37,15 @@ pub fn handleEvent(app: *state.AppState, event: anytype) void {
                 .down => {
                     app.down();
                 },
-
                 else => {},
             }
         },
+        .resize => |size| {
+            // app.rebuildView();
+            try app.view.resize(app.allocator, size.width);
+            // size.width, size.height
+        },
+
         else => {},
     }
 }

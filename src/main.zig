@@ -18,6 +18,7 @@ pub fn main() !void {
     // try tui.backend.NativeBackend.init(allocator);
     var backend = try tui.backend.AnsiBackend.init(allocator);
     defer backend.deinit();
+
     // // Initialize terminal
     var terminal = try tui.terminal.Terminal.init(allocator, backend.interface());
     defer terminal.deinit();
@@ -54,7 +55,7 @@ pub fn main() !void {
         const e = try backend.interface().pollEvent(100);
 
         // Handle input
-        event.handleEvent(&app, e);
+        try event.handleEvent(&app, e);
 
         const ctx = state.DrawContext{ .state = &app, .allocator = allocator };
 

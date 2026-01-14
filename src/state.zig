@@ -11,13 +11,13 @@ pub const AppState = struct {
     current_Batch: ?channel.Batch = null,
     mode: enum { normal, search } = .normal,
     view: std.ArrayList(*proc.Proc) = .{},
-    pub fn rebuildView(self: *AppState) void {
+    pub fn rebuildView(self: *AppState) !void {
         self.view.clearRetainingCapacity();
 
         if (self.current_Batch) |*batch| {
             var iter = batch.map.iterator();
             while (iter.next()) |entry| {
-                self.view.append(self.allocator, entry.value_ptr.*) catch {};
+                try self.view.append(self.allocator, entry.value_ptr.*);
             }
         }
     }
@@ -54,7 +54,9 @@ pub const AppState = struct {
         }
         self.current_Batch = new_Batch;
 
-        self.rebuildView();
+        self.rebuildView() catch |err| {
+            std.debug.print("rebuildView failed :{}\n", .{err});
+        };
     }
 };
 
