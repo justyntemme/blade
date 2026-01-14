@@ -50,11 +50,12 @@ fn handleSearchMode(app: *state.AppState, key: anytype) void {
             app.searchBackspace();
         },
         .enter => {
-            // submit search and return to normal mode
+            app.rebuildView() catch {}; //TODO handle error
             app.mode = .normal;
         },
         .esc => {
             app.searchClear();
+            app.rebuildView() catch {}; //TODO handle error
             app.mode = .normal;
         },
         // allow navigation while in search mode

@@ -122,9 +122,6 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
 }
 
 fn renderHelpBar(buf: *tui.render.Buffer, rect: layout.Rect) void {
-
-    // DEBUG: see actual width
-    // std.debug.print("rect.width = {}, rect.x = {}\n", .{ rect.width, rect.x });
     std.debug.print("", .{});
     var line_buf: [512]u8 = [_]u8{' '} ** 512;
     const help_text = "/ to search search, q to quit, m for menu // <^v>";
@@ -147,7 +144,9 @@ fn renderSearchInput(
         .fg = .yellow,
         .modifier = _Modifier{ .slow_blink = true },
     };
-
+    //TODO move line output down one when text is beyond terminal length so that it shows the last text typed
+    // examples. search string = helloworld but terminal cal only fit 5 char
+    // [oworld]
     // Build the line
     line_buf[0] = '/';
 

@@ -16,10 +16,30 @@ pub const AppState = struct {
     pub fn rebuildView(self: *AppState) !void {
         self.view.clearRetainingCapacity();
 
+        self.selected_item = 0;
+        self.scroll_offset = 0;
+
+        // if (self.current_Batch) |*batch| {
+        //     var iter = batch.map.iterator();
+        //     while (iter.next()) |entry| {
+        //         try self.view.append(self.allocator, entry.value_ptr.*);
+        //     }
+        // }
+
         if (self.current_Batch) |*batch| {
+            const search = self.searchSlice();
+
             var iter = batch.map.iterator();
             while (iter.next()) |entry| {
-                try self.view.append(self.allocator, entry.value_ptr.*);
+                const proc_ptr = entry.value_ptr.*;
+
+                if (search.len == 0) {
+                    try self.view.append(self.allocator, proc_ptr);
+                } else {
+                    if (self.matchesSearch(proc_ptr, search)) {
+                        try self.view.append(self.allocator, proc_ptr);
+                    }
+                }
             }
         }
     }
@@ -77,6 +97,32 @@ pub const AppState = struct {
         self.rebuildView() catch |err| {
             std.debug.print("rebuildView failed :{}\n", .{err});
         };
+    }
+
+    fn matchesSearch(self: *const AppState, proc_ptr: *proc.Proc, search: []const u8) bool {
+        _ = self; //unused for now but keeps method on appstate for future changes
+        //Buffers
+        var search_lower_buf: [256]u8 = undefined;
+        var name_lower_buf: [256]u8 = undefined;
+        var path_lower_buf: [4096]u8 = undefined;
+
+        const search_lower = std.ascii.lowerString(&search_lower_buf, search);
+
+        const name_slice = std.mem.sliceTo(&proc_ptr.s_name, 0);
+        const name_lower = std.ascii.lowerString(&name_lower_buf, name_slice);
+
+        if (std.mem.indexOf(u8, name_lower, search_lower) != null) {
+            return true;
+        }
+
+        const path_slice = std.mem.sliceTo(&proc_ptr.path, 0);
+        const path_lower = std.ascii.lowerString(&path_lower_buf, path_slice);
+
+        if (std.mem.indexOf(u8, path_lower, search_lower) != null) {
+            return true;
+        }
+
+        return false;
     }
 };
 
