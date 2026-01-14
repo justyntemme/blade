@@ -10,6 +10,8 @@ pub const AppState = struct {
     // procs: std.AutoHashMap(proc.pid_t, proc.Proc),
     current_Batch: ?channel.Batch = null,
     mode: enum { normal, search } = .normal,
+    search_buf: [256]u8 = undefined,
+    search_len: usize = 0,
     view: std.ArrayList(*proc.Proc) = .{},
     pub fn rebuildView(self: *AppState) !void {
         self.view.clearRetainingCapacity();
@@ -31,6 +33,24 @@ pub const AppState = struct {
         if (self.selected_item > 0) {
             self.selected_item -= 1;
         }
+    }
+    pub fn searchSlice(self: *const AppState) []const u8 {
+        return self.search_buf[0..self.search_len];
+    }
+    pub fn searchAppend(self: *AppState, c: u8) void {
+        if (self.search_len < self.search_buf.len - 1) {
+            self.search_buf[self.search_len] = c;
+            self.search_len += 1;
+        }
+    }
+    pub fn searchBackspace(self: *AppState) void {
+        if (self.search_len > 0) {
+            self.search_len -= 1;
+        }
+    }
+
+    pub fn searchClear(self: *AppState) void {
+        self.search_len = 0;
     }
 
     pub fn init(allocator: std.mem.Allocator) AppState {
