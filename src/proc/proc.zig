@@ -9,6 +9,9 @@ pub const ProcError = error{
     FailedToGetProcessCount,
     FailedToGetProcessList,
     OutOfMemory,
+    PermissionDenied,
+    ProcessNotFound,
+    Unexpected,
 };
 pub fn getProcList() ProcError!std.AutoHashMap(pid_t, Proc) {
     // std.debug.print("Entrypoint -> getProcList\n", .{});
@@ -81,4 +84,18 @@ pub fn getProcList() ProcError!std.AutoHashMap(pid_t, Proc) {
     } // for each PID
 
     return proc_map;
+}
+pub fn killProcById(pid: pid_t, force: bool) ProcError!void {
+    const signal: i32 = if (force) 9 else 15;
+    // const signal: std.posix.SIG = if (force) std.posix.SIG.KILL else std.posix.SIG.TERM;
+
+    const result = std.c.kill(pid, signal);
+    if (result == -1) {
+        const err = std.c._errno().*;
+        return switch (err) {
+            1 => ProcError.PermissionDenied,
+            3 => ProcError.ProcessNotFound,
+            else => ProcError.Unexpected,
+        };
+    }
 }

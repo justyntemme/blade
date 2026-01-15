@@ -122,9 +122,9 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
 }
 
 fn renderHelpBar(buf: *tui.render.Buffer, rect: layout.Rect) void {
-    std.debug.print("", .{});
+    const help_text = "/ to search search, q to quit, x to kill process, c to clear search, arrow keys to navigate";
+    // std.debug.print("", .{});
     var line_buf: [512]u8 = [_]u8{' '} ** 512;
-    const help_text = "/ to search search, q to quit, m for menu // <^v>";
     @memcpy(line_buf[0..help_text.len], help_text);
 
     const width: usize = @min(rect.width, line_buf.len);
