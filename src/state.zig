@@ -10,7 +10,7 @@ pub const AppState = struct {
     // procs: std.AutoHashMap(proc.pid_t, proc.Proc),
     current_Batch: ?channel.Batch = null,
     mode: enum { normal, search } = .normal,
-    search_buf: [256]u8 = undefined,
+    search_buf: [256]u8 = [_]u8{0} ** 256,
     search_len: usize = 0,
     view: std.ArrayList(*proc.Proc) = .{},
     pub fn rebuildView(self: *AppState) !void {

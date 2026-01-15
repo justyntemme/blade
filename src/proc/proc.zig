@@ -5,11 +5,12 @@ const c = @cImport({
 });
 pub const pid_t = c.pid_t;
 pub const Proc = struct { pid: pid_t, s_name: [256:0]u8, path: [4096]u8 };
-const ProcError = error{
+pub const ProcError = error{
     FailedToGetProcessCount,
     FailedToGetProcessList,
+    OutOfMemory,
 };
-pub fn getProcList() !std.AutoHashMap(pid_t, Proc) {
+pub fn getProcList() ProcError!std.AutoHashMap(pid_t, Proc) {
     // std.debug.print("Entrypoint -> getProcList\n", .{});
     const allocator = std.heap.page_allocator;
 
@@ -46,7 +47,7 @@ pub fn getProcList() !std.AutoHashMap(pid_t, Proc) {
     // Get info for each process
     for (pids[0..actual_count]) |pid| {
         if (pid == 0) continue;
-
+        // SAFETY: proc_pidinfo() fully initializes this struct; we only read fields if info_size > 0
         var proc_info: c.proc_bsdinfo = undefined;
         const info_size = c.proc_pidinfo(
             pid,
@@ -55,11 +56,13 @@ pub fn getProcList() !std.AutoHashMap(pid_t, Proc) {
             &proc_info,
             @sizeOf(c.proc_bsdinfo),
         );
+        // SAFETY: proc_pidpath() writes to this buffer; we only read path_len bytes
         var path_buf: [4096]u8 = undefined;
         const path_len = c.proc_pidpath(pid, &path_buf, path_buf.len);
 
         if (info_size > 0) {
             const c_name = std.mem.sliceTo(&proc_info.pbi_name, 0);
+            // SAFETY: s_name and path are fully written via @memcpy before struct is used
             var proc = Proc{
                 .pid = pid,
                 .s_name = undefined,

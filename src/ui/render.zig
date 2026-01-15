@@ -3,7 +3,7 @@ const tui = @import("zigtui");
 const state = @import("../state.zig");
 // const proc = @import("../proc/proc.zig");
 const layout = @import("layout.zig");
-const _Rect = tui.render.Rect;
+
 const _Style = tui.style.Style;
 const _Modifier = tui.style.Modifier;
 
