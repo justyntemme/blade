@@ -2,17 +2,57 @@ const std = @import("std");
 const proc = @import("proc/proc.zig");
 const channel = @import("thread/channel.zig");
 
+pub const ToastLevel = enum { info, success, warning, err };
+pub const Toast = struct {
+    message_buf: [128]u8 = [_]u8{0} ** 128,
+    message_len: usize = 0,
+    level: ToastLevel = .info,
+    expired_at: i6 = 0,
+
+    pub fn getMessage(self: *const Toast) []const u8 {
+        return self.message_buf[0..self.message_len];
+    }
+};
+
 pub const AppState = struct {
     running: bool = true,
     allocator: std.mem.Allocator,
     selected_item: usize = 0,
     scroll_offset: usize = 0,
+    active_toast: ?Toast = null,
     // procs: std.AutoHashMap(proc.pid_t, proc.Proc),
     current_Batch: ?channel.Batch = null,
     mode: enum { normal, search } = .normal,
     search_buf: [256]u8 = [_]u8{0} ** 256,
     search_len: usize = 0,
     view: std.ArrayList(*proc.Proc) = .{},
+    pub fn showToast(self: *AppState, message: []const u8, level: ToastLevel) void {
+        var toast = Toast{
+            .level = level,
+        };
+        const len = @min(message.len, toast.message_buf.len);
+        @memcpy(toast.message_buf[0..len], message[0..len]);
+
+        toast.message_len = len;
+
+        self.active_toast = toast;
+    }
+    pub fn showToastFmt(self: *AppState, comptime fmt: []const u8, args: anytype, level: ToastLevel) void {
+        var toast = Toast{
+            .level = level,
+        };
+        if (std.fmt.bufPrint(&toast.message_buf, fmt, args)) |result| {
+            toast.message_len = result.len;
+        } else |_| {
+            const fallback = "Message too long";
+            @memcpy(toast.message_buf[0..fallback.len], fallback);
+            toast.message_len = fallback.len;
+        }
+        self.active_toast = toast;
+
+        self.active_toast = toast;
+    }
+
     pub fn rebuildView(self: *AppState) !void {
         self.view.clearRetainingCapacity();
 

@@ -167,3 +167,41 @@ fn renderSearchInput(
     const cursor_x: u16 = rect.x + 1 + @as(u16, @intCast(query.len));
     buf.setString(cursor_x, rect.y, "_", cursor_style);
 }
+
+fn renderToast(buf: *tui.render.Buffer, toast: *const state.Toast, area: tui.render.Rect) void {
+    const message = toast.getMessage();
+    if (message.len == 0) return;
+
+    const style: _Style = switch (toast.level) {
+        .info => .{ .fg = .white, .bg = .gray },
+        .success => .{ .fg = .white, .bg = .green },
+        .warning => .{ .fg = .black, .bg = .yellow },
+        .err => .{ .fg = .white, .bg = .red },
+    };
+
+    const dismiss_text = "Press any key to dismiss";
+
+    //width calcul
+    const msg_len: u16 = @intCast(message.len);
+    const dismiss_len: u16 = @intCast(dismiss_text.len);
+    const box_width: u16 = @max(msg_len, dismiss_len) + 4;
+
+    //center horizontally
+    const toast_x = area.x + (area.width -| box_width) / 2;
+
+    //center vert
+    const toast_y = area.y + area.height / 2;
+
+    var msg_buf: [136]u8 = [_]u8{' '} ** 136;
+    const msg_start = (box_width - msg_len) / 2;
+    @memcpy(msg_buf[msg_start..][0..message.len], message);
+
+    // Build padded dismiss line
+    var dismiss_buf: [136]u8 = [_]u8{' '} ** 136;
+    const dismiss_start = (box_width - dismiss_len) / 2;
+    @memcpy(dismiss_buf[dismiss_start..][0..dismiss_text.len], dismiss_text);
+
+    buf.setString(toast_x, toast_y - 1, msg_buf[0..box_width], style);
+    buf.setString(toast_x, toast_y, msg_buf[0..box_width], style);
+    buf.setString(toast_x, toast_y + 1, dismiss_buf[0..box_width], style);
+}

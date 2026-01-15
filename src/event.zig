@@ -39,23 +39,33 @@ fn handleNormalMode(app: *state.AppState, key: anytype) void {
                 'd' => for (0..5) |_| app.down(),
                 'x' => {
                     //graceful kill SIGTERM
-                    const selected_proc = app.view.items[app.selected_item];
-                    proc.killProcById(selected_proc.pid, false) catch |err| {
-                        std.log.err("Failed to kill process {}: {}", .{ selected_proc.pid, err });
-                    };
+                    if (app.view.items.len > 0) { // i think we have issues here
+                        const selected_proc = app.view.items[app.selected_item];
+                        const pid = selected_proc.pid;
+
+                        proc.killProcById(pid, false) catch |err| {
+                            app.showToastFmt("Error on killProcById {}", .{err}, .err);
+                        };
+                    } else {
+                        app.showToast("Error: No pid found for object", .err);
+                    }
+                    // app.showToast("Error on killerr, .err);
+                    // std.log.err("Failed to kill process {}: {}", .{ selected_proc.pid, err });
                     app.rebuildView() catch |err| {
                         std.log.err("rebuildView failed on enter {}", .{err});
                     };
                 },
                 'X' => {
-                    //graceful kill SIGTERM
-                    const selected_proc = app.view.items[app.selected_item];
-                    proc.killProcById(selected_proc.pid, true) catch |err| {
-                        std.log.err("Failed to kill process {}: {}", .{ selected_proc.pid, err });
-                    };
-                    app.rebuildView() catch |err| {
-                        std.log.err("rebuildView failed on enter {}", .{err});
-                    };
+                    if (app.view.items.len > 0) { // i think we have issues here
+                        //graceful kill SIGTERM
+                        const selected_proc = app.view.items[app.selected_item];
+                        proc.killProcById(selected_proc.pid, true) catch |err| {
+                            std.log.err("Failed to kill process {}: {}", .{ selected_proc.pid, err });
+                        };
+                        app.rebuildView() catch |err| {
+                            std.log.err("rebuildView failed on enter {}", .{err});
+                        };
+                    }
                 },
                 else => {},
             }

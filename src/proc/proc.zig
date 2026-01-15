@@ -86,9 +86,7 @@ pub fn getProcList() ProcError!std.AutoHashMap(pid_t, Proc) {
     return proc_map;
 }
 pub fn killProcById(pid: pid_t, force: bool) ProcError!void {
-    const signal: i32 = if (force) 9 else 15;
-    // const signal: std.posix.SIG = if (force) std.posix.SIG.KILL else std.posix.SIG.TERM;
-
+    const signal: i32 = if (force) 9 else 15; // KILL if 9 TERM if 15
     const result = std.c.kill(pid, signal);
     if (result == -1) {
         const err = std.c._errno().*;
