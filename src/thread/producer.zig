@@ -23,7 +23,9 @@ pub fn run(args: ThreadArgs) void {
         //Sleep w interupt
         args.mutex.lock();
         if (args.running.load(.acquire)) {
-            args.condition.timedWait(args.mutex, poll_interval_ms) catch {};
+            args.condition.timedWait(args.mutex, poll_interval_ms) catch |err| switch (err) {
+                error.Timeout => {},
+            };
         }
         args.mutex.unlock();
     }

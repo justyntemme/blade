@@ -1,3 +1,4 @@
+const std = @import("std");
 const state = @import("state.zig");
 
 pub fn handleEvent(app: *state.AppState, event: anytype) !void {
@@ -50,12 +51,16 @@ fn handleSearchMode(app: *state.AppState, key: anytype) void {
             app.searchBackspace();
         },
         .enter => {
-            app.rebuildView() catch {}; //TODO handle error
+            app.rebuildView() catch |err| {
+                std.log.err("rebuildView failed on enter {}", .{err});
+            };
             app.mode = .normal;
         },
         .esc => {
             app.searchClear();
-            app.rebuildView() catch {}; //TODO handle error
+            app.rebuildView() catch |err| {
+                std.log.err("rebuildView failed on escape {}", .{err});
+            };
             app.mode = .normal;
         },
         // allow navigation while in search mode
