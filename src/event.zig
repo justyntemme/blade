@@ -40,8 +40,8 @@ fn handleNormalMode(app: *state.AppState, key: anytype) void {
                 'x' => {
                     //graceful kill SIGTERM
                     if (app.view.items.len > 0) { // i think we have issues here
-                        const selected_proc = app.view.items[app.selected_item];
-                        const pid = selected_proc.pid;
+                        const pv = app.view.items[app.selected_item];
+                        const pid = pv.proc.pid;
 
                         proc.killProcById(pid, false) catch |err| {
                             app.showToastFmt("Error on killProcById {}", .{err}, .err);
@@ -58,9 +58,9 @@ fn handleNormalMode(app: *state.AppState, key: anytype) void {
                 'X' => {
                     if (app.view.items.len > 0) { // i think we have issues here
                         //graceful kill SIGTERM
-                        const selected_proc = app.view.items[app.selected_item];
-                        proc.killProcById(selected_proc.pid, true) catch |err| {
-                            std.log.err("Failed to kill process {}: {}", .{ selected_proc.pid, err });
+                        const pv = app.view.items[app.selected_item];
+                        proc.killProcById(pv.proc.pid, true) catch |err| {
+                            std.log.err("Failed to kill process {}: {}", .{ pv.proc.pid, err });
                         };
                         app.rebuildView() catch |err| {
                             std.log.err("rebuildView failed on enter {}", .{err});

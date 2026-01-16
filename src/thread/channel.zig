@@ -7,6 +7,7 @@ const proc = @import("../proc/proc.zig");
 pub const Batch = struct {
     arena: std.heap.ArenaAllocator,
     map: std.AutoHashMap(proc.pid_t, *proc.Proc),
+    timestamp_ns: i128 = 0,
 
     pub fn deinit(self: *Batch) void {
         self.map.deinit();

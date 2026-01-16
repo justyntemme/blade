@@ -2,6 +2,11 @@ const std = @import("std");
 const proc = @import("proc/proc.zig");
 const channel = @import("thread/channel.zig");
 
+pub const ProcView = struct {
+    proc: *proc.Proc,
+    cpu_percent: f32 = 0,
+};
+
 pub const ToastLevel = enum { info, success, warning, err };
 pub const Toast = struct {
     message_buf: [128]u8 = [_]u8{0} ** 128,
@@ -25,7 +30,8 @@ pub const AppState = struct {
     mode: enum { normal, search } = .normal,
     search_buf: [256]u8 = [_]u8{0} ** 256,
     search_len: usize = 0,
-    view: std.ArrayList(*proc.Proc) = .{},
+    view: std.ArrayList(ProcView) = .{},
+    previous_Batch: ?channel.Batch = null,
     pub fn showToast(self: *AppState, message: []const u8, level: ToastLevel) void {
         var toast = Toast{
             .level = level,
@@ -55,29 +61,46 @@ pub const AppState = struct {
 
     pub fn rebuildView(self: *AppState) !void {
         self.view.clearRetainingCapacity();
-
         self.selected_item = 0;
         self.scroll_offset = 0;
 
-        // if (self.current_Batch) |*batch| {
-        //     var iter = batch.map.iterator();
-        //     while (iter.next()) |entry| {
-        //         try self.view.append(self.allocator, entry.value_ptr.*);
-        //     }
-        // }
-
         if (self.current_Batch) |*batch| {
             const search = self.searchSlice();
+
+            //calc time delta for cpu%
+            const time_delta: i128 = if (self.previous_Batch) |*prev|
+                batch.timestamp_ns - prev.timestamp_ns
+            else
+                0;
 
             var iter = batch.map.iterator();
             while (iter.next()) |entry| {
                 const proc_ptr = entry.value_ptr.*;
 
+                // compute cpu%
+                var cpu_percent: f32 = 0;
+                if (self.previous_Batch) |*prev| {
+                    if (prev.map.get(proc_ptr.pid)) |old_proc| {
+                        if (time_delta > 0) {
+                            const new_total = proc_ptr.total_user + proc_ptr.total_system;
+                            const old_total = old_proc.total_user + old_proc.total_system;
+                            const cpu_delta = new_total -| old_total;
+                            cpu_percent = @as(f32, @floatFromInt(cpu_delta)) / @as(f32, @floatFromInt(time_delta)) * 100.0;
+                        }
+                    }
+                }
+
                 if (search.len == 0) {
-                    try self.view.append(self.allocator, proc_ptr);
+                    try self.view.append(self.allocator, .{
+                        .proc = proc_ptr,
+                        .cpu_percent = cpu_percent,
+                    });
                 } else {
                     if (self.matchesSearch(proc_ptr, search)) {
-                        try self.view.append(self.allocator, proc_ptr);
+                        try self.view.append(self.allocator, .{
+                            .proc = proc_ptr,
+                            .cpu_percent = cpu_percent,
+                        });
                     }
                 }
             }
@@ -116,6 +139,7 @@ pub const AppState = struct {
     pub fn init(allocator: std.mem.Allocator) AppState {
         return .{
             .allocator = allocator,
+            // .view = std.ArrayList(ProcView).init(allocator),
             // .procs = std.AutoHashMap(proc.pid_t, proc.Proc).init(allocator),
         };
     }
@@ -125,13 +149,17 @@ pub const AppState = struct {
         if (self.current_Batch) |*batch| {
             batch.deinit();
         }
+        if (self.previous_Batch) |*batch| {
+            batch.deinit();
+        }
     }
     pub fn recieveBatch(self: *AppState, new_Batch: channel.Batch) void {
-        // Free old batch -- will use to track
-        // CPU percentage later but for now just free
-        if (self.current_Batch) |*old| {
+        if (self.previous_Batch) |*old| {
             old.deinit();
         }
+        self.previous_Batch = self.current_Batch;
+        // Free old batch -- will use to track
+        // CPU percentage later but for now just free
         self.current_Batch = new_Batch;
 
         self.rebuildView() catch |err| {

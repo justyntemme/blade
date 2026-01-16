@@ -4,7 +4,14 @@ const c = @cImport({
     @cInclude("sys/proc_info.h");
 });
 pub const pid_t = c.pid_t;
-pub const Proc = struct { pid: pid_t, s_name: [256:0]u8, path: [4096]u8 };
+pub const Proc = struct {
+    pid: pid_t,
+    s_name: [256:0]u8,
+    path: [4096]u8,
+    mem_rss: u64 = 0,
+    total_user: u64 = 0,
+    total_system: u64 = 0,
+};
 pub const ProcError = error{
     FailedToGetProcessCount,
     FailedToGetProcessList,
@@ -52,12 +59,22 @@ pub fn getProcList() ProcError!std.AutoHashMap(pid_t, Proc) {
         if (pid == 0) continue;
         // SAFETY: proc_pidinfo() fully initializes this struct; we only read fields if info_size > 0
         var proc_info: c.proc_bsdinfo = undefined;
+        var task_info: c.proc_taskinfo = undefined;
+
         const info_size = c.proc_pidinfo(
             pid,
             c.PROC_PIDTBSDINFO,
             0,
             &proc_info,
             @sizeOf(c.proc_bsdinfo),
+        );
+
+        const task_size = c.proc_pidinfo(
+            pid,
+            c.PROC_PIDTASKINFO,
+            9,
+            &task_info,
+            @sizeOf(c.proc_taskinfo),
         );
         // SAFETY: proc_pidpath() writes to this buffer; we only read path_len bytes
         var path_buf: [4096]u8 = undefined;
@@ -70,6 +87,9 @@ pub fn getProcList() ProcError!std.AutoHashMap(pid_t, Proc) {
                 .pid = pid,
                 .s_name = undefined,
                 .path = undefined,
+                .mem_rss = if (task_size > 0) task_info.pti_resident_size else 0,
+                .total_user = if (task_size > 0) task_info.pti_total_user else 0,
+                .total_system = if (task_size > 0) task_info.pti_total_system else 0,
             };
             @memcpy(proc.s_name[0..c_name.len], c_name);
             proc.s_name[c_name.len] = 0;

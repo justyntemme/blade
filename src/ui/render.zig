@@ -16,6 +16,8 @@ const app_layout = layout.Container.column(&[_]layout.Item{
 const column_layout = layout.Container.row(&[_]layout.Item{
     .{ .id = "pid", .sizing = .{ .fixed = 8 } },
     .{ .id = "name", .sizing = .{ .grow = 1.0 } },
+    .{ .id = "cpu", .sizing = .{ .fixed = 7.0 } },
+    .{ .id = "mem", .sizing = .{ .fixed = 10.0 } },
     .{ .id = "path", .sizing = .{ .grow = 2.0 } },
 });
 
@@ -64,6 +66,14 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
         buf.setString(0, 0, "Missing Name", _Style{ .fg = .red });
         return;
     };
+    const cpu_col = columns.get("cpu") orelse {
+        buf.setString(0, 0, "Missing cpu", _Style{ .fg = .red });
+        return;
+    };
+    const mem_col = columns.get("mem") orelse {
+        buf.setString(0, 0, "Missing mem", _Style{ .fg = .red });
+        return;
+    };
     const path_col = columns.get("path") orelse {
         buf.setString(0, 0, "Missing path", _Style{ .fg = .red });
         return;
@@ -79,6 +89,7 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
         .borders = tui.widgets.Borders.all(),
         .border_style = tui.style.Style{ .fg = .cyan },
     };
+
     const visible_rows = list_rect.height -| 1;
     if (visible_rows > 0) {
         if (app.selected_item >= app.scroll_offset + visible_rows) {
@@ -91,24 +102,36 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
     const header_style = _Style{ .fg = .cyan, .modifier = _Modifier{ .bold = true } };
     buf.setString(pid_col.x, header_rect.y, "PID", header_style);
     buf.setString(name_col.x, header_rect.y, "Name", header_style);
+    buf.setString(cpu_col.x, header_rect.y, "CPU%", header_style);
+    buf.setString(mem_col.x, header_rect.y, "MEM", header_style);
     buf.setString(path_col.x, header_rect.y, "Path", header_style);
 
     var y: u16 = list_rect.y + 1;
     var idx: usize = app.scroll_offset;
     while (idx < app.view.items.len) : (idx += 1) {
         if (y >= list_rect.y + list_rect.height) break;
-        const p = app.view.items[idx];
+        const pv = app.view.items[idx];
+        const p = pv.proc;
         const style = if (idx == app.selected_item)
             _Style{ .bg = .blue, .fg = .white }
         else
             _Style{ .fg = .white };
         var pid_buf: [8]u8 = undefined;
         const pid_str = std.fmt.bufPrint(&pid_buf, "{d:<7}", .{p.pid}) catch "err/???\\err";
+        var cpu_buf: [7]u8 = undefined;
+        const cpu_str = std.fmt.bufPrint(&cpu_buf, "{d:>5.1}%", .{pv.cpu_percent}) catch "err";
+
+        var mem_buf: [10]u8 = undefined;
+        const mem_mb = @as(f64, @floatFromInt(p.mem_rss)) / (1024.0 * 1024.0);
+        const mem_str = std.fmt.bufPrint(&mem_buf, "{d:>6.1} MB", .{mem_mb}) catch "err";
+
         const name = std.mem.sliceTo(&p.s_name, 0);
         const path = std.mem.sliceTo(&p.path, 0);
 
         buf.setString(pid_col.x, y, pid_str, style);
         buf.setString(name_col.x, y, name, style);
+        buf.setString(cpu_col.x, y, cpu_str, style);
+        buf.setString(mem_col.x, y, mem_str, style);
         buf.setString(path_col.x, y, path, style);
         y += 1;
     }

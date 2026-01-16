@@ -36,6 +36,7 @@ fn fetchAndSend(queue: *channel.BatchQueue) !void {
     var batch = channel.Batch{
         .arena = std.heap.ArenaAllocator.init(std.heap.page_allocator),
         .map = std.AutoHashMap(proc.pid_t, *proc.Proc).init(std.heap.page_allocator),
+        .timestamp_ns = std.time.nanoTimestamp(),
     };
     var raw_Map = try proc.getProcList();
     defer raw_Map.deinit();
