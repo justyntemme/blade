@@ -126,13 +126,15 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
         const mem_str = std.fmt.bufPrint(&mem_buf, "{d:>6.1} MB", .{mem_mb}) catch "err";
 
         const name = std.mem.sliceTo(&p.s_name, 0);
+        const name_display = name[0..@min(name.len, name_col.width)];
         const path = std.mem.sliceTo(&p.path, 0);
+        const path_display = path[0..@min(path.len, path_col.width)];
 
         buf.setString(pid_col.x, y, pid_str, style);
-        buf.setString(name_col.x, y, name, style);
+        buf.setString(name_col.x, y, name_display, style);
         buf.setString(cpu_col.x, y, cpu_str, style);
         buf.setString(mem_col.x, y, mem_str, style);
-        buf.setString(path_col.x, y, path, style);
+        buf.setString(path_col.x, y, path_display, style);
         y += 1;
     }
     if (app.mode == .search) {

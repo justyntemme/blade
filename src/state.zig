@@ -60,10 +60,28 @@ pub const AppState = struct {
     }
 
     pub fn rebuildView(self: *AppState) !void {
-        self.view.clearRetainingCapacity();
-        self.selected_item = 0;
-        self.scroll_offset = 0;
+        // const prev_pid: ?proc.pid_t = it (self.view.items.len > 0) self.view.items[@min(self.selected_item, self.view.items.len - 1)].proc.pid
+        // else
+        //     null;
+        //
+        const prev_pid: ?proc.pid_t = if (self.view.items.len > 0)
+            self.view.items[@min(self.selected_item, self.view.items.len - 1)].proc.pid
+        else
+            null;
 
+        // if (prev_pid) |pid| {
+        //     for (self.view.items, 0..) |pv, i| {
+        //         if (pv.proc.pid == pid) {
+        //             self.selected_item = i;
+        //             return;
+        //         }
+        //     }
+        // }
+
+        self.view.clearRetainingCapacity();
+        // self.selected_item = 0;
+        // self.scroll_offset = 0;
+        //
         if (self.current_Batch) |*batch| {
             const search = self.searchSlice();
 
@@ -104,6 +122,17 @@ pub const AppState = struct {
                     }
                 }
             }
+
+            if (prev_pid) |pid| {
+                for (self.view.items, 0..) |pv, i| {
+                    if (pv.proc.pid == pid) {
+                        self.selected_item = i;
+                        return;
+                    }
+                }
+            }
+            self.selected_item = 0;
+            self.scroll_offset = 0;
         }
     }
     pub fn down(self: *AppState) void {
