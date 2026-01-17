@@ -1,11 +1,15 @@
 const std = @import("std");
 const proc = @import("proc/proc.zig");
 const channel = @import("thread/channel.zig");
+const sort = @import("sort.zig");
 
 pub const ProcView = struct {
     proc: *proc.Proc,
     cpu_percent: f32 = 0,
 };
+
+pub const SortColumn = enum { pid, name, cpu, mem, path };
+pub const SortDirection = enum { asc, desc };
 
 pub const ToastLevel = enum { info, success, warning, err };
 pub const Toast = struct {
@@ -24,6 +28,8 @@ pub const AppState = struct {
     allocator: std.mem.Allocator,
     selected_item: usize = 0,
     scroll_offset: usize = 0,
+    sort_column: SortColumn = .cpu,
+    sort_direction: SortDirection = .desc,
     active_toast: ?Toast = null,
     // procs: std.AutoHashMap(proc.pid_t, proc.Proc),
     current_Batch: ?channel.Batch = null,
@@ -59,29 +65,25 @@ pub const AppState = struct {
         self.active_toast = toast;
     }
 
+    pub fn setSort(self: *AppState, column: SortColumn) !void {
+        if (self.sort_column == column) {
+            self.sort_direction = if (self.sort_direction == .asc) .desc else .asc;
+        } else {
+            self.sort_column = column;
+            self.sort_direction = .desc;
+        }
+        try self.rebuildView();
+        self.selected_item = 0;
+        self.scroll_offset = 0;
+    }
+
     pub fn rebuildView(self: *AppState) !void {
-        // const prev_pid: ?proc.pid_t = it (self.view.items.len > 0) self.view.items[@min(self.selected_item, self.view.items.len - 1)].proc.pid
-        // else
-        //     null;
-        //
         const prev_pid: ?proc.pid_t = if (self.view.items.len > 0)
             self.view.items[@min(self.selected_item, self.view.items.len - 1)].proc.pid
         else
             null;
 
-        // if (prev_pid) |pid| {
-        //     for (self.view.items, 0..) |pv, i| {
-        //         if (pv.proc.pid == pid) {
-        //             self.selected_item = i;
-        //             return;
-        //         }
-        //     }
-        // }
-
         self.view.clearRetainingCapacity();
-        // self.selected_item = 0;
-        // self.scroll_offset = 0;
-        //
         if (self.current_Batch) |*batch| {
             const search = self.searchSlice();
 
@@ -122,6 +124,8 @@ pub const AppState = struct {
                     }
                 }
             }
+
+            std.mem.sort(ProcView, self.view.items, self, sort.compareProcView);
 
             if (prev_pid) |pid| {
                 for (self.view.items, 0..) |pv, i| {

@@ -67,6 +67,19 @@ fn handleNormalMode(app: *state.AppState, key: anytype) void {
                         };
                     }
                 },
+                'P' => app.setSort(.pid) catch |err| {
+                    app.showToastFmt("Error sorting by process: {}", .{err}, .err);
+                },
+                'N' => app.setSort(.name) catch |err| {
+                    app.showToastFmt("Error sorting by name: {}", .{err}, .err);
+                },
+                'C' => app.setSort(.cpu) catch |err| {
+                    app.showToastFmt("Error sorting by CPU: {}", .{err}, .err);
+                },
+                'M' => app.setSort(.mem) catch |err| {
+                    app.showToastFmt("Error sorting by Mem: {}", .{err}, .err);
+                },
+
                 else => {},
             }
         },
