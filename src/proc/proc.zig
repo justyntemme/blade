@@ -25,17 +25,18 @@ pub fn getProcList() ProcError!std.AutoHashMap(pid_t, Proc) {
     const allocator = std.heap.page_allocator;
 
     var proc_map: std.AutoHashMap(pid_t, Proc) = .init(allocator);
-
-    const pid_count = c.proc_listpids(c.PROC_ALL_PIDS, 0, null, 0);
-    if (pid_count <= 0) {
+    const bytes = c.proc_listpids(c.PROC_ALL_PIDS, 0, null, 0);
+    const count = @divExact(@as(usize, @intCast(bytes)), @sizeOf(pid_t));
+    const pids = try allocator.alloc(pid_t, count);
+    if (count <= 0) {
         std.debug.print("Failed to get process count\n", .{});
         return error.FailedToGetProcessCount;
     }
 
     // std.debug.print("PID Count {d}\n", .{pid_count});
 
-    const buffer_size: usize = @intCast(pid_count);
-    const pids = try allocator.alloc(pid_t, buffer_size);
+    const buffer_size: usize = @intCast(count);
+    // const pids = try allocator.alloc(pid_t, buffer_size);
     defer allocator.free(pids);
 
     // Get the actual PIDs
@@ -59,6 +60,7 @@ pub fn getProcList() ProcError!std.AutoHashMap(pid_t, Proc) {
         if (pid == 0) continue;
         // SAFETY: proc_pidinfo() fully initializes this struct; we only read fields if info_size > 0
         var proc_info: c.proc_bsdinfo = undefined;
+        // SAFETY: proc_pidinfo() fully initializes this struct; we only read fields if info_size > 0
         var task_info: c.proc_taskinfo = undefined;
 
         const info_size = c.proc_pidinfo(
