@@ -3,7 +3,7 @@ const std = @import("std");
 const proc = @import("../proc/proc.zig");
 const channel = @import("channel.zig");
 
-const poll_interval_ms: u64 = 3 * std.time.ns_per_s;
+const poll_interval_ns: u64 = 3 * std.time.ns_per_s;
 
 // producer thread params. pointers MUST remain valid for threads lifetime
 pub const ThreadArgs = struct {
@@ -23,7 +23,7 @@ pub fn run(args: ThreadArgs) void {
         //Sleep w interupt
         args.mutex.lock();
         if (args.running.load(.acquire)) {
-            args.condition.timedWait(args.mutex, poll_interval_ms) catch |err| switch (err) {
+            args.condition.timedWait(args.mutex, poll_interval_ns) catch |err| switch (err) {
                 error.Timeout => {},
             };
         }
