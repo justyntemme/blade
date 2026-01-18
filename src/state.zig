@@ -2,6 +2,7 @@ const std = @import("std");
 const proc = @import("proc/proc.zig");
 const channel = @import("thread/channel.zig");
 const sort = @import("sort.zig");
+const zigtui = @import("zigtui");
 
 pub const ProcView = struct {
     proc: *proc.Proc,
@@ -25,6 +26,7 @@ pub const Toast = struct {
 
 pub const AppState = struct {
     running: bool = true,
+    terminal: ?*zigtui.Terminal = null,
     allocator: std.mem.Allocator,
     selected_item: usize = 0,
     scroll_offset: usize = 0,
@@ -36,7 +38,7 @@ pub const AppState = struct {
     mode: enum { normal, search } = .normal,
     search_buf: [256]u8 = [_]u8{0} ** 256,
     search_len: usize = 0,
-    view: std.ArrayList(ProcView) = .{},
+    view: std.ArrayList(ProcView) = .empty,
     previous_Batch: ?channel.Batch = null,
     pub fn showToast(self: *AppState, message: []const u8, level: ToastLevel) void {
         var toast = Toast{

@@ -13,7 +13,11 @@ pub fn handleEvent(app: *state.AppState, event: anytype) !void {
             }
         },
         .resize => |size| {
-            try app.view.resize(app.allocator, size.width);
+            try app.terminal.?.resize(.{ .width = size.width, .height = size.height });
+            //size.width
+            // try app.view.resize(app.allocator, size.width); //
+            // all ^^ does is resize the view array
+
         },
         else => {},
     }

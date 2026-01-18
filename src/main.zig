@@ -26,6 +26,7 @@ pub fn main() !void {
     // Hide cursor
     try terminal.hideCursor();
     var app = state.AppState.init(allocator);
+    app.terminal = &terminal;
     defer app.deinit();
     var queue = try channel.initQueue(allocator);
     defer queue.deinit();
