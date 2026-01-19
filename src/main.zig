@@ -49,7 +49,7 @@ pub fn main() !void {
         if (queue.front()) |batch_ptr| {
             const batch = batch_ptr.*;
             queue.pop();
-            app.recieveBatch(batch);
+            app.recieve_batch(batch);
         }
 
         // Poll for events (100ms timeout)

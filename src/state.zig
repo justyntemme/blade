@@ -34,12 +34,12 @@ pub const AppState = struct {
     sort_direction: SortDirection = .desc,
     active_toast: ?Toast = null,
     // procs: std.AutoHashMap(proc.pid_t, proc.Proc),
-    current_Batch: ?channel.Batch = null,
+    current_batch: ?channel.Batch = null,
     mode: enum { normal, search } = .normal,
     search_buf: [256]u8 = [_]u8{0} ** 256,
     search_len: usize = 0,
     view: std.ArrayList(ProcView) = .empty,
-    previous_Batch: ?channel.Batch = null,
+    previous_batch: ?channel.Batch = null,
     pub fn showToast(self: *AppState, message: []const u8, level: ToastLevel) void {
         var toast = Toast{
             .level = level,
@@ -84,13 +84,13 @@ pub const AppState = struct {
             null;
 
         self.view.clearRetainingCapacity();
-        if (self.current_Batch) |*batch| {
+        if (self.current_batch) |*batch| {
             const search = self.searchSlice();
             var search_lower_buf: [256]u8 = undefined;
             const search_lower = std.ascii.lowerString(&search_lower_buf, search);
 
             //calc time delta for cpu%
-            const time_delta: i128 = if (self.previous_Batch) |*prev|
+            const time_delta: i128 = if (self.previous_batch) |*prev|
                 batch.timestamp_ns - prev.timestamp_ns
             else
                 0;
@@ -101,7 +101,7 @@ pub const AppState = struct {
 
                 // compute cpu%
                 var cpu_percent: f32 = 0;
-                if (self.previous_Batch) |*prev| {
+                if (self.previous_batch) |*prev| {
                     if (prev.map.get(proc_ptr.pid)) |old_proc| {
                         if (time_delta > 0) {
                             const new_total = proc_ptr.total_user + proc_ptr.total_system;
@@ -181,19 +181,19 @@ pub const AppState = struct {
 
     pub fn deinit(self: *AppState) void {
         self.view.deinit(self.allocator);
-        if (self.current_Batch) |*batch| {
+        if (self.current_batch) |*batch| {
             batch.deinit();
         }
-        if (self.previous_Batch) |*batch| {
+        if (self.previous_batch) |*batch| {
             batch.deinit();
         }
     }
-    pub fn recieveBatch(self: *AppState, new_Batch: channel.Batch) void {
-        if (self.previous_Batch) |*old| {
+    pub fn recieve_batch(self: *AppState, new_Batch: channel.Batch) void {
+        if (self.previous_batch) |*old| {
             old.deinit();
         }
-        self.previous_Batch = self.current_Batch;
-        self.current_Batch = new_Batch;
+        self.previous_batch = self.current_batch;
+        self.current_batch = new_Batch;
 
         self.rebuildView() catch |err| {
             std.debug.print("rebuildView failed :{}\n", .{err});
