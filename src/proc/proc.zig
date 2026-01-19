@@ -112,11 +112,11 @@ pub fn getProcList() ProcError!std.AutoHashMap(pid_t, Proc) {
 pub fn killProcById(pid: pid_t, force: bool) ProcError!void {
     const signal: i32 = if (force) std.posix.SIG.KILL else std.posix.SIG.TERM;
     const result = std.c.kill(pid, signal);
-    if (result == -1) {
-        const err = std.c._errno().*;
-        return switch (err) {
-            1 => ProcError.PermissionDenied,
-            3 => ProcError.ProcessNotFound,
+    const e = std.posix.errno(result); // Retrive err enum from C result code
+    if (e != .SUCCESS) {
+        return switch (e) {
+            .PERM => ProcError.PermissionDenied,
+            .SRCH => ProcError.ProcessNotFound,
             else => ProcError.Unexpected,
         };
     }
