@@ -17,7 +17,7 @@ pub const Toast = struct {
     message_buf: [128]u8 = [_]u8{0} ** 128,
     message_len: usize = 0,
     level: ToastLevel = .info,
-    expired_at: i6 = 0,
+    expired_at: i64 = 0,
 
     pub fn getMessage(self: *const Toast) []const u8 {
         return self.message_buf[0..self.message_len];
@@ -63,8 +63,6 @@ pub const AppState = struct {
             toast.message_len = fallback.len;
         }
         self.active_toast = toast;
-
-        self.active_toast = toast;
     }
 
     pub fn setSort(self: *AppState, column: SortColumn) !void {
@@ -88,6 +86,8 @@ pub const AppState = struct {
         self.view.clearRetainingCapacity();
         if (self.current_Batch) |*batch| {
             const search = self.searchSlice();
+            var search_lower_buf: [256]u8 = undefined;
+            const search_lower = std.ascii.lowerString(&search_lower_buf, search);
 
             //calc time delta for cpu%
             const time_delta: i128 = if (self.previous_Batch) |*prev|
@@ -118,7 +118,7 @@ pub const AppState = struct {
                         .cpu_percent = cpu_percent,
                     });
                 } else {
-                    if (self.matchesSearch(proc_ptr, search)) {
+                    if (self.matchesSearch(proc_ptr, search_lower)) {
                         try self.view.append(self.allocator, .{
                             .proc = proc_ptr,
                             .cpu_percent = cpu_percent,
@@ -193,8 +193,6 @@ pub const AppState = struct {
             old.deinit();
         }
         self.previous_Batch = self.current_Batch;
-        // Free old batch -- will use to track
-        // CPU percentage later but for now just free
         self.current_Batch = new_Batch;
 
         self.rebuildView() catch |err| {
@@ -205,23 +203,20 @@ pub const AppState = struct {
     fn matchesSearch(self: *const AppState, proc_ptr: *proc.Proc, search: []const u8) bool {
         _ = self; //unused for now but keeps method on appstate for future changes
         //Buffers
-        var search_lower_buf: [256]u8 = undefined;
         var name_lower_buf: [256]u8 = undefined;
         var path_lower_buf: [4096]u8 = undefined;
-
-        const search_lower = std.ascii.lowerString(&search_lower_buf, search);
 
         const name_slice = std.mem.sliceTo(&proc_ptr.s_name, 0);
         const name_lower = std.ascii.lowerString(&name_lower_buf, name_slice);
 
-        if (std.mem.indexOf(u8, name_lower, search_lower) != null) {
+        if (std.mem.indexOf(u8, name_lower, search) != null) {
             return true;
         }
 
         const path_slice = std.mem.sliceTo(&proc_ptr.path, 0);
         const path_lower = std.ascii.lowerString(&path_lower_buf, path_slice);
 
-        if (std.mem.indexOf(u8, path_lower, search_lower) != null) {
+        if (std.mem.indexOf(u8, path_lower, search) != null) {
             return true;
         }
 
