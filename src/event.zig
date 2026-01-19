@@ -24,6 +24,10 @@ pub fn handleEvent(app: *state.AppState, event: anytype) !void {
 }
 
 fn handleNormalMode(app: *state.AppState, key: anytype) void {
+    if (app.active_toast != null) {
+        app.active_toast = null;
+        return; //consume keypress to not process further during toast notification
+    }
     switch (key.code) {
         .char => |c| {
             switch (c) {

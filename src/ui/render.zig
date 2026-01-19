@@ -144,6 +144,11 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
         renderHelpBar(buf, footer_rect);
     }
     block.render(area, buf);
+
+    // Render toast notifications as overlay
+    if (app.active_toast) |*toast| {
+        renderToast(buf, toast, area);
+    }
 }
 
 fn renderHelpBar(buf: *tui.render.Buffer, rect: layout.Rect) void {
@@ -227,6 +232,6 @@ fn renderToast(buf: *tui.render.Buffer, toast: *const state.Toast, area: tui.ren
     @memcpy(dismiss_buf[dismiss_start..][0..dismiss_text.len], dismiss_text);
 
     buf.setString(toast_x, toast_y - 1, msg_buf[0..box_width], style);
-    buf.setString(toast_x, toast_y, msg_buf[0..box_width], style);
-    buf.setString(toast_x, toast_y + 1, dismiss_buf[0..box_width], style);
+    // buf.setString(toast_x, toast_y, msg_buf[0..box_width], style);
+    buf.setString(toast_x, toast_y, dismiss_buf[0..box_width], style);
 }
