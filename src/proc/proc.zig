@@ -36,7 +36,6 @@ pub fn getProcList() ProcError!std.AutoHashMap(pid_t, Proc) {
 
     // std.debug.print("PID Count {d}\n", .{pid_count});
 
-    const buffer_size: usize = @intCast(count);
     // const pids = try allocator.alloc(pid_t, buffer_size);
     defer allocator.free(pids);
 
@@ -45,7 +44,7 @@ pub fn getProcList() ProcError!std.AutoHashMap(pid_t, Proc) {
         c.PROC_ALL_PIDS,
         0,
         pids.ptr,
-        @intCast(buffer_size * @sizeOf(pid_t)),
+        @intCast(count * @sizeOf(pid_t)),
     );
 
     if (bytes_returned <= 0) {
