@@ -117,7 +117,7 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
         else
             _Style{ .fg = .white };
         var pid_buf: [8]u8 = undefined;
-        const pid_str = std.fmt.bufPrint(&pid_buf, "{d:<7}", .{p.pid}) catch "err/???\\err";
+        const pid_str = std.fmt.bufPrint(&pid_buf, "{d:<7}", .{p.pid}) catch "err";
         var cpu_buf: [7]u8 = undefined;
         const cpu_str = std.fmt.bufPrint(&cpu_buf, "{d:>5.1}%", .{pv.cpu_percent}) catch "err";
 
