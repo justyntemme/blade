@@ -32,7 +32,7 @@ pub fn run(args: ThreadArgs) void {
 }
 
 fn fetchAndSend(queue: *channel.BatchQueue) !void {
-    //crate a new batch
+    //create a new batch
     var batch = channel.Batch{
         .arena = std.heap.ArenaAllocator.init(std.heap.page_allocator),
         .map = std.AutoHashMap(proc.pid_t, *proc.Proc).init(std.heap.page_allocator),
