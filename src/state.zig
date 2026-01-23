@@ -33,7 +33,6 @@ pub const AppState = struct {
     sort_column: SortColumn = .cpu,
     sort_direction: SortDirection = .desc,
     active_toast: ?Toast = null,
-    // procs: std.AutoHashMap(proc.pid_t, proc.Proc),
     current_batch: ?channel.Batch = null,
     mode: enum { normal, search } = .normal,
     search_buf: [256]u8 = [_]u8{0} ** 256,
@@ -174,8 +173,6 @@ pub const AppState = struct {
     pub fn init(allocator: std.mem.Allocator) AppState {
         return .{
             .allocator = allocator,
-            // .view = std.ArrayList(ProcView).init(allocator),
-            // .procs = std.AutoHashMap(proc.pid_t, proc.Proc).init(allocator),
         };
     }
 
