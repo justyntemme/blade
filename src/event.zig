@@ -44,7 +44,7 @@ fn handleNormalMode(app: *state.AppState, key: anytype) void {
                 'u' => for (0..5) |_| app.up(),
                 'd' => for (0..5) |_| app.down(),
                 'x' => {
-                    //graceful kill SIGTERM
+                    //SIGTERM
                     if (app.selected_item < app.view.items.len) {
                         const pv = app.view.items[app.selected_item];
                         const pid = pv.proc.pid;
@@ -60,8 +60,8 @@ fn handleNormalMode(app: *state.AppState, key: anytype) void {
                     };
                 },
                 'X' => {
+                    //SIGKILL
                     if (app.selected_item < app.view.items.len) {
-                        //graceful kill SIGTERM
                         const pv = app.view.items[app.selected_item];
                         proc.killProcById(pv.proc.pid, true) catch |err| {
                             std.log.err("Failed to kill process {}: {}", .{ pv.proc.pid, err });
