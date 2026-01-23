@@ -188,7 +188,7 @@ pub const AppState = struct {
             batch.deinit();
         }
     }
-    pub fn recieve_batch(self: *AppState, new_Batch: channel.Batch) void {
+    pub fn receive_batch(self: *AppState, new_Batch: channel.Batch) void {
         if (self.previous_batch) |*old| {
             old.deinit();
         }
