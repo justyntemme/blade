@@ -13,11 +13,9 @@ pub fn handleEvent(app: *state.AppState, event: anytype) !void {
             }
         },
         .resize => |size| {
-            try app.terminal.?.resize(.{ .width = size.width, .height = size.height });
-            //size.width
-            // try app.view.resize(app.allocator, size.width); //
-            // all ^^ does is resize the view array
-
+            if (app.terminal) |term| {
+                term.resize(.{ .width = size.width, .height = size.height });
+            }
         },
         else => {},
     }
@@ -47,7 +45,7 @@ fn handleNormalMode(app: *state.AppState, key: anytype) void {
                 'd' => for (0..5) |_| app.down(),
                 'x' => {
                     //graceful kill SIGTERM
-                    if (app.view.items.len > 0) { // i think we have issues here
+                    if (app.selected_item < app.view.items.len) {
                         const pv = app.view.items[app.selected_item];
                         const pid = pv.proc.pid;
 
@@ -57,14 +55,12 @@ fn handleNormalMode(app: *state.AppState, key: anytype) void {
                     } else {
                         app.showToast("Error: No pid found for object", .err);
                     }
-                    // app.showToast("Error on killerr, .err);
-                    // std.log.err("Failed to kill process {}: {}", .{ selected_proc.pid, err });
                     app.rebuildView() catch |err| {
                         std.log.err("rebuildView failed on enter {}", .{err});
                     };
                 },
                 'X' => {
-                    if (app.view.items.len > 0) { // i think we have issues here
+                    if (app.selected_item < app.view.items.len) {
                         //graceful kill SIGTERM
                         const pv = app.view.items[app.selected_item];
                         proc.killProcById(pv.proc.pid, true) catch |err| {
