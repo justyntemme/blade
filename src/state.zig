@@ -188,12 +188,12 @@ pub const AppState = struct {
             batch.deinit();
         }
     }
-    pub fn receive_batch(self: *AppState, new_Batch: channel.Batch) void {
+    pub fn receive_batch(self: *AppState, new_batch: channel.Batch) void {
         if (self.previous_batch) |*old| {
             old.deinit();
         }
         self.previous_batch = self.current_batch;
-        self.current_batch = new_Batch;
+        self.current_batch = new_batch;
 
         self.rebuildView() catch |err| {
             std.debug.print("rebuildView failed :{}\n", .{err});
