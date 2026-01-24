@@ -16,6 +16,12 @@ pub fn build(b: *std.Build) void {
 
     const module_target = b.graph.host;
 
+    const model_mod = b.createModule(.{
+        .root_source_file = b.path("src/model.zig"),
+        .target = module_target,
+        .optimize = optimize,
+    });
+
     const proc_mod = b.createModule(.{
         .root_source_file = b.path("src/proc/proc.zig"),
         .target = module_target,
@@ -76,6 +82,9 @@ pub fn build(b: *std.Build) void {
     state_mod.addImport("thread_channel", thread_channel_mod);
     state_mod.addImport("sort", sort_mod);
     state_mod.addImport("zigtui", zigtui_mod);
+    state_mod.addImport("model", model_mod);
+
+    proc_mod.addImport("model", model_mod);
 
     thread_channel_mod.addImport("proc", proc_mod);
     thread_channel_mod.addImport("spsc_queue", spsc_mod);
