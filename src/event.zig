@@ -34,8 +34,8 @@ fn handleNormalMode(app: *state.AppState, key: anytype) void {
                 },
                 'c' => {
                     app.search_len = 0;
-                    app.rebuildView() catch |err| {
-                        std.log.err("rebuildView failed on clear search {}", .{err});
+                    app.buildView() catch |err| {
+                        std.log.err("buildView failed on clear search {}", .{err});
                     };
                 },
                 'q' => app.running = false,
@@ -55,8 +55,8 @@ fn handleNormalMode(app: *state.AppState, key: anytype) void {
                     } else {
                         app.showToast("Error: No pid found for object", .err);
                     }
-                    app.rebuildView() catch |err| {
-                        std.log.err("rebuildView failed on enter {}", .{err});
+                    app.buildView() catch |err| {
+                        std.log.err("buildView failed on enter {}", .{err});
                     };
                 },
                 'X' => {
@@ -66,23 +66,24 @@ fn handleNormalMode(app: *state.AppState, key: anytype) void {
                         proc.killProcById(pv.proc.pid, true) catch |err| {
                             std.log.err("Failed to kill process {}: {}", .{ pv.proc.pid, err });
                         };
-                        app.rebuildView() catch |err| {
-                            std.log.err("rebuildView failed on enter {}", .{err});
+                        app.buildView() catch |err| {
+                            std.log.err("buildView failed on enter {}", .{err});
                         };
                     }
                 },
-                'P' => app.setSort(.pid) catch |err| {
-                    app.showToastFmt("Error sorting by process: {}", .{err}, .err);
-                },
-                'N' => app.setSort(.name) catch |err| {
-                    app.showToastFmt("Error sorting by name: {}", .{err}, .err);
-                },
-                'C' => app.setSort(.cpu) catch |err| {
-                    app.showToastFmt("Error sorting by CPU: {}", .{err}, .err);
-                },
-                'M' => app.setSort(.mem) catch |err| {
-                    app.showToastFmt("Error sorting by Mem: {}", .{err}, .err);
-                },
+                'P' => app.setSort(.pid),
+                // 'P' => app.setSort(.pid) catch |err| {
+                // app.showToastFmt("Error sorting by process: {}", .{err}, .err);
+                // },
+                'N' => app.setSort(.name),
+                //     app.showToastFmt("Error sorting by name: {}", .{err}, .err);
+                // },
+                'C' => app.setSort(.cpu),
+                // app.showToastFmt("Error sorting by CPU: {}", .{err}, .err);
+                // },
+                'M' => app.setSort(.mem),
+                // app.showToastFmt("Error sorting by Mem: {}", .{err}, .err);
+                // },
 
                 else => {},
             }
@@ -105,15 +106,15 @@ fn handleSearchMode(app: *state.AppState, key: anytype) void {
             app.searchBackspace();
         },
         .enter => {
-            app.rebuildView() catch |err| {
-                std.log.err("rebuildView failed on enter {}", .{err});
+            app.buildView() catch |err| {
+                std.log.err("buildView failed on enter {}", .{err});
             };
             app.mode = .normal;
         },
         .esc => {
             app.searchClear();
-            app.rebuildView() catch |err| {
-                std.log.err("rebuildView failed on escape {}", .{err});
+            app.buildView() catch |err| {
+                std.log.err("buildView failed on escape {}", .{err});
             };
             app.mode = .normal;
         },

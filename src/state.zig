@@ -64,23 +64,18 @@ pub const AppState = struct {
         self.active_toast = toast;
     }
 
-    pub fn setSort(self: *AppState, column: SortColumn) !void {
+    pub fn setSort(self: *AppState, column: SortColumn) void {
         if (self.sort_column == column) {
             self.sort_direction = if (self.sort_direction == .asc) .desc else .asc;
         } else {
             self.sort_column = column;
             self.sort_direction = .desc;
         }
-        try self.rebuildView();
-        self.selected_item = 0;
-        self.scroll_offset = 0;
+        self.sortView();
     }
 
-    pub fn rebuildView(self: *AppState) !void {
-        const prev_pid: ?proc.pid_t = if (self.view.items.len > 0)
-            self.view.items[@min(self.selected_item, self.view.items.len - 1)].proc.pid
-        else
-            null;
+    pub fn buildView(self: *AppState) !void {
+        const prev_pid = self.getSelectedPid();
 
         self.view.clearRetainingCapacity();
         if (self.current_batch) |*batch| {
@@ -128,17 +123,16 @@ pub const AppState = struct {
 
             std.mem.sort(ProcView, self.view.items, self, sort.compareProcView);
 
-            if (prev_pid) |pid| {
-                for (self.view.items, 0..) |pv, i| {
-                    if (pv.proc.pid == pid) {
-                        self.selected_item = i;
-                        return;
-                    }
-                }
-            }
+            self.restoreSelection(prev_pid);
+
             self.selected_item = 0;
             self.scroll_offset = 0;
         }
+    }
+    pub fn sortView(self: *AppState) void {
+        const prev_pid = self.getSelectedPid();
+        std.mem.sort(ProcView, self.view.items, self, sort.compareProcView);
+        self.restoreSelection(prev_pid);
     }
     pub fn down(self: *AppState) void {
         if (self.selected_item < self.view.items.len -| 1) {
@@ -194,8 +188,8 @@ pub const AppState = struct {
         self.previous_batch = self.current_batch;
         self.current_batch = new_batch;
 
-        self.rebuildView() catch |err| {
-            std.debug.print("rebuildView failed :{}\n", .{err});
+        self.buildView() catch |err| {
+            std.debug.print("buildView failed :{}\n", .{err});
         };
     }
 
@@ -220,6 +214,23 @@ pub const AppState = struct {
         }
 
         return false;
+    }
+    fn getSelectedPid(self: *const AppState) ?proc.pid_t {
+        if (self.view.items.len == 0) return null;
+        //Clamp selected time within item bounds
+        const idx = @min(self.selected_item, self.view.items.len - 1);
+        return self.view.items[idx].proc.pid;
+    }
+
+    fn restoreSelection(self: *AppState, prev_pid: ?proc.pid_t) void {
+        if (prev_pid) |pid| {
+            for (self.view.items, 0..) |pv, i| {
+                if (pv.proc.pid == pid) {
+                    self.selected_item = i;
+                    return;
+                }
+            }
+        }
     }
 };
 
