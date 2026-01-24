@@ -15,29 +15,22 @@ pub const Proc = struct {
 pub const ProcError = error{
     FailedToGetProcessCount,
     FailedToGetProcessList,
+    FailedToGetProcPath,
     OutOfMemory,
     PermissionDenied,
     ProcessNotFound,
     Unexpected,
 };
 
-pub fn getProcList() ProcError!std.AutoHashMap(pid_t, Proc) {
-    // std.debug.print("Entrypoint -> getProcList\n", .{});
-    const allocator = std.heap.page_allocator;
-
+pub fn getProcList(allocator: std.mem.Allocator) ProcError!std.AutoHashMap(pid_t, Proc) {
     var proc_map: std.AutoHashMap(pid_t, Proc) = .init(allocator);
     const bytes = c.proc_listpids(c.PROC_ALL_PIDS, 0, null, 0);
     const count = @divExact(@as(usize, @intCast(bytes)), @sizeOf(pid_t));
     const pids = try allocator.alloc(pid_t, count);
     if (count <= 0) {
         std.debug.print("Failed to get process count\n", .{});
-        return error.FailedToGetProcessCount;
+        return error.FailedToGetProcPath;
     }
-
-    // std.debug.print("PID Count {d}\n", .{pid_count});
-
-    // const pids = try allocator.alloc(pid_t, buffer_size);
-    defer allocator.free(pids);
 
     // Get the actual PIDs
     const bytes_returned = c.proc_listpids(
