@@ -3,6 +3,7 @@ const tui = @import("zigtui");
 const state = @import("../state.zig");
 // const proc = @import("../proc/proc.zig");
 const layout = @import("layout.zig");
+const keymap = @import("../event/keymap.zig");
 
 const _Style = tui.style.Style;
 const _Modifier = tui.style.Modifier;
@@ -152,15 +153,22 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
 }
 
 fn renderHelpBar(buf: *tui.render.Buffer, rect: layout.Rect) void {
-    const help_text = "/ to search search, q to quit, x to kill process, c to clear search, arrow keys to navigate";
-    // std.debug.print("", .{});
-    var line_buf: [512]u8 = [_]u8{' '} ** 512;
-    @memcpy(line_buf[0..help_text.len], help_text);
+    var help_buf: [512]u8 = [_]u8{' '} ** 512;
+    const help_text = keymap.getHelpText(.normal, &help_buf);
 
-    const width: usize = @min(rect.width, line_buf.len);
-    buf.setString(rect.x, rect.y, line_buf[0..width], _Style{ .fg = .gray });
+    const width: usize = @min(rect.width, help_text.len);
+    buf.setString(rect.x, rect.y, help_text[0..width], _Style{ .fg = .gray });
 }
-
+// fn renderHelpBar(buf: *tui.render.Buffer, rect: layout.Rect) void {
+//     const help_text = "/ to search search, q to quit, x to kill process, c to clear search, arrow keys to navigate";
+//     // std.debug.print("", .{});
+//     var line_buf: [512]u8 = [_]u8{' '} ** 512;
+//     @memcpy(line_buf[0..help_text.len], help_text);
+//
+//     const width: usize = @min(rect.width, line_buf.len);
+//     buf.setString(rect.x, rect.y, line_buf[0..width], _Style{ .fg = .gray });
+// }
+//
 fn renderSearchInput(
     buf: *tui.render.Buffer,
     rect: layout.Rect,

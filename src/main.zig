@@ -1,7 +1,7 @@
 const std = @import("std");
 
 //Internal deps
-const event = @import("event.zig");
+const event = @import("event/event.zig");
 // const proc = @import("proc/proc.zig");
 const render = @import("ui/render.zig");
 const state = @import("state.zig");

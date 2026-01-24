@@ -45,7 +45,7 @@ pub const keymap = [_]KeyBinding{
     .{ .key = .{ .char = 'c' }, .action = .clear_search, .modes = &.{.normal}, .description = "clear" },
 
     // Process control
-    .{ .key = .{ .char = 'x' }, .action = .kill_graceful, .modes = &.{.normal}, .description = "kill" },
+    .{ .key = .{ .char = 'x' }, .action = .kill_term, .modes = &.{.normal}, .description = "kill" },
     .{ .key = .{ .char = 'X' }, .action = .kill_force, .modes = &.{.normal}, .description = "kill -9" },
 
     // Sorting
@@ -54,3 +54,66 @@ pub const keymap = [_]KeyBinding{
     .{ .key = .{ .char = 'C' }, .action = .sort_by_cpu, .modes = &.{.normal}, .description = "sort CPU" },
     .{ .key = .{ .char = 'M' }, .action = .sort_by_mem, .modes = &.{.normal}, .description = "sort mem" },
 };
+
+pub fn getAction(key: Key, mode: Mode) ?Action {
+    for (keymap) |binding| {
+        if (std.meta.eql(binding.key, key)) {
+            for (binding.modes) |m| {
+                if (m == mode) return binding.action;
+            }
+        }
+    }
+    return null;
+}
+
+pub fn getHelpText(mode: Mode, buf: []u8) []const u8 {
+    var pos: usize = 0;
+
+    for (keymap) |binding| {
+        if (binding.description.len == 0) continue;
+
+        var in_mode = false;
+        for (binding.modes) |m| {
+            if (m == mode) {
+                in_mode = true;
+                break;
+            }
+        }
+        if (!in_mode) continue;
+
+        const key_str = switch (binding.key) {
+            .char => |c| &[_]u8{c},
+            .special => |s| switch (s) {
+                .up => "↑",
+                .down => "↓",
+                .esc => "esc",
+                .enter => "enter",
+                .backspace => "bksp",
+            },
+        };
+
+        if (pos > 0 and pos + 2 < buf.len) {
+            buf[pos] = ' ';
+            buf[pos + 1] = ' ';
+            pos += 2;
+        }
+
+        //add key:description
+        for (key_str) |c| {
+            if (pos >= buf.len) break;
+            buf[pos] = c;
+            pos += 1;
+        }
+        if (pos < buf.len) {
+            buf[pos] = ':';
+            pos += 1;
+        }
+        for (binding.description) |c| {
+            if (pos >= buf.len) break;
+            buf[pos] = c;
+            pos += 1;
+        }
+    }
+
+    return buf[0..pos];
+}
