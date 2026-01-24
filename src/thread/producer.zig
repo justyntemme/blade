@@ -48,8 +48,11 @@ fn fetchAndSend(queue: *channel.BatchQueue) !void {
         p.* = entry.value_ptr.*;
         try batch.map.put(entry.key_ptr.*, p);
     }
+    var backoff_ns: u64 = 100_000; // Start at 100µs
+    const max_backoff_ns: u64 = 10 * std.time.ns_per_ms; // Cap at 10ms
 
     while (!queue.tryPush(batch)) {
-        std.atomic.spinLoopHint();
+        std.Thread.sleep(backoff_ns);
+        backoff_ns = @min(backoff_ns * 2, max_backoff_ns);
     }
 }
