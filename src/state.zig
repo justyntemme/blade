@@ -186,6 +186,8 @@ pub const AppState = struct {
         }
     }
     pub fn receive_batch(self: *AppState, new_batch: channel.Batch) void {
+        // Ownership transfer: we now own new_batch and must deinit it later.
+        // Slide the batch window: previous -> discard, current -> previous, new -> current.
         if (self.previous_batch) |*old| {
             old.deinit();
         }
