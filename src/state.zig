@@ -75,7 +75,7 @@ pub const AppState = struct {
     }
 
     pub fn buildView(self: *AppState) !void {
-        const prev_pid = self.getSelectedPid();
+        const prev_identity = self.getSelectedIdentity();
 
         self.view.clearRetainingCapacity();
         if (self.current_batch) |*batch| {
@@ -97,7 +97,7 @@ pub const AppState = struct {
                 var cpu_percent: f32 = 0;
                 if (self.previous_batch) |*prev| {
                     if (prev.map.get(proc_ptr.pid)) |old_proc| {
-                        if (time_delta > 0) {
+                        if (old_proc.start_time_ns == proc_ptr.start_time_ns and time_delta > 0) {
                             const new_total = proc_ptr.total_user + proc_ptr.total_system;
                             const old_total = old_proc.total_user + old_proc.total_system;
                             const cpu_delta = new_total -| old_total;
@@ -123,16 +123,16 @@ pub const AppState = struct {
 
             std.mem.sort(ProcView, self.view.items, self, sort.compareProcView);
 
-            self.restoreSelection(prev_pid);
+            self.restoreSelection(prev_identity);
 
             self.selected_item = 0;
             self.scroll_offset = 0;
         }
     }
     pub fn sortView(self: *AppState) void {
-        const prev_pid = self.getSelectedPid();
+        const prev_identity = self.getSelectedIdentity();
         std.mem.sort(ProcView, self.view.items, self, sort.compareProcView);
-        self.restoreSelection(prev_pid);
+        self.restoreSelection(prev_identity);
     }
     pub fn down(self: *AppState) void {
         if (self.selected_item < self.view.items.len -| 1) {
@@ -215,17 +215,17 @@ pub const AppState = struct {
 
         return false;
     }
-    fn getSelectedPid(self: *const AppState) ?proc.pid_t {
+    fn getSelectedIdentity(self: *const AppState) ?proc.ProcIdentity {
         if (self.view.items.len == 0) return null;
         //Clamp selected time within item bounds
         const idx = @min(self.selected_item, self.view.items.len - 1);
-        return self.view.items[idx].proc.pid;
+        return self.view.items[idx].proc.identity();
     }
 
-    fn restoreSelection(self: *AppState, prev_pid: ?proc.pid_t) void {
-        if (prev_pid) |pid| {
+    fn restoreSelection(self: *AppState, prev_identity: ?proc.ProcIdentity) void {
+        if (prev_identity) |identity| {
             for (self.view.items, 0..) |pv, i| {
-                if (pv.proc.pid == pid) {
+                if (pv.proc.identity().eql(identity)) {
                     self.selected_item = i;
                     return;
                 }

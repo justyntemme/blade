@@ -3,15 +3,7 @@ const c = @cImport({
     @cInclude("libproc.h");
     @cInclude("sys/proc_info.h");
 });
-pub const pid_t = c.pid_t;
-pub const Proc = struct {
-    pid: pid_t,
-    s_name: [256:0]u8,
-    path: [4096]u8,
-    mem_rss: u64 = 0,
-    total_user: u64 = 0,
-    total_system: u64 = 0,
-};
+
 pub const ProcError = error{
     FailedToGetProcessCount,
     FailedToGetProcessList,
@@ -20,6 +12,29 @@ pub const ProcError = error{
     PermissionDenied,
     ProcessNotFound,
     Unexpected,
+};
+
+pub const pid_t = c.pid_t;
+pub const Proc = struct {
+    pid: pid_t,
+    start_time_ns: i128 = 0,
+    s_name: [256:0]u8,
+    path: [4096]u8,
+    mem_rss: u64 = 0,
+    total_user: u64 = 0,
+    total_system: u64 = 0,
+
+    pub fn identity(self: *const Proc) ProcIdentity {
+        return .{ .pid = self.pid, .start_time_ns = self.start_time_ns };
+    }
+};
+pub const ProcIdentity = struct {
+    pid: pid_t,
+    start_time_ns: i128,
+
+    pub fn eql(self: ProcIdentity, other: ProcIdentity) bool {
+        return self.pid == other.pid and self.start_time_ns == other.start_time_ns;
+    }
 };
 
 pub fn getProcList(allocator: std.mem.Allocator) ProcError!std.AutoHashMap(pid_t, Proc) {
@@ -78,9 +93,13 @@ pub fn getProcList(allocator: std.mem.Allocator) ProcError!std.AutoHashMap(pid_t
 
         if (info_size > 0) {
             const c_name = std.mem.sliceTo(&proc_info.pbi_name, 0);
+            const start_sec: i128 = @intCast(proc_info.pbi_start_tvsec);
+            const start_usec: i128 = @intCast(proc_info.pbi_start_tvusec);
+            const start_time_ns = start_sec * std.time.ns_per_s + start_usec * std.time.ns_per_us;
             // SAFETY: s_name and path are fully written via @memcpy before struct is used
             var proc = Proc{
                 .pid = pid,
+                .start_time_ns = start_time_ns,
                 .s_name = undefined,
                 .path = undefined,
                 .mem_rss = if (task_size > 0) task_info.pti_resident_size else 0,
