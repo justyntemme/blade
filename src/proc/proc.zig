@@ -3,7 +3,7 @@ const c = @cImport({
     @cInclude("libproc.h");
     @cInclude("sys/proc_info.h");
 });
-
+const model = @import("model");
 pub const ProcError = error{
     FailedToGetProcessCount,
     FailedToGetProcessList,
@@ -24,19 +24,24 @@ pub const Proc = struct {
     total_user: u64 = 0,
     total_system: u64 = 0,
 
-    pub fn identity(self: *const Proc) ProcIdentity {
-        return .{ .pid = self.pid, .start_time_ns = self.start_time_ns };
+    pub fn identity(self: *const Proc) model.ProcIdentity {
+        return .{ .pid = self.pid, .start_time_ns = @intCast(self.start_time_ns) };
+    }
+
+    pub fn toSnapshot(self: *const Proc, arena: std.mem.Allocator) !model.ProcessSnapshot {
+        const name_slice = std.mem.sliceTo(&self.s_name, 0);
+        const path_slice = std.mem.sliceTo(&self.path, 0);
+        return .{
+            .pid = self.pid,
+            .start_time_ns = @intCast(self.start_time_ns),
+            .cpu_total_ns = self.total_user + self.total_system,
+            .mem_rss_bytes = self.mem_rss,
+            .state = .unkown, //TODO map from bsd status in future
+            .name = try arena.dupe(u8, name_slice),
+            .path = try arena.dupe(u8, path_slice),
+        };
     }
 };
-pub const ProcIdentity = struct {
-    pid: pid_t,
-    start_time_ns: i128,
-
-    pub fn eql(self: ProcIdentity, other: ProcIdentity) bool {
-        return self.pid == other.pid and self.start_time_ns == other.start_time_ns;
-    }
-};
-
 pub fn getProcList(allocator: std.mem.Allocator) ProcError!std.AutoHashMap(pid_t, Proc) {
     var proc_map: std.AutoHashMap(pid_t, Proc) = .init(allocator);
     const bytes = c.proc_listpids(c.PROC_ALL_PIDS, 0, null, 0);

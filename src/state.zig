@@ -3,6 +3,7 @@ const proc = @import("proc");
 const channel = @import("thread_channel");
 const sort = @import("sort");
 const zigtui = @import("zigtui");
+const model = @import("model");
 
 pub const ProcView = struct {
     proc: *proc.Proc,
@@ -215,14 +216,14 @@ pub const AppState = struct {
 
         return false;
     }
-    fn getSelectedIdentity(self: *const AppState) ?proc.ProcIdentity {
+    fn getSelectedIdentity(self: *const AppState) ?model.ProcIdentity {
         if (self.view.items.len == 0) return null;
         //Clamp selected time within item bounds
         const idx = @min(self.selected_item, self.view.items.len - 1);
         return self.view.items[idx].proc.identity();
     }
 
-    fn restoreSelection(self: *AppState, prev_identity: ?proc.ProcIdentity) void {
+    fn restoreSelection(self: *AppState, prev_identity: ?model.ProcIdentity) void {
         if (prev_identity) |identity| {
             for (self.view.items, 0..) |pv, i| {
                 if (pv.proc.identity().eql(identity)) {
