@@ -14,7 +14,7 @@ pub fn handleEvent(app: *state.AppState, event: anytype) !void {
         },
         .resize => |size| {
             if (app.terminal) |term| {
-                term.resize(.{ .width = size.width, .height = size.height });
+                try term.resize(.{ .width = size.width, .height = size.height });
             }
         },
         else => {},
