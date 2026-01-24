@@ -17,7 +17,11 @@ pub const Batch = struct {
     timestamp_ns: i128 = 0,
 
     pub fn deinit(self: *Batch) void {
-        self.map.deinit();
+        // Note: map.deinit() is intentionally omitted.
+        // The map's internal storage was allocated from the arena.
+        // Calling map.deinit() would use a stale allocator pointer
+        // (the Allocator struct captured &batch_arena from the producer's stack).
+        // The arena.deinit() below frees all memory in one operation.
         self.arena.deinit();
     }
 };
