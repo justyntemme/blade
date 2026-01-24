@@ -1,7 +1,7 @@
 const std = @import("std");
-const proc = @import("proc/proc.zig");
-const channel = @import("thread/channel.zig");
-const sort = @import("sort.zig");
+const proc = @import("proc");
+const channel = @import("thread_channel");
+const sort = @import("sort");
 const zigtui = @import("zigtui");
 
 pub const ProcView = struct {
@@ -121,7 +121,7 @@ pub const AppState = struct {
                 }
             }
 
-            std.mem.sort(ProcView, self.view.items, self, sort.compareProcView);
+            std.mem.sort(ProcView, self.view.items, self, compareProcView);
 
             self.restoreSelection(prev_identity);
 
@@ -131,7 +131,7 @@ pub const AppState = struct {
     }
     pub fn sortView(self: *AppState) void {
         const prev_identity = self.getSelectedIdentity();
-        std.mem.sort(ProcView, self.view.items, self, sort.compareProcView);
+        std.mem.sort(ProcView, self.view.items, self, compareProcView);
         self.restoreSelection(prev_identity);
     }
     pub fn down(self: *AppState) void {
@@ -233,6 +233,10 @@ pub const AppState = struct {
         }
     }
 };
+
+fn compareProcView(ctx: *const AppState, a: ProcView, b: ProcView) bool {
+    return sort.compareProcView(ctx, a, b);
+}
 
 pub const DrawContext = struct {
     state: *AppState,

@@ -1,7 +1,6 @@
 const std = @import("std");
-const state = @import("state.zig");
 
-pub fn compareProcView(ctx: *const state.AppState, a: state.ProcView, b: state.ProcView) bool {
+pub fn compareProcView(ctx: anytype, a: anytype, b: anytype) bool {
     const order = switch (ctx.sort_column) {
         .pid => std.math.order(a.proc.pid, b.proc.pid),
         .cpu => std.math.order(a.cpu_percent, b.cpu_percent),
