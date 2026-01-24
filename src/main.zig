@@ -1,12 +1,12 @@
 const std = @import("std");
 
 //Internal deps
-const event = @import("event/event.zig");
-// const proc = @import("proc/proc.zig");
-const render = @import("ui/render.zig");
-const state = @import("state.zig");
-const channel = @import("thread/channel.zig");
-const producer = @import("thread/producer.zig");
+const event = @import("event");
+// const proc = @import("proc");
+const render = @import("ui_render");
+const state = @import("state");
+const channel = @import("thread_channel");
+const producer = @import("thread_producer");
 
 // External deps
 const tui = @import("zigtui");

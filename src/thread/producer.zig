@@ -1,7 +1,7 @@
 const std = @import("std");
 
-const proc = @import("../proc/proc.zig");
-const channel = @import("channel.zig");
+const proc = @import("proc");
+const channel = @import("thread_channel");
 
 const poll_interval_ns: u64 = 3 * std.time.ns_per_s;
 

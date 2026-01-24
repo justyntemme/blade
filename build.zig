@@ -11,17 +11,99 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const zigtui_mod = zigtui.module("zigtui");
+    const spsc_mod = spsc.module("spsc_queue");
+
+    const module_target = b.graph.host;
+
+    const proc_mod = b.createModule(.{
+        .root_source_file = b.path("src/proc/proc.zig"),
+        .target = module_target,
+        .optimize = optimize,
+    });
+    const state_mod = b.createModule(.{
+        .root_source_file = b.path("src/state.zig"),
+        .target = module_target,
+        .optimize = optimize,
+    });
+    const sort_mod = b.createModule(.{
+        .root_source_file = b.path("src/sort.zig"),
+        .target = module_target,
+        .optimize = optimize,
+    });
+    const thread_channel_mod = b.createModule(.{
+        .root_source_file = b.path("src/thread/channel.zig"),
+        .target = module_target,
+        .optimize = optimize,
+    });
+    const thread_producer_mod = b.createModule(.{
+        .root_source_file = b.path("src/thread/producer.zig"),
+        .target = module_target,
+        .optimize = optimize,
+    });
+    const ui_layout_mod = b.createModule(.{
+        .root_source_file = b.path("src/ui/layout.zig"),
+        .target = module_target,
+        .optimize = optimize,
+    });
+    const ui_render_mod = b.createModule(.{
+        .root_source_file = b.path("src/ui/render.zig"),
+        .target = module_target,
+        .optimize = optimize,
+    });
+    const event_action_mod = b.createModule(.{
+        .root_source_file = b.path("src/event/action.zig"),
+        .target = module_target,
+        .optimize = optimize,
+    });
+    const event_keymap_mod = b.createModule(.{
+        .root_source_file = b.path("src/event/keymap.zig"),
+        .target = module_target,
+        .optimize = optimize,
+    });
+    const event_mod = b.createModule(.{
+        .root_source_file = b.path("src/event/event.zig"),
+        .target = module_target,
+        .optimize = optimize,
+    });
+    const main_mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = module_target,
+        .optimize = optimize,
+    });
+
+    state_mod.addImport("proc", proc_mod);
+    state_mod.addImport("thread_channel", thread_channel_mod);
+    state_mod.addImport("sort", sort_mod);
+    state_mod.addImport("zigtui", zigtui_mod);
+
+    thread_channel_mod.addImport("proc", proc_mod);
+    thread_channel_mod.addImport("spsc_queue", spsc_mod);
+
+    thread_producer_mod.addImport("proc", proc_mod);
+    thread_producer_mod.addImport("thread_channel", thread_channel_mod);
+
+    event_keymap_mod.addImport("event_action", event_action_mod);
+    event_mod.addImport("event_keymap", event_keymap_mod);
+    event_mod.addImport("state", state_mod);
+    event_mod.addImport("proc", proc_mod);
+
+    ui_render_mod.addImport("state", state_mod);
+    ui_render_mod.addImport("ui_layout", ui_layout_mod);
+    ui_render_mod.addImport("event_keymap", event_keymap_mod);
+    ui_render_mod.addImport("zigtui", zigtui_mod);
+
+    main_mod.addImport("event", event_mod);
+    main_mod.addImport("ui_render", ui_render_mod);
+    main_mod.addImport("state", state_mod);
+    main_mod.addImport("thread_channel", thread_channel_mod);
+    main_mod.addImport("thread_producer", thread_producer_mod);
+    main_mod.addImport("zigtui", zigtui_mod);
+    main_mod.addImport("spsc_queue", spsc_mod);
+
     const exe = b.addExecutable(.{
         .name = "Blade",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = b.graph.host,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "zigtui", .module = zigtui.module("zigtui") },
-                .{ .name = "spsc_queue", .module = spsc.module("spsc_queue") },
-            },
-        }),
+        .root_module = main_mod,
     });
     if (target.result.os.tag == .macos) {
         //Darwin// Use external proc library for proc list

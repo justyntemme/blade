@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const actions = @import("action.zig");
+const actions = @import("event_action");
 
 pub const Action = actions.Action;
 

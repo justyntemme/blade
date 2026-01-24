@@ -1,7 +1,7 @@
 const std = @import("std");
-const state = @import("../state.zig");
-const proc = @import("../proc/proc.zig");
-const keymap = @import("./keymap.zig");
+const state = @import("state");
+const proc = @import("proc");
+const keymap = @import("event_keymap");
 
 pub fn handleEvent(app: *state.AppState, event: anytype) !void {
     switch (event) {

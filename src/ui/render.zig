@@ -1,9 +1,9 @@
 const std = @import("std");
 const tui = @import("zigtui");
-const state = @import("../state.zig");
-// const proc = @import("../proc/proc.zig");
-const layout = @import("layout.zig");
-const keymap = @import("../event/keymap.zig");
+const state = @import("state");
+// const proc = @import("proc");
+const layout = @import("ui_layout");
+const keymap = @import("event_keymap");
 
 const _Style = tui.style.Style;
 const _Modifier = tui.style.Modifier;

@@ -1,6 +1,6 @@
 const std = @import("std");
 const spsc = @import("spsc_queue");
-const proc = @import("../proc/proc.zig");
+const proc = @import("proc");
 
 /// Batch represents a snapshot of process data with its own memory arena.
 ///
