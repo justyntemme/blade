@@ -123,9 +123,7 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
         .start_search => app.mode = .search,
         .clear_search => {
             app.search_len = 0;
-            app.buildView() catch |err| {
-                std.log.err("buildView failed: {}", .{err});
-            };
+            app.refreshFilter();
         },
         .kill_term => killSelected(app, false),
         .kill_force => killSelected(app, true),
@@ -137,8 +135,9 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
 }
 
 fn killSelected(app: *state.AppState, force: bool) void {
-    if (app.selected_item < app.view.items.len) {
-        const pv = app.view.items[app.selected_item];
+    if (app.selected_item < app.indices.items.len) {
+        const data_idx = app.indices.items[app.selected_item];
+        const pv = app.view.items[data_idx];
         platform.signal(pv.proc.pid, force) catch |err| {
             app.showToastFmt("Kill failed: {}", .{err}, .err);
             return;
@@ -160,16 +159,12 @@ fn handleSearchMode(app: *state.AppState, key: anytype) void {
             app.searchBackspace();
         },
         .enter => {
-            app.buildView() catch |err| {
-                std.log.err("buildView failed on enter {}", .{err});
-            };
+            app.refreshFilter();
             app.mode = .normal;
         },
         .esc => {
             app.searchClear();
-            app.buildView() catch |err| {
-                std.log.err("buildView failed on escape {}", .{err});
-            };
+            app.refreshFilter();
             app.mode = .normal;
         },
         // allow navigation while in search mode

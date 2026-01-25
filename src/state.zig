@@ -5,6 +5,15 @@ const zigtui = @import("zigtui");
 const model = @import("model");
 const platform = @import("platform");
 
+pub const ProcHot = struct {
+    pid: std.posix.pid_t,
+    start_time_ns: i128,
+    cpu_percent: f32,
+    mem_rss_bytes: u64,
+};
+
+pub const ProcHotList = std.MultiArrayList(ProcHot);
+
 pub const ProcView = struct {
     proc: *platform.backend.Proc,
     cpu_percent: f32 = 0,
@@ -31,6 +40,7 @@ pub const AppState = struct {
     allocator: std.mem.Allocator,
     selected_item: usize = 0,
     scroll_offset: usize = 0,
+    hot: ProcHotList = .{},
     sort_column: SortColumn = .cpu,
     sort_direction: SortDirection = .desc,
     active_toast: ?Toast = null,
@@ -76,73 +86,116 @@ pub const AppState = struct {
         self.sortView();
     }
 
+    /// Full rebuild: populate data, sort, filter, restore selection.
+    /// Called on new batch.
     pub fn buildView(self: *AppState) !void {
         const prev_identity = self.getSelectedIdentity();
-
-        self.view.clearRetainingCapacity();
-        if (self.current_batch) |*batch| {
-            const search = self.searchSlice();
-            var search_lower_buf: [256]u8 = undefined;
-            const search_lower = std.ascii.lowerString(&search_lower_buf, search);
-
-            //calc time delta for cpu%
-            const time_delta: i128 = if (self.previous_batch) |*prev|
-                batch.timestamp_ns - prev.timestamp_ns
-            else
-                0;
-
-            var iter = batch.map.iterator();
-            while (iter.next()) |entry| {
-                const proc_ptr = entry.value_ptr.*;
-
-                // compute cpu%
-                var cpu_percent: f32 = 0;
-                if (self.previous_batch) |*prev| {
-                    if (prev.map.get(proc_ptr.pid)) |old_proc| {
-                        if (old_proc.start_time_ns == proc_ptr.start_time_ns and time_delta > 0) {
-                            const new_total = proc_ptr.total_user + proc_ptr.total_system;
-                            const old_total = old_proc.total_user + old_proc.total_system;
-                            const cpu_delta = new_total -| old_total;
-                            cpu_percent = @as(f32, @floatFromInt(cpu_delta)) / @as(f32, @floatFromInt(time_delta)) * 100.0;
-                        }
-                    }
-                }
-
-                if (search.len == 0) {
-                    try self.view.append(self.allocator, .{
-                        .proc = proc_ptr,
-                        .cpu_percent = cpu_percent,
-                    });
-                } else {
-                    if (self.matchesSearch(proc_ptr, search_lower)) {
-                        try self.view.append(self.allocator, .{
-                            .proc = proc_ptr,
-                            .cpu_percent = cpu_percent,
-                        });
-                    }
-                }
-            }
-
-            self.indices.clearRetainingCapacity();
-            try self.indices.ensureTotalCapacity(self.allocator, self.view.items.len);
-            for (0..self.view.items.len) |i| {
-                self.indices.appendAssumeCapacity(i);
-            }
-
-            std.mem.sort(usize, self.indices.items, self, compareByIndex);
-
-            // std.mem.sort(ProcView, self.view.items, self, compareProcView);
-
-            self.restoreSelection(prev_identity);
-
-            self.selected_item = 0;
-            self.scroll_offset = 0;
-        }
+        try self.populateView();
+        try self.buildIndices();
+        try self.applyFilter();
+        self.applySelection(prev_identity);
     }
+
+    /// Re-sort and filter without repopulating data.
+    /// Called on sort column/direction change.
     pub fn sortView(self: *AppState) void {
         const prev_identity = self.getSelectedIdentity();
+        self.buildIndices() catch return;
+        self.applyFilter() catch return;
+        self.applySelection(prev_identity);
+    }
+
+    /// Refresh filter without re-sorting.
+    /// Called on search change.
+    pub fn refreshFilter(self: *AppState) void {
+        const prev_identity = self.getSelectedIdentity();
+        self.buildIndices() catch return;
+        self.applyFilter() catch return;
+        self.applySelection(prev_identity);
+    }
+
+    /// Stage 1: Populate view with ALL processes and computed CPU%.
+    fn populateView(self: *AppState) !void {
+        self.view.clearRetainingCapacity();
+        self.hot.shrinkRetainingCapacity(0);
+
+        const batch = self.current_batch orelse return;
+        const time_delta: i128 = if (self.previous_batch) |*prev|
+            batch.timestamp_ns - prev.timestamp_ns
+        else
+            0;
+
+        var iter = batch.map.iterator();
+        while (iter.next()) |entry| {
+            const proc_ptr = entry.value_ptr.*;
+
+            // Compute CPU%
+            var cpu_percent: f32 = 0;
+            if (self.previous_batch) |*prev| {
+                if (prev.map.get(proc_ptr.pid)) |old_proc| {
+                    if (old_proc.start_time_ns == proc_ptr.start_time_ns and time_delta > 0) {
+                        const new_total = proc_ptr.total_user + proc_ptr.total_system;
+                        const old_total = old_proc.total_user + old_proc.total_system;
+                        const cpu_delta = new_total -| old_total;
+                        cpu_percent = @as(f32, @floatFromInt(cpu_delta)) / @as(f32, @floatFromInt(time_delta)) * 100.0;
+                    }
+                }
+            }
+
+            // Append ALL items (no search filter here)
+            try self.view.append(self.allocator, .{
+                .proc = proc_ptr,
+                .cpu_percent = cpu_percent,
+            });
+            try self.hot.append(self.allocator, .{
+                .pid = proc_ptr.pid,
+                .start_time_ns = proc_ptr.start_time_ns,
+                .cpu_percent = cpu_percent,
+                .mem_rss_bytes = proc_ptr.mem_rss,
+            });
+        }
+        std.debug.assert(self.view.items.len == self.hot.len); // For development ensure hot is in sync
+    }
+
+    /// Stage 2: Build sorted index array from view.
+    fn buildIndices(self: *AppState) !void {
+        self.indices.clearRetainingCapacity();
+        try self.indices.ensureTotalCapacity(self.allocator, self.view.items.len);
+        for (0..self.view.items.len) |i| {
+            self.indices.appendAssumeCapacity(i);
+        }
         std.mem.sort(usize, self.indices.items, self, compareByIndex);
+    }
+
+    /// Stage 3: Filter indices to only include items matching search.
+    fn applyFilter(self: *AppState) !void {
+        const search = self.searchSlice();
+        if (search.len == 0) return; // No filter needed
+
+        var search_lower_buf: [256]u8 = undefined;
+        const search_lower = std.ascii.lowerString(&search_lower_buf, search);
+
+        // Filter in-place: keep only matching indices
+        var write_idx: usize = 0;
+        for (self.indices.items) |data_idx| {
+            const proc_ptr = self.view.items[data_idx].proc;
+            if (self.matchesSearch(proc_ptr, search_lower)) {
+                self.indices.items[write_idx] = data_idx;
+                write_idx += 1;
+            }
+        }
+        self.indices.shrinkRetainingCapacity(write_idx);
+    }
+
+    /// Stage 4: Restore selection by identity, or clamp to valid range.
+    fn applySelection(self: *AppState, prev_identity: ?model.ProcIdentity) void {
         self.restoreSelection(prev_identity);
+        if (self.indices.items.len == 0) {
+            self.selected_item = 0;
+        } else {
+            self.selected_item = @min(self.selected_item, self.indices.items.len - 1);
+        }
+        self.scroll_offset = 0;
     }
     pub fn down(self: *AppState) void {
         if (self.selected_item < self.indices.items.len -| 1) {
@@ -183,6 +236,7 @@ pub const AppState = struct {
     pub fn deinit(self: *AppState) void {
         self.view.deinit(self.allocator);
         self.indices.deinit(self.allocator);
+        self.hot.deinit(self.allocator);
         if (self.current_batch) |*batch| {
             batch.deinit();
         }
