@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const proc = @import("proc");
+const platform = @import("platform");
 const channel = @import("thread_channel");
 
 const poll_interval_ns: u64 = 3 * std.time.ns_per_s;
@@ -37,14 +37,14 @@ fn fetchAndSend(queue: *channel.BatchQueue) !void {
     //create a new batch
     var batch = channel.Batch{
         .arena = batch_arena,
-        .map = std.AutoHashMap(proc.pid_t, *proc.Proc).init(arena_alloc),
+        .map = std.AutoHashMap(std.posix.pid_t, *platform.backend.Proc).init(arena_alloc),
         .timestamp_ns = std.time.nanoTimestamp(),
     };
-    var raw_map = try proc.getProcList(arena_alloc);
+    var raw_map = try platform.collectSnapshot(arena_alloc);
     // const arena_alloc = batch.arena.allocator();
     var iter = raw_map.iterator();
     while (iter.next()) |entry| {
-        const p = try arena_alloc.create(proc.Proc);
+        const p = try arena_alloc.create(platform.backend.Proc);
         p.* = entry.value_ptr.*;
         try batch.map.put(entry.key_ptr.*, p);
     }

@@ -1,7 +1,7 @@
 const std = @import("std");
 const state = @import("state");
-const proc = @import("proc");
 const keymap = @import("event_keymap");
+const platform = @import("platform");
 
 pub fn handleEvent(app: *state.AppState, event: anytype) !void {
     switch (event) {
@@ -139,7 +139,7 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
 fn killSelected(app: *state.AppState, force: bool) void {
     if (app.selected_item < app.view.items.len) {
         const pv = app.view.items[app.selected_item];
-        proc.killProcById(pv.proc.pid, force) catch |err| {
+        platform.signal(pv.proc.pid, force) catch |err| {
             app.showToastFmt("Kill failed: {}", .{err}, .err);
             return;
         };

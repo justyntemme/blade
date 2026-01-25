@@ -1,12 +1,12 @@
 const std = @import("std");
-const proc = @import("proc");
 const channel = @import("thread_channel");
 const sort = @import("sort");
 const zigtui = @import("zigtui");
 const model = @import("model");
+const platform = @import("platform");
 
 pub const ProcView = struct {
-    proc: *proc.Proc,
+    proc: *platform.backend.Proc,
     cpu_percent: f32 = 0,
 };
 
@@ -194,7 +194,7 @@ pub const AppState = struct {
         };
     }
 
-    fn matchesSearch(self: *const AppState, proc_ptr: *proc.Proc, search: []const u8) bool {
+    fn matchesSearch(self: *const AppState, proc_ptr: *platform.backend.Proc, search: []const u8) bool {
         _ = self; //unused for now but keeps method on appstate for future changes
         //Buffers
         var name_lower_buf: [256]u8 = undefined;

@@ -1,6 +1,6 @@
 const std = @import("std");
 const spsc = @import("spsc_queue");
-const proc = @import("proc");
+const platform = @import("platform");
 
 /// Batch represents a snapshot of process data with its own memory arena.
 ///
@@ -13,7 +13,7 @@ const proc = @import("proc");
 /// Invariant: Never store references to batch data outside the batch lifetime.
 pub const Batch = struct {
     arena: std.heap.ArenaAllocator,
-    map: std.AutoHashMap(proc.pid_t, *proc.Proc),
+    map: std.AutoHashMap(std.posix.pid_t, *platform.backend.Proc),
     timestamp_ns: i128 = 0,
 
     pub fn deinit(self: *Batch) void {
