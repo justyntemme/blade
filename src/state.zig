@@ -128,6 +128,7 @@ pub const AppState = struct {
     fn populateView(self: *AppState) !void {
         self.view.clearRetainingCapacity();
         self.hot.shrinkRetainingCapacity(0);
+        self.cold.clearRetainingCapacity();
 
         const batch = self.current_batch orelse return;
         const time_delta: i128 = if (self.previous_batch) |*prev|
@@ -175,8 +176,8 @@ pub const AppState = struct {
     /// Stage 2: Build sorted index array from view.
     fn buildIndices(self: *AppState) !void {
         self.indices.clearRetainingCapacity();
-        try self.indices.ensureTotalCapacity(self.allocator, self.view.items.len);
-        for (0..self.view.items.len) |i| {
+        try self.indices.ensureTotalCapacity(self.allocator, self.hot.len);
+        for (0..self.hot.len) |i| {
             self.indices.appendAssumeCapacity(i);
         }
         std.mem.sort(usize, self.indices.items, self, compareByIndex);
@@ -193,8 +194,8 @@ pub const AppState = struct {
         // Filter in-place: keep only matching indices
         var write_idx: usize = 0;
         for (self.indices.items) |data_idx| {
-            const proc_ptr = self.view.items[data_idx].proc;
-            if (self.matchesSearch(proc_ptr, search_lower)) {
+            const cold_data = self.cold.items[data_idx];
+            if (self.matchesSearch(cold_data, search_lower)) {
                 self.indices.items[write_idx] = data_idx;
                 write_idx += 1;
             }
@@ -274,21 +275,19 @@ pub const AppState = struct {
         };
     }
 
-    fn matchesSearch(self: *const AppState, proc_ptr: *platform.backend.Proc, search: []const u8) bool {
+    fn matchesSearch(self: *const AppState, cold_data: ProcCold, search: []const u8) bool {
         _ = self; //unused for now but keeps method on appstate for future changes
         //Buffers
         var name_lower_buf: [256]u8 = undefined;
         var path_lower_buf: [4096]u8 = undefined;
 
-        const name_slice = std.mem.sliceTo(&proc_ptr.s_name, 0);
-        const name_lower = std.ascii.lowerString(&name_lower_buf, name_slice);
+        const name_lower = std.ascii.lowerString(&name_lower_buf, cold_data.name);
 
         if (std.mem.indexOf(u8, name_lower, search) != null) {
             return true;
         }
 
-        const path_slice = std.mem.sliceTo(&proc_ptr.path, 0);
-        const path_lower = std.ascii.lowerString(&path_lower_buf, path_slice);
+        const path_lower = std.ascii.lowerString(&path_lower_buf, cold_data.path);
 
         if (std.mem.indexOf(u8, path_lower, search) != null) {
             return true;
@@ -301,14 +300,15 @@ pub const AppState = struct {
         //Clamp selected time within item bounds
         const idx = @min(self.selected_item, self.indices.items.len - 1);
         const data_idx = self.indices.items[idx];
-        return self.view.items[data_idx].proc.identity();
+        return .{ .pid = self.hot.items(.pid)[data_idx], .start_time_ns = self.hot.items(.start_time_ns)[data_idx] };
     }
 
     fn restoreSelection(self: *AppState, prev_identity: ?model.ProcIdentity) void {
         if (prev_identity) |identity| {
+            const pids = self.hot.items(.pid);
+            const start_times = self.hot.items(.start_time_ns);
             for (self.indices.items, 0..) |data_idx, i| {
-                const pv = self.view.items[data_idx];
-                if (pv.proc.identity().eql(identity)) {
+                if (pids[data_idx] == identity.pid and start_times[data_idx] == identity.start_time_ns) {
                     self.selected_item = i;
                     return;
                 }
@@ -317,14 +317,8 @@ pub const AppState = struct {
     }
 };
 
-fn compareProcView(ctx: *const AppState, a: ProcView, b: ProcView) bool {
-    return sort.compareProcView(ctx, a, b);
-}
-
 fn compareByIndex(ctx: *const AppState, a: usize, b: usize) bool {
-    const pv_a = ctx.view.items[a];
-    const pv_b = ctx.view.items[b];
-    return sort.compareProcView(ctx, pv_a, pv_b);
+    return sort.compareByIndex(ctx, a, b);
 }
 
 pub const DrawContext = struct {

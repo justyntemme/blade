@@ -112,24 +112,28 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
     while (idx < app.indices.items.len) : (idx += 1) {
         if (y >= list_rect.y + list_rect.height) break;
         const data_idx = app.indices.items[idx];
-        const pv = app.view.items[data_idx];
-        const p = pv.proc;
         const style = if (idx == app.selected_item)
             _Style{ .bg = .blue, .fg = .white }
         else
             _Style{ .fg = .white };
+        const pid = app.hot.items(.pid)[data_idx];
+        const cpu_percent = app.hot.items(.cpu_percent)[data_idx];
+        const mem_rss = app.hot.items(.mem_rss)[data_idx];
+
+        //cold
+        const name = app.cold.items[data_idx].name;
+        const path = app.cold.items[data_idx].path;
+
         var pid_buf: [8]u8 = undefined;
-        const pid_str = std.fmt.bufPrint(&pid_buf, "{d:<7}", .{p.pid}) catch "err";
+        const pid_str = std.fmt.bufPrint(&pid_buf, "{d:<7}", .{pid}) catch "err";
         var cpu_buf: [7]u8 = undefined;
-        const cpu_str = std.fmt.bufPrint(&cpu_buf, "{d:>5.1}%", .{pv.cpu_percent}) catch "err";
+        const cpu_str = std.fmt.bufPrint(&cpu_buf, "{d:>5.1}%", .{cpu_percent}) catch "err";
 
         var mem_buf: [10]u8 = undefined;
-        const mem_mb = @as(f64, @floatFromInt(p.mem_rss)) / (1024.0 * 1024.0);
+        const mem_mb = @as(f64, @floatFromInt(mem_rss)) / (1024.0 * 1024.0);
         const mem_str = std.fmt.bufPrint(&mem_buf, "{d:>6.1} MB", .{mem_mb}) catch "err";
 
-        const name = std.mem.sliceTo(&p.s_name, 0);
         const name_display = name[0..@min(name.len, name_col.width)];
-        const path = std.mem.sliceTo(&p.path, 0);
         const path_display = path[0..@min(path.len, path_col.width)];
 
         buf.setString(pid_col.x, y, pid_str, style);
