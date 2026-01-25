@@ -9,10 +9,19 @@ pub const ProcHot = struct {
     pid: std.posix.pid_t,
     start_time_ns: i128,
     cpu_percent: f32,
-    mem_rss_bytes: u64,
+    mem_rss: u64,
 };
 
 pub const ProcHotList = std.MultiArrayList(ProcHot);
+
+pub const ProcCold = struct {
+    name: []const u8,
+    path: []const u8,
+};
+//TODO review this idea   Why slices instead of fixed arrays?
+// - Slices are 16 bytes (pointer + length) vs 4352 bytes for [256]u8 + [4096]u8
+// - The actual string bytes still live in the batch's Proc structs
+// - We're just storing a view into that data
 
 pub const ProcView = struct {
     proc: *platform.backend.Proc,
@@ -41,6 +50,7 @@ pub const AppState = struct {
     selected_item: usize = 0,
     scroll_offset: usize = 0,
     hot: ProcHotList = .{},
+    cold: std.ArrayList(ProcCold) = .empty,
     sort_column: SortColumn = .cpu,
     sort_direction: SortDirection = .desc,
     active_toast: ?Toast = null,
@@ -147,14 +157,19 @@ pub const AppState = struct {
                 .proc = proc_ptr,
                 .cpu_percent = cpu_percent,
             });
+            try self.cold.append(self.allocator, .{
+                .name = std.mem.sliceTo(&proc_ptr.s_name, 0),
+                .path = std.mem.sliceTo(&proc_ptr.path, 0),
+            });
             try self.hot.append(self.allocator, .{
                 .pid = proc_ptr.pid,
                 .start_time_ns = proc_ptr.start_time_ns,
                 .cpu_percent = cpu_percent,
-                .mem_rss_bytes = proc_ptr.mem_rss,
+                .mem_rss = proc_ptr.mem_rss,
             });
         }
         std.debug.assert(self.view.items.len == self.hot.len); // For development ensure hot is in sync
+        std.debug.assert(self.view.items.len == self.cold.items.len); // For development ensure hot is in sync
     }
 
     /// Stage 2: Build sorted index array from view.
@@ -237,6 +252,7 @@ pub const AppState = struct {
         self.view.deinit(self.allocator);
         self.indices.deinit(self.allocator);
         self.hot.deinit(self.allocator);
+        self.cold.deinit(self.allocator);
         if (self.current_batch) |*batch| {
             batch.deinit();
         }
