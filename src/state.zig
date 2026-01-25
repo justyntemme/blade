@@ -39,6 +39,7 @@ pub const AppState = struct {
     search_buf: [256]u8 = [_]u8{0} ** 256,
     search_len: usize = 0,
     view: std.ArrayList(ProcView) = .empty,
+    indices: std.ArrayList(usize) = .empty,
     previous_batch: ?channel.Batch = null,
     pub fn showToast(self: *AppState, message: []const u8, level: ToastLevel) void {
         var toast = Toast{
@@ -122,7 +123,15 @@ pub const AppState = struct {
                 }
             }
 
-            std.mem.sort(ProcView, self.view.items, self, compareProcView);
+            self.indices.clearRetainingCapacity();
+            try self.indices.ensureTotalCapacity(self.allocator, self.view.items.len);
+            for (0..self.view.items.len) |i| {
+                self.indices.appendAssumeCapacity(i);
+            }
+
+            std.mem.sort(usize, self.indices.items, self, compareByIndex);
+
+            // std.mem.sort(ProcView, self.view.items, self, compareProcView);
 
             self.restoreSelection(prev_identity);
 
@@ -132,11 +141,11 @@ pub const AppState = struct {
     }
     pub fn sortView(self: *AppState) void {
         const prev_identity = self.getSelectedIdentity();
-        std.mem.sort(ProcView, self.view.items, self, compareProcView);
+        std.mem.sort(usize, self.indices.items, self, compareByIndex);
         self.restoreSelection(prev_identity);
     }
     pub fn down(self: *AppState) void {
-        if (self.selected_item < self.view.items.len -| 1) {
+        if (self.selected_item < self.indices.items.len -| 1) {
             self.selected_item += 1;
         }
     }
@@ -173,6 +182,7 @@ pub const AppState = struct {
 
     pub fn deinit(self: *AppState) void {
         self.view.deinit(self.allocator);
+        self.indices.deinit(self.allocator);
         if (self.current_batch) |*batch| {
             batch.deinit();
         }
@@ -217,15 +227,17 @@ pub const AppState = struct {
         return false;
     }
     fn getSelectedIdentity(self: *const AppState) ?model.ProcIdentity {
-        if (self.view.items.len == 0) return null;
+        if (self.indices.items.len == 0) return null;
         //Clamp selected time within item bounds
-        const idx = @min(self.selected_item, self.view.items.len - 1);
-        return self.view.items[idx].proc.identity();
+        const idx = @min(self.selected_item, self.indices.items.len - 1);
+        const data_idx = self.indices.items[idx];
+        return self.view.items[data_idx].proc.identity();
     }
 
     fn restoreSelection(self: *AppState, prev_identity: ?model.ProcIdentity) void {
         if (prev_identity) |identity| {
-            for (self.view.items, 0..) |pv, i| {
+            for (self.indices.items, 0..) |data_idx, i| {
+                const pv = self.view.items[data_idx];
                 if (pv.proc.identity().eql(identity)) {
                     self.selected_item = i;
                     return;
@@ -237,6 +249,12 @@ pub const AppState = struct {
 
 fn compareProcView(ctx: *const AppState, a: ProcView, b: ProcView) bool {
     return sort.compareProcView(ctx, a, b);
+}
+
+fn compareByIndex(ctx: *const AppState, a: usize, b: usize) bool {
+    const pv_a = ctx.view.items[a];
+    const pv_b = ctx.view.items[b];
+    return sort.compareProcView(ctx, pv_a, pv_b);
 }
 
 pub const DrawContext = struct {

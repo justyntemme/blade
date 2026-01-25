@@ -109,9 +109,10 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
 
     var y: u16 = list_rect.y + 1;
     var idx: usize = app.scroll_offset;
-    while (idx < app.view.items.len) : (idx += 1) {
+    while (idx < app.indices.items.len) : (idx += 1) {
         if (y >= list_rect.y + list_rect.height) break;
-        const pv = app.view.items[idx];
+        const data_idx = app.indices.items[idx];
+        const pv = app.view.items[data_idx];
         const p = pv.proc;
         const style = if (idx == app.selected_item)
             _Style{ .bg = .blue, .fg = .white }
