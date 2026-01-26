@@ -17,6 +17,8 @@ pub const ProcHotList = std.MultiArrayList(ProcHot);
 pub const ProcCold = struct {
     name: []const u8,
     path: []const u8,
+    name_lower: []const u8,
+    path_lower: []const u8,
 };
 //TODO review this idea   Why slices instead of fixed arrays?
 // - Slices are 16 bytes (pointer + length) vs 4352 bytes for [256]u8 + [4096]u8
@@ -60,6 +62,7 @@ pub const AppState = struct {
     search_len: usize = 0,
     view: std.ArrayList(ProcView) = .empty,
     indices: std.ArrayList(usize) = .empty,
+    sorted_indices: std.ArrayList(usize) = .empty,
     previous_batch: ?channel.Batch = null,
     pub fn showToast(self: *AppState, message: []const u8, level: ToastLevel) void {
         var toast = Toast{
@@ -119,7 +122,6 @@ pub const AppState = struct {
     /// Called on search change.
     pub fn refreshFilter(self: *AppState) void {
         const prev_identity = self.getSelectedIdentity();
-        self.buildIndices() catch return;
         self.applyFilter() catch return;
         self.applySelection(prev_identity);
     }
@@ -128,6 +130,10 @@ pub const AppState = struct {
     fn populateView(self: *AppState) !void {
         self.view.clearRetainingCapacity();
         self.hot.shrinkRetainingCapacity(0);
+        for (self.cold.items) |cold_item| {
+            self.allocator.free(cold_item.name_lower);
+            self.allocator.free(cold_item.path_lower);
+        }
         self.cold.clearRetainingCapacity();
 
         const batch = self.current_batch orelse return;
@@ -153,6 +159,13 @@ pub const AppState = struct {
                 }
             }
 
+            const name_slice = std.mem.sliceTo(&proc_ptr.s_name, 0);
+            const path_slice = std.mem.sliceTo(&proc_ptr.path, 0);
+            const name_lower = try self.allocator.alloc(u8, name_slice.len);
+            _ = std.ascii.lowerString(name_lower, name_slice);
+            const path_lower = try self.allocator.alloc(u8, path_slice.len);
+            _ = std.ascii.lowerString(path_lower, path_slice);
+
             // Append ALL items (no search filter here)
             try self.view.append(self.allocator, .{
                 .proc = proc_ptr,
@@ -161,6 +174,8 @@ pub const AppState = struct {
             try self.cold.append(self.allocator, .{
                 .name = std.mem.sliceTo(&proc_ptr.s_name, 0),
                 .path = std.mem.sliceTo(&proc_ptr.path, 0),
+                .name_lower = name_lower,
+                .path_lower = path_lower,
             });
             try self.hot.append(self.allocator, .{
                 .pid = proc_ptr.pid,
@@ -175,32 +190,33 @@ pub const AppState = struct {
 
     /// Stage 2: Build sorted index array from view.
     fn buildIndices(self: *AppState) !void {
-        self.indices.clearRetainingCapacity();
-        try self.indices.ensureTotalCapacity(self.allocator, self.hot.len);
+        self.sorted_indices.clearRetainingCapacity();
+        try self.sorted_indices.ensureTotalCapacity(self.allocator, self.hot.len);
         for (0..self.hot.len) |i| {
-            self.indices.appendAssumeCapacity(i);
+            self.sorted_indices.appendAssumeCapacity(i);
         }
-        std.mem.sort(usize, self.indices.items, self, compareByIndex);
+        std.mem.sort(usize, self.sorted_indices.items, self, compareByIndex);
     }
 
     /// Stage 3: Filter indices to only include items matching search.
     fn applyFilter(self: *AppState) !void {
         const search = self.searchSlice();
-        if (search.len == 0) return; // No filter needed
+        self.indices.clearRetainingCapacity();
+        try self.indices.ensureTotalCapacity(self.allocator, self.sorted_indices.items.len);
+        if (search.len == 0) {
+            self.indices.appendSliceAssumeCapacity(self.sorted_indices.items);
+            return;
+        }
 
         var search_lower_buf: [256]u8 = undefined;
         const search_lower = std.ascii.lowerString(&search_lower_buf, search);
 
-        // Filter in-place: keep only matching indices
-        var write_idx: usize = 0;
-        for (self.indices.items) |data_idx| {
+        for (self.sorted_indices.items) |data_idx| {
             const cold_data = self.cold.items[data_idx];
             if (self.matchesSearch(cold_data, search_lower)) {
-                self.indices.items[write_idx] = data_idx;
-                write_idx += 1;
+                self.indices.appendAssumeCapacity(data_idx);
             }
         }
-        self.indices.shrinkRetainingCapacity(write_idx);
     }
 
     /// Stage 4: Restore selection by identity, or clamp to valid range.
@@ -252,7 +268,12 @@ pub const AppState = struct {
     pub fn deinit(self: *AppState) void {
         self.view.deinit(self.allocator);
         self.indices.deinit(self.allocator);
+        self.sorted_indices.deinit(self.allocator);
         self.hot.deinit(self.allocator);
+        for (self.cold.items) |cold_item| {
+            self.allocator.free(cold_item.name_lower);
+            self.allocator.free(cold_item.path_lower);
+        }
         self.cold.deinit(self.allocator);
         if (self.current_batch) |*batch| {
             batch.deinit();
@@ -278,18 +299,12 @@ pub const AppState = struct {
     fn matchesSearch(self: *const AppState, cold_data: ProcCold, search: []const u8) bool {
         _ = self; //unused for now but keeps method on appstate for future changes
         //Buffers
-        var name_lower_buf: [256]u8 = undefined;
-        var path_lower_buf: [4096]u8 = undefined;
 
-        const name_lower = std.ascii.lowerString(&name_lower_buf, cold_data.name);
-
-        if (std.mem.indexOf(u8, name_lower, search) != null) {
+        if (std.mem.indexOf(u8, cold_data.name_lower, search) != null) {
             return true;
         }
 
-        const path_lower = std.ascii.lowerString(&path_lower_buf, cold_data.path);
-
-        if (std.mem.indexOf(u8, path_lower, search) != null) {
+        if (std.mem.indexOf(u8, cold_data.path_lower, search) != null) {
             return true;
         }
 
