@@ -25,11 +25,6 @@ pub const ProcCold = struct {
 // - The actual string bytes still live in the batch's Proc structs
 // - We're just storing a view into that data
 
-pub const ProcView = struct {
-    proc: *platform.backend.Proc,
-    cpu_percent: f32 = 0,
-};
-
 pub const SortColumn = enum { pid, name, cpu, mem, path };
 pub const SortDirection = enum { asc, desc };
 
@@ -60,7 +55,6 @@ pub const AppState = struct {
     mode: enum { normal, search } = .normal,
     search_buf: [256]u8 = [_]u8{0} ** 256,
     search_len: usize = 0,
-    view: std.ArrayList(ProcView) = .empty,
     indices: std.ArrayList(usize) = .empty,
     sorted_indices: std.ArrayList(usize) = .empty,
     previous_batch: ?channel.Batch = null,
@@ -128,7 +122,6 @@ pub const AppState = struct {
 
     /// Stage 1: Populate view with ALL processes and computed CPU%.
     fn populateView(self: *AppState) !void {
-        self.view.clearRetainingCapacity();
         self.hot.shrinkRetainingCapacity(0);
         for (self.cold.items) |cold_item| {
             self.allocator.free(cold_item.name_lower);
@@ -167,10 +160,6 @@ pub const AppState = struct {
             _ = std.ascii.lowerString(path_lower, path_slice);
 
             // Append ALL items (no search filter here)
-            try self.view.append(self.allocator, .{
-                .proc = proc_ptr,
-                .cpu_percent = cpu_percent,
-            });
             try self.cold.append(self.allocator, .{
                 .name = std.mem.sliceTo(&proc_ptr.s_name, 0),
                 .path = std.mem.sliceTo(&proc_ptr.path, 0),
@@ -184,8 +173,7 @@ pub const AppState = struct {
                 .mem_rss = proc_ptr.mem_rss,
             });
         }
-        std.debug.assert(self.view.items.len == self.hot.len); // For development ensure hot is in sync
-        std.debug.assert(self.view.items.len == self.cold.items.len); // For development ensure hot is in sync
+        std.debug.assert(self.hot.len == self.cold.items.len); // For development ensure hot is in sync
     }
 
     /// Stage 2: Build sorted index array from view.
@@ -266,7 +254,6 @@ pub const AppState = struct {
     }
 
     pub fn deinit(self: *AppState) void {
-        self.view.deinit(self.allocator);
         self.indices.deinit(self.allocator);
         self.sorted_indices.deinit(self.allocator);
         self.hot.deinit(self.allocator);

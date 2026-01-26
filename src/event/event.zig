@@ -31,74 +31,6 @@ fn handleNormalMode(app: *state.AppState, key: anytype) void {
     const action = keymap.getAction(mapped_key, .normal) orelse return;
 
     executeAction(app, action);
-
-    // switch (key.code) {
-    //     .char => |c| {
-    //         switch (c) {
-    //             '/' => {
-    //                 app.mode = .search;
-    //             },
-    //             'c' => {
-    //                 app.search_len = 0;
-    //                 app.buildView() catch |err| {
-    //                     std.log.err("buildView failed on clear search {}", .{err});
-    //                 };
-    //             },
-    //             'q' => app.running = false,
-    //             'j' => app.down(),
-    //             'k' => app.up(),
-    //             'u' => for (0..5) |_| app.up(),
-    //             'd' => for (0..5) |_| app.down(),
-    //             'x' => {
-    //                 //SIGTERM
-    //                 if (app.selected_item < app.view.items.len) {
-    //                     const pv = app.view.items[app.selected_item];
-    //                     const pid = pv.proc.pid;
-    //
-    //                     proc.killProcById(pid, false) catch |err| {
-    //                         app.showToastFmt("Error on killProcById {}", .{err}, .err);
-    //                     };
-    //                 } else {
-    //                     app.showToast("Error: No pid found for object", .err);
-    //                 }
-    //                 app.buildView() catch |err| {
-    //                     std.log.err("buildView failed on enter {}", .{err});
-    //                 };
-    //             },
-    //             'X' => {
-    //                 //SIGKILL
-    //                 if (app.selected_item < app.view.items.len) {
-    //                     const pv = app.view.items[app.selected_item];
-    //                     proc.killProcById(pv.proc.pid, true) catch |err| {
-    //                         std.log.err("Failed to kill process {}: {}", .{ pv.proc.pid, err });
-    //                     };
-    //                     app.buildView() catch |err| {
-    //                         std.log.err("buildView failed on enter {}", .{err});
-    //                     };
-    //                 }
-    //             },
-    //             'P' => app.setSort(.pid),
-    //             // 'P' => app.setSort(.pid) catch |err| {
-    //             // app.showToastFmt("Error sorting by process: {}", .{err}, .err);
-    //             // },
-    //             'N' => app.setSort(.name),
-    //             //     app.showToastFmt("Error sorting by name: {}", .{err}, .err);
-    //             // },
-    //             'C' => app.setSort(.cpu),
-    //             // app.showToastFmt("Error sorting by CPU: {}", .{err}, .err);
-    //             // },
-    //             'M' => app.setSort(.mem),
-    //             // app.showToastFmt("Error sorting by Mem: {}", .{err}, .err);
-    //             // },
-    //
-    //             else => {},
-    //         }
-    //     },
-    //     .esc => app.running = false,
-    //     .up => app.up(),
-    //     .down => app.down(),
-    //     else => {},
-    // }
 }
 
 fn mapKey(key: anytype) ?keymap.Key {
@@ -137,8 +69,8 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
 fn killSelected(app: *state.AppState, force: bool) void {
     if (app.selected_item < app.indices.items.len) {
         const data_idx = app.indices.items[app.selected_item];
-        const pv = app.view.items[data_idx];
-        platform.signal(pv.proc.pid, force) catch |err| {
+        const pid = app.hot.items(.pid)[data_idx];
+        platform.signal(pid, force) catch |err| {
             app.showToastFmt("Kill failed: {}", .{err}, .err);
             return;
         };
