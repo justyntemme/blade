@@ -14,21 +14,21 @@ const tui = @import("zigtui");
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const gpa_alloc = gpa.allocator();
     // try tui.backend.NativeBackend.init(allocator);
-    var backend = try tui.backend.AnsiBackend.init(allocator);
+    var backend = try tui.backend.AnsiBackend.init(gpa_alloc);
     defer backend.deinit();
 
     // // Initialize terminal
-    var terminal = try tui.terminal.Terminal.init(allocator, backend.interface());
+    var terminal = try tui.terminal.Terminal.init(gpa_alloc, backend.interface());
     defer terminal.deinit();
 
     // Hide cursor
     try terminal.hideCursor();
-    var app = state.AppState.init(allocator);
+    var app = state.AppState.init(gpa_alloc);
     app.terminal = &terminal;
     defer app.deinit();
-    var queue = try channel.initQueue(allocator);
+    var queue = try channel.initQueue(gpa_alloc);
     defer queue.deinit();
 
     // Thread synch
@@ -58,7 +58,7 @@ pub fn main() !void {
         // Handle input
         try event.handleEvent(&app, e);
 
-        const ctx = state.DrawContext{ .state = &app, .allocator = allocator };
+        const ctx = state.DrawContext{ .state = &app, .scratch = gpa_alloc };
 
         // Draw UI
         try terminal.draw(ctx, render.render);

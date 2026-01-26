@@ -31,6 +31,6 @@ pub const Batch = struct {
 pub const BatchQueue = spsc.SpscQueue(Batch, false);
 
 // init
-pub fn initQueue(allocator: std.mem.Allocator) !BatchQueue {
-    return BatchQueue.initCapacity(allocator, 4);
+pub fn initQueue(gpa: std.mem.Allocator) !BatchQueue {
+    return BatchQueue.initCapacity(gpa, 4);
 }

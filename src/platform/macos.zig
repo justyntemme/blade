@@ -46,11 +46,11 @@ pub const Proc = struct {
         };
     }
 };
-pub fn collectSnapshot(allocator: std.mem.Allocator) PlatformError!std.AutoHashMap(pid_t, Proc) {
-    var proc_map: std.AutoHashMap(pid_t, Proc) = .init(allocator);
+pub fn collectSnapshot(arena: std.mem.Allocator) PlatformError!std.AutoHashMap(pid_t, Proc) {
+    var proc_map: std.AutoHashMap(pid_t, Proc) = .init(arena);
     const bytes = c.proc_listpids(c.PROC_ALL_PIDS, 0, null, 0);
     const count = @divExact(@as(usize, @intCast(bytes)), @sizeOf(pid_t));
-    const pids = try allocator.alloc(pid_t, count);
+    const pids = try arena.alloc(pid_t, count);
     if (count <= 0) {
         std.debug.print("Failed to get process count\n", .{});
         return error.FailedToGetProcPath;

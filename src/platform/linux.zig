@@ -20,8 +20,8 @@ pub const Proc = struct {
     }
 };
 
-pub fn collectSnapshot(allocator: std.mem.Allocator) PlatformError!std.AutoHashMap(std.posix.pid_t, *Proc) {
-    _ = allocator;
+pub fn collectSnapshot(arena: std.mem.Allocator) PlatformError!std.AutoHashMap(std.posix.pid_t, *Proc) {
+    _ = arena;
     return error.Unsupported;
 }
 

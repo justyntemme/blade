@@ -3,7 +3,7 @@ const channel = @import("thread_channel");
 const sort = @import("sort");
 const zigtui = @import("zigtui");
 const model = @import("model");
-const platform = @import("platform");
+// const platform = @import("platform");
 
 pub const ProcHot = struct {
     pid: std.posix.pid_t,
@@ -43,7 +43,7 @@ pub const Toast = struct {
 pub const AppState = struct {
     running: bool = true,
     terminal: ?*zigtui.Terminal = null,
-    allocator: std.mem.Allocator,
+    gpa: std.mem.Allocator,
     selected_item: usize = 0,
     scroll_offset: usize = 0,
     hot: ProcHotList = .{},
@@ -124,8 +124,8 @@ pub const AppState = struct {
     fn populateView(self: *AppState) !void {
         self.hot.shrinkRetainingCapacity(0);
         for (self.cold.items) |cold_item| {
-            self.allocator.free(cold_item.name_lower);
-            self.allocator.free(cold_item.path_lower);
+            self.gpa.free(cold_item.name_lower);
+            self.gpa.free(cold_item.path_lower);
         }
         self.cold.clearRetainingCapacity();
 
@@ -154,19 +154,19 @@ pub const AppState = struct {
 
             const name_slice = std.mem.sliceTo(&proc_ptr.s_name, 0);
             const path_slice = std.mem.sliceTo(&proc_ptr.path, 0);
-            const name_lower = try self.allocator.alloc(u8, name_slice.len);
+            const name_lower = try self.gpa.alloc(u8, name_slice.len);
             _ = std.ascii.lowerString(name_lower, name_slice);
-            const path_lower = try self.allocator.alloc(u8, path_slice.len);
+            const path_lower = try self.gpa.alloc(u8, path_slice.len);
             _ = std.ascii.lowerString(path_lower, path_slice);
 
             // Append ALL items (no search filter here)
-            try self.cold.append(self.allocator, .{
+            try self.cold.append(self.gpa, .{
                 .name = std.mem.sliceTo(&proc_ptr.s_name, 0),
                 .path = std.mem.sliceTo(&proc_ptr.path, 0),
                 .name_lower = name_lower,
                 .path_lower = path_lower,
             });
-            try self.hot.append(self.allocator, .{
+            try self.hot.append(self.gpa, .{
                 .pid = proc_ptr.pid,
                 .start_time_ns = proc_ptr.start_time_ns,
                 .cpu_percent = cpu_percent,
@@ -179,7 +179,7 @@ pub const AppState = struct {
     /// Stage 2: Build sorted index array from view.
     fn buildIndices(self: *AppState) !void {
         self.sorted_indices.clearRetainingCapacity();
-        try self.sorted_indices.ensureTotalCapacity(self.allocator, self.hot.len);
+        try self.sorted_indices.ensureTotalCapacity(self.gpa, self.hot.len);
         for (0..self.hot.len) |i| {
             self.sorted_indices.appendAssumeCapacity(i);
         }
@@ -190,7 +190,7 @@ pub const AppState = struct {
     fn applyFilter(self: *AppState) !void {
         const search = self.searchSlice();
         self.indices.clearRetainingCapacity();
-        try self.indices.ensureTotalCapacity(self.allocator, self.sorted_indices.items.len);
+        try self.indices.ensureTotalCapacity(self.gpa, self.sorted_indices.items.len);
         if (search.len == 0) {
             self.indices.appendSliceAssumeCapacity(self.sorted_indices.items);
             return;
@@ -247,21 +247,21 @@ pub const AppState = struct {
         self.search_len = 0;
     }
 
-    pub fn init(allocator: std.mem.Allocator) AppState {
+    pub fn init(gpa: std.mem.Allocator) AppState {
         return .{
-            .allocator = allocator,
+            .gpa = gpa,
         };
     }
 
     pub fn deinit(self: *AppState) void {
-        self.indices.deinit(self.allocator);
-        self.sorted_indices.deinit(self.allocator);
-        self.hot.deinit(self.allocator);
+        self.indices.deinit(self.gpa);
+        self.sorted_indices.deinit(self.gpa);
+        self.hot.deinit(self.gpa);
         for (self.cold.items) |cold_item| {
-            self.allocator.free(cold_item.name_lower);
-            self.allocator.free(cold_item.path_lower);
+            self.gpa.free(cold_item.name_lower);
+            self.gpa.free(cold_item.path_lower);
         }
-        self.cold.deinit(self.allocator);
+        self.cold.deinit(self.gpa);
         if (self.current_batch) |*batch| {
             batch.deinit();
         }
@@ -325,5 +325,5 @@ fn compareByIndex(ctx: *const AppState, a: usize, b: usize) bool {
 
 pub const DrawContext = struct {
     state: *AppState,
-    allocator: std.mem.Allocator,
+    scratch: std.mem.Allocator,
 };

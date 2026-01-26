@@ -27,7 +27,7 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
     const area = buf.getArea();
 
     var calculated = try layout.calculate(
-        draw_ctx.allocator,
+        draw_ctx.scratch,
         app_layout,
         layout.Rect{
             .x = area.x + 1,
@@ -47,7 +47,7 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
         return;
     };
     var columns = layout.calculate(
-        draw_ctx.allocator,
+        draw_ctx.scratch,
         column_layout,
         layout.Rect{
             .x = list_rect.x,

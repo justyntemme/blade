@@ -43,7 +43,7 @@ pub const Rect = struct {
 };
 pub const CalculatedLayout = struct {
     rects: std.StringHashMap(Rect),
-    allocator: std.mem.Allocator,
+    scratch: std.mem.Allocator,
 
     pub fn get(self: *const CalculatedLayout, id: []const u8) ?Rect {
         return self.rects.get(id);
@@ -105,13 +105,13 @@ fn calculateGrowSize(weight: f32, total_weight: f32, remaining: u16) u16 {
 }
 
 pub fn calculate(
-    allocator: std.mem.Allocator,
+    scratch: std.mem.Allocator,
     container: Container,
     available: Rect,
 ) LayoutError!CalculatedLayout {
     var result = CalculatedLayout{
-        .rects = std.StringHashMap(Rect).init(allocator),
-        .allocator = allocator,
+        .rects = std.StringHashMap(Rect).init(scratch),
+        .scratch = scratch,
     };
     const is_row = container.direction == .row;
     // determine sizes based on direction
@@ -145,7 +145,7 @@ pub fn calculate(
         try result.rects.put(item.id, item_rect);
 
         if (item.children) |child_container| {
-            var child_layout = try calculate(allocator, child_container.*, item_rect);
+            var child_layout = try calculate(scratch, child_container.*, item_rect);
             defer child_layout.deinit();
 
             // merge result into parent

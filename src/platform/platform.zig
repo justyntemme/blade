@@ -12,8 +12,8 @@ pub const backend = switch (builtin.os.tag) {
 
 pub const PlatformError = backend.PlatformError;
 
-pub fn collectSnapshot(allocator: std.mem.Allocator) PlatformError!std.AutoHashMap(backend.pid_t, backend.Proc) {
-    return backend.collectSnapshot(allocator);
+pub fn collectSnapshot(arena: std.mem.Allocator) PlatformError!std.AutoHashMap(backend.pid_t, backend.Proc) {
+    return backend.collectSnapshot(arena);
 }
 
 pub fn signal(pid: std.posix.pid_t, force: bool) PlatformError!void {
