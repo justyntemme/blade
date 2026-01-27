@@ -22,6 +22,98 @@ We use an arena allocator for the procMap
 as we wipe away the entire map every redraw, and pass over
 the new map pointer.
 
+> Most important best practice for me: never use the name allocator, always be precise about the contract:
+> gpa — the code must call defer gpa.free to free stuff up
+> arena — the data will be bulk-deallocated at the appropriate system boundary, do not call free.
+> scratch — private space for function. Unlike arena, it’s definitely incorrect to return scratch data.
+> You can imagine use all there at the same time:
+> ~~~`zig
+> fn handle(
+>   request: *Request, 
+>  arena: Allocator, 
+> gpa: Allocator, 
+> scratch: Allocator, 
+> ) Response
+> ~~~
+> arena is for request-scoped stuff, that’s where Response is allocated in.
+> gpa is for data that outlives a single request. For example, if requests share a cache, data in the cache is managed via gpa
+> scratch is for data that is required to compute Response, but isn’t actual response. For example, if you need to sort something, you can use scratch to allocate that buffer.
+> - https://ziggit.dev/t/allocators-best-practices-anti-patterns/14043/5?u=justynt
+
+** Reserve-first (allocation safety)
+Condensed pattern: reserve memory up front, then mutate in a no-error path.
+This avoids partial state if a later allocation fails.
+
+Source: matklad, "Reserve First" (Aug 16, 2025)
+https://matklad.github.io/2025/08/16/reserve-first.html
+
+Direct quote (attribution):
+"First, reserve enough memory for operation, without applying any changes to the data structure,
+Then, mutate the data structure in an error-free code path."
+
+Practical rule:
+- Use ensureUnusedCapacity/ensureTotalCapacity before any structural mutation.
+- After reservation, use *AssumeCapacity APIs and treat the rest of the code as infallible.
+- `errdefer comptime unreachable;` marks the end of the fallible phase.
+
+Example (condensed):
+#+BEGIN_SRC zig
+try list.ensureUnusedCapacity(gpa, n);
+errdefer comptime unreachable;
+list.appendAssumeCapacity(item);
+#+END_SRC
+
+** Indices, not pointers (handles > raw pointers)
+Store nodes in arrays and refer to them by indices/handles instead of pointers.
+This reduces node size, improves cache locality, minimizes allocation overhead,
+and makes frees effectively a single deinit.
+
+Source: Joe Mckay, "Indices, not Pointers" (Jul 15, 2025)
+https://joegm.github.io/blog/indices-not-pointers/
+
+Direct quote (attribution):
+"reduces memory usage, reduces memory allocations, speeds up accesses, makes freeing instantaneous"
+
+Quick summary:
+Use an array-backed node pool and store child links as indices (often 32-bit) instead
+of 64-bit pointers. This shrinks nodes, keeps data contiguous for better cache behavior,
+and avoids per-node allocations since the array grows in chunks. Bulk frees become a
+single deinit; the main downside is removing individual nodes, which should be handled
+via a freelist that tracks reusable slots.
+
+Practical rule:
+- Keep data in contiguous arrays.
+- Use typed index handles to prevent mixing unrelated indices.
+- If you must delete single nodes, add a freelist rather than shifting arrays.
+
+Example (condensed typed handle):
+#+BEGIN_SRC zig
+const NodeId = enum(u32) { none = 0, _ };
+const idx: NodeId = @enumFromInt(nodes.items.len);
+#+END_SRC
+
+** SHAPES: layout specified once, code stays layout-agnostic
+SHAPES proposes separating data layout decisions from program logic
+to get cache-friendly representations without rewriting algorithms.
+Layouts (AoS/SoA/SoAoS and splits) are declared once via pools and
+layout specs; layout information is carried in types so the compiler
+emits layout-aware accesses while the source code stays layout-unaware.
+Goal: keep OO abstraction + memory safety while still tuning cache behavior.
+
+Source:
+https://www.doc.ic.ac.uk/~scd/ShapesOnwards.pdf
+
+** Handles > pointers (quick summary)
+Summary of the approach from “Handles are the better pointers”:
+Move memory ownership into centralized systems, store items in dense arrays,
+and expose only index handles to the rest of the code. Convert handles to
+pointers only inside the owning system, and only for short-lived access.
+Use extra handle bits (or per-slot generation counters) to detect stale or
+reused slots (use-after-free), and keep pointers out of public APIs to avoid
+fragmentation, cache misses, and hidden retention.
+
+Source:
+https://floooh.github.io/2018/06/17/handles-vs-pointers.html
 * Layout management
 we use an internal (well plan to use) layout engine instead of something 
 like Clay, because we feel the project is not sophisticated enough in 
