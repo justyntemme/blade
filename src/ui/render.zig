@@ -1,7 +1,6 @@
 const std = @import("std");
 const tui = @import("zigtui");
 const state = @import("state");
-// const proc = @import("proc");
 const layout = @import("ui_layout");
 const keymap = @import("event_keymap");
 

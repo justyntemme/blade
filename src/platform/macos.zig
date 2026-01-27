@@ -19,6 +19,8 @@ pub const PlatformError = error{
 
 pub const pid_t = c.pid_t;
 
+//TODO: move to models such that we can use an
+//extend a shared model of  Proc object
 pub const Proc = struct {
     pid: pid_t,
     start_time_ns: i128 = 0,

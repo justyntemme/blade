@@ -2,7 +2,6 @@ const std = @import("std");
 
 //Internal deps
 const event = @import("event");
-// const proc = @import("proc");
 const render = @import("ui_render");
 const state = @import("state");
 const channel = @import("thread_channel");
