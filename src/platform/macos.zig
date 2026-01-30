@@ -58,6 +58,7 @@ pub fn collectSnapshot(arena: std.mem.Allocator) PlatformError!std.AutoHashMap(p
         std.debug.print("Failed to get process count\n", .{});
         return error.FailedToGetProcessCount;
     }
+    try proc_map.ensureTotalCapacity(@intCast(count));
 
     // Get the actual PIDs
     const bytes_returned = c.proc_listpids(
