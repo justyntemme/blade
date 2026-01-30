@@ -35,10 +35,13 @@ fn fetchAndSend(queue: *channel.BatchQueue) !void {
     var batch_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     const arena_alloc = batch_arena.allocator();
     //create a new batch
+    // Allocate BEFORE copying the arena into the batch
+    const map = try platform.collectSnapshot(arena_alloc);
+    const timestamp = std.time.nanoTimestamp();
     const batch = channel.Batch{
         .arena = batch_arena,
-        .map = try platform.collectSnapshot(arena_alloc),
-        .timestamp_ns = std.time.nanoTimestamp(),
+        .map = map,
+        .timestamp_ns = timestamp,
     };
     var backoff_ns: u64 = 100_000; // Start at 100µs
     const max_backoff_ns: u64 = 10 * std.time.ns_per_ms; // Cap at 10ms
