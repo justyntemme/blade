@@ -63,6 +63,7 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
         .sort_by_name => app.setSort(.name),
         .sort_by_cpu => app.setSort(.cpu),
         .sort_by_mem => app.setSort(.mem),
+        .toggle_expand => app.toggleSelectedExpansion(),
     }
 }
 

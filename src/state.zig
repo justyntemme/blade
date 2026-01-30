@@ -429,6 +429,38 @@ pub const AppState = struct {
         }
     }
 
+    pub fn toggleSelectedExpansion(self: *AppState) void {
+        if (self.visible_nodes.items.len == 0) return;
+
+        const prev_identity = self.getSelectedIdentity();
+        const idx = @min(self.selected_item, self.visible_nodes.items.len - 1);
+        const node = self.visible_nodes.items[idx];
+        if (!node.has_children) return;
+
+        const data_idx: usize = @intCast(node.data_idx);
+        const pid = self.hot.items(.pid)[data_idx];
+
+        self.toggleExpanded(pid);
+
+        if (self.current_batch) |*batch| {
+            const prev_scroll = self.scroll_offset;
+            const arena = batch.arena.allocator();
+            self.buildVisibleNodes(arena) catch |err| {
+                self.showToastFmt("Build visible nodes failed: {}", .{err}, .err);
+                return;
+            };
+            self.restoreSelection(prev_identity);
+            if (self.visible_nodes.items.len == 0) {
+                self.selected_item = 0;
+                self.scroll_offset = 0;
+                return;
+            }
+            self.selected_item = @min(self.selected_item, self.visible_nodes.items.len - 1);
+            self.scroll_offset = @min(prev_scroll, self.visible_nodes.items.len - 1);
+            // self.applySelection(prev_identity);
+        }
+    }
+
     pub fn init(gpa: std.mem.Allocator) AppState {
         return .{
             .gpa = gpa,

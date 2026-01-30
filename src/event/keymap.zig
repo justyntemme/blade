@@ -30,6 +30,8 @@ pub const SpecialKey = enum {
 };
 
 pub const keymap = [_]KeyBinding{
+    //expand
+    .{ .key = .{ .special = .enter }, .action = .toggle_expand, .modes = &.{.normal}, .description = "toggle expand" },
     // Navigation (both modes)
     .{ .key = .{ .char = 'j' }, .action = .move_down, .modes = &.{.normal}, .description = "down" },
     .{ .key = .{ .char = 'k' }, .action = .move_up, .modes = &.{.normal}, .description = "up" },
