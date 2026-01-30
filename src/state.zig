@@ -167,7 +167,9 @@ pub const AppState = struct {
             batch.timestamp_ns - prev.timestamp_ns
         else
             0;
-
+        const count = batch.map.count();
+        try self.hot.ensureTotalCapacity(self.gpa, count);
+        try self.cold.ensureTotalCapacity(self.gpa, count);
         var iter = batch.map.iterator();
         while (iter.next()) |entry| {
             const proc_ptr = entry.value_ptr.*;
@@ -193,14 +195,14 @@ pub const AppState = struct {
             _ = std.ascii.lowerString(path_lower, path_slice);
 
             // Append ALL items (no search filter here)
-            try self.cold.append(self.gpa, .{
+            self.cold.appendAssumeCapacity(.{
                 .name = std.mem.sliceTo(&proc_ptr.s_name, 0),
                 .path = std.mem.sliceTo(&proc_ptr.path, 0),
                 .ppid = proc_ptr.ppid,
                 .name_lower = name_lower,
                 .path_lower = path_lower,
             });
-            try self.hot.append(self.gpa, .{
+            self.hot.appendAssumeCapacity(.{
                 .pid = proc_ptr.pid,
                 .start_time_ns = proc_ptr.start_time_ns,
                 .cpu_percent = cpu_percent,
