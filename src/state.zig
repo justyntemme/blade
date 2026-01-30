@@ -428,7 +428,43 @@ pub const AppState = struct {
             };
         }
     }
+    fn setExpandedSubtree(self: *AppState, root_idx: u32, expand: bool) !void {
+        const n: usize = self.hot.len;
+        if (n == 0) return;
+        if (self.children_offsets.items.len != n + 1) return error.invalidState;
 
+        var stack = std.ArrayListUnmanaged(u32){};
+        defer stack.deinit(self.gpa);
+
+        try stack.append(self.gpa, root_idx);
+
+        while (stack.items.len > 0) {
+            const last = stack.items.len - 1;
+            const node_idx = stack.items[last];
+            stack.items.len = last;
+
+            const node_u: usize = @intCast(node_idx);
+            const child_start: usize = @intCast(self.children_offsets.items[node_u]);
+            const child_end: usize = @intCast(self.children_offsets.items[node_u + 1]);
+            const has_children = child_end > child_start;
+
+            if (has_children) {
+                const pid = self.hot.items(.pid)[node_u];
+                if (expand) {
+                    try self.expanded_pids.put(pid, {});
+                } else {
+                    _ = self.expanded_pids.remove(pid);
+                }
+
+                const children = self.children_flat.items[child_start..child_end];
+                var i: usize = children.len;
+                while (i > 0) {
+                    i -= 1;
+                    try stack.append(self.gpa, children[i]);
+                }
+            }
+        }
+    }
     pub fn toggleSelectedExpansion(self: *AppState) void {
         if (self.visible_nodes.items.len == 0) return;
 
@@ -439,8 +475,14 @@ pub const AppState = struct {
 
         const data_idx: usize = @intCast(node.data_idx);
         const pid = self.hot.items(.pid)[data_idx];
+        const expand = !self.isExpanded(pid);
 
-        self.toggleExpanded(pid);
+        self.setExpandedSubtree(node.data_idx, expand) catch |err| {
+            self.showToastFmt("Expand failed: {}", .{err}, .err);
+            return;
+        };
+
+        // self.toggleExpanded(pid);
 
         if (self.current_batch) |*batch| {
             const prev_scroll = self.scroll_offset;
