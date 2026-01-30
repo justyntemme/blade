@@ -72,7 +72,7 @@ pub const AppState = struct {
     pid_to_index: std.AutoHashMap(std.posix.pid_t, u32),
     children_offsets: std.ArrayListUnmanaged(u32) = .empty,
     children_flat: std.ArrayListUnmanaged(u32) = .empty,
-    expanded_pids: std.AutoHashMap(std.posix.pid_t, void),
+    expanded_pids: std.AutoHashMap(model.ProcIdentity, void),
     pub fn showToast(self: *AppState, message: []const u8, level: ToastLevel) void {
         var toast = Toast{
             .level = level,
@@ -122,8 +122,6 @@ pub const AppState = struct {
         } else {
             self.visible_nodes = .empty;
         }
-        // try self.buildIndices();
-        // try self.applyFilter();
         self.applySelection(prev_identity);
     }
 
@@ -136,8 +134,6 @@ pub const AppState = struct {
             self.sortChildrenRanges();
             self.buildVisibleNodes(arena) catch return;
         }
-        // self.buildIndices() catch return;
-        // self.applyFilter() catch return;
         self.applySelection(prev_identity);
     }
 
@@ -391,13 +387,12 @@ pub const AppState = struct {
             stack.items.len = last_index;
 
             const data_idx: usize = @intCast(item.node);
-            const pid = self.hot.items(.pid)[data_idx];
 
             const child_start: usize = @intCast(self.children_offsets.items[data_idx]);
             const child_end: usize = @intCast(self.children_offsets.items[data_idx + 1]);
             const has_children = child_end > child_start;
 
-            const expanded_real = has_children and self.isExpanded(pid);
+            const expanded_real = has_children and self.isExpanded(data_idx);
             var display_expanded = expanded_real;
             if (searching and has_children and !display_expanded) {
                 if (subtree_flags.?[data_idx]) {
@@ -565,15 +560,23 @@ pub const AppState = struct {
         self.search_len = 0;
     }
 
-    pub fn isExpanded(self: *const AppState, pid: std.posix.pid_t) bool {
-        return self.expanded_pids.contains(pid);
+    pub fn isExpanded(self: *const AppState, data_idx: usize) bool {
+        const id = model.ProcIdentity{
+            .pid = self.hot.items(.pid)[data_idx],
+            .start_time_ns = self.hot.items(.start_time_ns)[data_idx],
+        };
+        return self.expanded_pids.contains(id);
     }
 
-    pub fn toggleExpanded(self: *AppState, pid: std.posix.pid_t) void {
-        if (self.expanded_pids.contains(pid)) {
-            _ = self.expanded_pids.remove(pid);
+    pub fn toggleExpanded(self: *AppState, data_idx: usize) void {
+        const id = model.ProcIdentity{
+            .pid = self.hot.items(.pid)[data_idx],
+            .start_time_ns = self.hot.items(.start_time_ns)[data_idx],
+        };
+        if (self.expanded_pids.contains(id)) {
+            _ = self.expanded_pids.remove(id);
         } else {
-            self.expanded_pids.put(pid, {}) catch |err| {
+            self.expanded_pids.put(id, {}) catch |err| {
                 self.showToastFmt("Toggle expand failed: {}", .{err}, .err);
             };
         }
@@ -591,8 +594,7 @@ pub const AppState = struct {
             const child_end: usize = @intCast(self.children_offsets.items[i + 1]);
             if (child_end > child_start) {
                 parent_count += 1;
-                const pid = self.hot.items(.pid)[i];
-                if (!self.isExpanded(pid)) {
+                if (!self.isExpanded(i)) {
                     any_collapsed = true;
                 }
             }
@@ -609,8 +611,11 @@ pub const AppState = struct {
                 const child_start: usize = @intCast(self.children_offsets.items[i]);
                 const child_end: usize = @intCast(self.children_offsets.items[i + 1]);
                 if (child_end > child_start) {
-                    const pid = self.hot.items(.pid)[i];
-                    self.expanded_pids.putAssumeCapacity(pid, {});
+                    const id = model.ProcIdentity{
+                        .pid = self.hot.items(.pid)[i],
+                        .start_time_ns = self.hot.items(.start_time_ns)[i],
+                    };
+                    self.expanded_pids.putAssumeCapacity(id, {});
                 }
             }
         } else {
@@ -618,8 +623,11 @@ pub const AppState = struct {
                 const child_start: usize = @intCast(self.children_offsets.items[i]);
                 const child_end: usize = @intCast(self.children_offsets.items[i + 1]);
                 if (child_end > child_start) {
-                    const pid = self.hot.items(.pid)[i];
-                    _ = self.expanded_pids.remove(pid);
+                    const id = model.ProcIdentity{
+                        .pid = self.hot.items(.pid)[i],
+                        .start_time_ns = self.hot.items(.start_time_ns)[i],
+                    };
+                    _ = self.expanded_pids.remove(id);
                 }
             }
         }
@@ -664,11 +672,14 @@ pub const AppState = struct {
             const has_children = child_end > child_start;
 
             if (has_children) {
-                const pid = self.hot.items(.pid)[node_u];
+                const id = model.ProcIdentity{
+                    .pid = self.hot.items(.pid)[node_u],
+                    .start_time_ns = self.hot.items(.start_time_ns)[node_u],
+                };
                 if (expand) {
-                    try self.expanded_pids.put(pid, {});
+                    try self.expanded_pids.put(id, {});
                 } else {
-                    _ = self.expanded_pids.remove(pid);
+                    _ = self.expanded_pids.remove(id);
                 }
 
                 const children = self.children_flat.items[child_start..child_end];
@@ -689,8 +700,7 @@ pub const AppState = struct {
         if (!node.has_children) return;
 
         const data_idx: usize = @intCast(node.data_idx);
-        const pid = self.hot.items(.pid)[data_idx];
-        const expand = !self.isExpanded(pid);
+        const expand = !self.isExpanded(data_idx);
 
         self.setExpandedSubtree(node.data_idx, expand) catch |err| {
             self.showToastFmt("Expand failed: {}", .{err}, .err);
@@ -722,7 +732,7 @@ pub const AppState = struct {
         return .{
             .gpa = gpa,
             .pid_to_index = std.AutoHashMap(std.posix.pid_t, u32).init(gpa),
-            .expanded_pids = std.AutoHashMap(std.posix.pid_t, void).init(gpa),
+            .expanded_pids = std.AutoHashMap(model.ProcIdentity, void).init(gpa),
         };
     }
 
