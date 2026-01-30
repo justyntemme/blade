@@ -34,10 +34,8 @@ pub const keymap = [_]KeyBinding{
     //expand
     .{ .key = .{ .special = .enter }, .action = .toggle_expand, .modes = &.{.normal}, .description = "toggle expand" },
     // Navigation (both modes)
-    .{ .key = .{ .char = 'g' }, .action = .jump_top, .modes = &.{
-        .normal,
-    }, .description = "top" },
-    .{ .key = .{ .char = 'G' }, .action = .jump_bottom, .modes = &.{.normal}, .description = "bottom" },
+    .{ .key = .{ .char = 'g' }, .action = .jump_top, .modes = &.{ .normal, .search_view }, .description = "top" },
+    .{ .key = .{ .char = 'G' }, .action = .jump_bottom, .modes = &.{ .normal, .search_view }, .description = "bottom" },
     .{ .key = .{ .char = '*' }, .action = .toggle_expand_all, .modes = &.{ .normal, .search_view }, .description = "Expand all" },
     .{ .key = .{ .char = 'j' }, .action = .move_down, .modes = &.{.normal}, .description = "down" },
     .{ .key = .{ .char = 'k' }, .action = .move_up, .modes = &.{.normal}, .description = "up" },
@@ -46,7 +44,7 @@ pub const keymap = [_]KeyBinding{
     .{ .key = .{ .char = 'u' }, .action = .page_up, .modes = &.{.normal}, .description = "page up" },
     .{ .key = .{ .char = 'd' }, .action = .page_down, .modes = &.{.normal}, .description = "page down" },
     // Application
-    .{ .key = .{ .char = 'q' }, .action = .quit, .modes = &.{.normal}, .description = "quit" },
+    .{ .key = .{ .char = 'q' }, .action = .quit, .modes = &.{ .normal, .search_view }, .description = "quit" },
     .{ .key = .{ .special = .esc }, .action = .quit, .modes = &.{.normal}, .description = "" },
     // Search
     .{ .key = .{ .char = '/' }, .action = .start_search, .modes = &.{.normal}, .description = "search" },

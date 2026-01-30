@@ -413,7 +413,7 @@ pub const AppState = struct {
                     .depth = item.depth,
                     .has_children = has_children,
                     .is_last = item.is_last,
-                    .is_expanded = display_expanded,
+                    .is_expanded = expanded_real,
                 });
             }
 

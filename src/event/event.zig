@@ -118,9 +118,13 @@ fn handleSearchEditMode(app: *state.AppState, key: anytype) void {
 fn handleSearchViewMode(app: *state.AppState, key: anytype) void {
     switch (key.code) {
         .char => |c| switch (c) {
+            'q' => app.running = false,
             'j' => app.down(),
             'k' => app.up(),
             '/' => app.mode = .search_edit,
+            '*' => app.toggleExpandAll(),
+            'g' => app.jumpTop(),
+            'G' => app.jumpBottom(),
             'c' => {
                 app.searchClear();
                 app.refreshFilter();
