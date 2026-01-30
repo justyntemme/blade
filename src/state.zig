@@ -66,8 +66,6 @@ pub const AppState = struct {
     mode: keymap.Mode = .normal,
     search_buf: [256]u8 = [_]u8{0} ** 256,
     search_len: usize = 0,
-    indices: std.ArrayList(usize) = .empty,
-    sorted_indices: std.ArrayList(usize) = .empty,
     previous_batch: ?channel.Batch = null,
     pid_to_index: std.AutoHashMap(std.posix.pid_t, u32),
     children_offsets: std.ArrayListUnmanaged(u32) = .empty,
@@ -118,17 +116,13 @@ pub const AppState = struct {
             try self.buildPidIndexMap(arena);
             try self.buildChildrenAdjacency(arena);
             self.sortChildrenRanges();
-            try self.buildVisibleNodes(arena);
         } else {
             self.visible_nodes = .empty;
-        }
-        self.restoreSelection(prev_identity);
-        if (self.visible_nodes.items.len == 0) {
             self.selected_item = 0;
-        } else {
-            self.selected_item = @min(self.selected_item, self.visible_nodes.items.len - 1);
+            self.scroll_offset = 0;
+            return;
         }
-        self.scroll_offset = 0;
+        self.rebuildVisibleAndRestore(prev_identity, false);
     }
 
     /// Re-sort and filter without repopulating data.
@@ -471,37 +465,6 @@ pub const AppState = struct {
         }
     }
 
-    /// Stage 2: Build sorted index array from view.
-    fn buildIndices(self: *AppState) !void {
-        self.sorted_indices.clearRetainingCapacity();
-        try self.sorted_indices.ensureTotalCapacity(self.gpa, @intCast(self.hot.len));
-        for (0..self.hot.len) |i| {
-            self.sorted_indices.appendAssumeCapacity(i);
-        }
-        std.mem.sort(usize, self.sorted_indices.items, self, compareByIndex);
-    }
-
-    /// Stage 3: Filter indices to only include items matching search.
-    fn applyFilter(self: *AppState) !void {
-        const search = self.searchSlice();
-        self.indices.clearRetainingCapacity();
-        try self.indices.ensureTotalCapacity(self.gpa, self.sorted_indices.items.len);
-        if (search.len == 0) {
-            self.indices.appendSliceAssumeCapacity(self.sorted_indices.items);
-            return;
-        }
-
-        var search_lower_buf: [256]u8 = undefined;
-        const search_lower = std.ascii.lowerString(&search_lower_buf, search);
-
-        for (self.sorted_indices.items) |data_idx| {
-            const cold_data = self.cold.items[data_idx];
-            if (self.matchesSearch(cold_data, search_lower)) {
-                self.indices.appendAssumeCapacity(data_idx);
-            }
-        }
-    }
-
     fn rebuildVisibleAndRestore(self: *AppState, prev_identity: ?model.ProcIdentity, preserve_scroll: bool) void {
         const batch = if (self.current_batch) |*b| b else return;
         const prev_scroll = self.scroll_offset;
@@ -607,7 +570,8 @@ pub const AppState = struct {
         }
 
         if (any_collapsed) {
-            const needed_capacity: u32 = @intCast(@max(self.expanded_pids.count(), parent_count));
+            // const needed_capacity: u32 = @intCast(@max(self.expanded_pids.count(), parent_count));
+            const needed_capacity: u32 = @intCast(self.expanded_pids.count() + parent_count);
             self.expanded_pids.ensureTotalCapacity(needed_capacity) catch |err|
                 {
                     self.showToastFmt("Expand all failed: {}", .{err}, .err);
@@ -703,8 +667,6 @@ pub const AppState = struct {
     }
 
     pub fn deinit(self: *AppState) void {
-        self.indices.deinit(self.gpa);
-        self.sorted_indices.deinit(self.gpa);
         self.expanded_pids.deinit();
         self.hot.deinit(self.gpa);
         self.cold.deinit(self.gpa);
