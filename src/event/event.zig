@@ -51,6 +51,8 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
         .move_down => app.down(),
         .page_up => for (0..5) |_| app.up(),
         .page_down => for (0..5) |_| app.down(),
+        .jump_top => app.jumpTop(),
+        .jump_bottom => app.jumpBottom(),
         .quit => app.running = false,
         .start_search => app.mode = .search,
         .clear_search => {
@@ -64,6 +66,7 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
         .sort_by_cpu => app.setSort(.cpu),
         .sort_by_mem => app.setSort(.mem),
         .toggle_expand => app.toggleSelectedExpansion(),
+        .toggle_expand_all => app.toggleExpandAll(),
     }
 }
 

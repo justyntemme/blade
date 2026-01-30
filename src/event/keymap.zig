@@ -33,6 +33,9 @@ pub const keymap = [_]KeyBinding{
     //expand
     .{ .key = .{ .special = .enter }, .action = .toggle_expand, .modes = &.{.normal}, .description = "toggle expand" },
     // Navigation (both modes)
+    .{ .key = .{ .char = 'g' }, .action = .jump_top, .modes = &.{.normal}, .description = "top" },
+    .{ .key = .{ .char = 'G' }, .action = .jump_bottom, .modes = &.{.normal}, .description = "bottom" },
+    .{ .key = .{ .char = '*' }, .action = .toggle_expand_all, .modes = &.{.normal}, .description = "Expand all" },
     .{ .key = .{ .char = 'j' }, .action = .move_down, .modes = &.{.normal}, .description = "down" },
     .{ .key = .{ .char = 'k' }, .action = .move_up, .modes = &.{.normal}, .description = "up" },
     .{ .key = .{ .special = .up }, .action = .move_up, .modes = &.{ .normal, .search }, .description = "" },

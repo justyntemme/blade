@@ -411,6 +411,20 @@ pub const AppState = struct {
         }
     }
 
+    pub fn jumpTop(self: *AppState) void {
+        self.selected_item = 0;
+        self.scroll_offset = 0;
+    }
+
+    pub fn jumpBottom(self: *AppState) void {
+        if (self.visible_nodes.items.len == 0) {
+            self.selected_item = 0;
+            self.scroll_offset = 0;
+            return;
+        }
+        self.selected_item = self.visible_nodes.items.len - 1;
+    }
+
     pub fn up(self: *AppState) void {
         if (self.selected_item > 0) {
             self.selected_item -= 1;
@@ -448,6 +462,72 @@ pub const AppState = struct {
             };
         }
     }
+    pub fn toggleExpandAll(self: *AppState) void {
+        const n: usize = self.hot.len;
+        if (n == 0) return;
+        if (self.children_offsets.items.len != n + 1) return;
+
+        var any_collapsed = false;
+        var parent_count: usize = 0;
+
+        for (0..n) |i| {
+            const child_start: usize = @intCast(self.children_offsets.items[i]);
+            const child_end: usize = @intCast(self.children_offsets.items[i + 1]);
+            if (child_end > child_start) {
+                parent_count += 1;
+                const pid = self.hot.items(.pid)[i];
+                if (!self.isExpanded(pid)) {
+                    any_collapsed = true;
+                    break;
+                }
+            }
+        }
+
+        if (any_collapsed) {
+            const needed_capacity: u32 = @intCast(self.expanded_pids.count() + parent_count);
+            self.expanded_pids.ensureTotalCapacity(needed_capacity) catch |err|
+                {
+                    self.showToastFmt("Expand all failed: {}", .{err}, .err);
+                    return;
+                };
+            for (0..n) |i| {
+                const child_start: usize = @intCast(self.children_offsets.items[i]);
+                const child_end: usize = @intCast(self.children_offsets.items[i + 1]);
+                if (child_end > child_start) {
+                    const pid = self.hot.items(.pid)[i];
+                    self.expanded_pids.putAssumeCapacity(pid, {});
+                }
+            }
+        } else {
+            for (0..n) |i| {
+                const child_start: usize = @intCast(self.children_offsets.items[i]);
+                const child_end: usize = @intCast(self.children_offsets.items[i + 1]);
+                if (child_end > child_start) {
+                    const pid = self.hot.items(.pid)[i];
+                    _ = self.expanded_pids.remove(pid);
+                }
+            }
+        }
+
+        if (self.current_batch) |*batch| {
+            const prev_identity = self.getSelectedIdentity();
+            const prev_scroll = self.scroll_offset;
+            const arena = batch.arena.allocator();
+            self.buildVisibleNodes(arena) catch |err| {
+                self.showToastFmt("Build visible nodes failed: {}", .{err}, .err);
+                return;
+            };
+            self.restoreSelection(prev_identity);
+            if (self.visible_nodes.items.len == 0) {
+                self.selected_item = 0;
+                self.scroll_offset = 0;
+                return;
+            }
+            self.selected_item = @min(self.selected_item, self.visible_nodes.items.len - 1);
+            self.scroll_offset = @min(prev_scroll, self.visible_nodes.items.len - 1);
+        }
+    }
+
     fn setExpandedSubtree(self: *AppState, root_idx: u32, expand: bool) !void {
         const n: usize = self.hot.len;
         if (n == 0) return;

@@ -17,4 +17,7 @@ pub const Action = enum {
     sort_by_cpu,
     sort_by_mem,
     toggle_expand,
+    toggle_expand_all,
+    jump_top,
+    jump_bottom,
 };
