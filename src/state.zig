@@ -172,12 +172,12 @@ pub const AppState = struct {
         try self.cold.ensureTotalCapacity(self.gpa, count);
         var iter = batch.map.iterator();
         while (iter.next()) |entry| {
-            const proc_ptr = entry.value_ptr.*;
+            const proc_ptr = entry.value_ptr;
 
             // Compute CPU%
             var cpu_percent: f32 = 0;
             if (self.previous_batch) |*prev| {
-                if (prev.map.get(proc_ptr.pid)) |old_proc| {
+                if (prev.map.getPtr(proc_ptr.pid)) |old_proc| {
                     if (old_proc.start_time_ns == proc_ptr.start_time_ns and time_delta > 0) {
                         const new_total = proc_ptr.total_user + proc_ptr.total_system;
                         const old_total = old_proc.total_user + old_proc.total_system;
