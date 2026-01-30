@@ -116,6 +116,7 @@ pub const AppState = struct {
             const arena = batch.arena.allocator();
             try self.buildPidIndexMap(arena);
             try self.buildChildrenAdjacency(arena);
+            self.sortChildrenRanges();
             try self.buildVisibleNodes(arena);
         } else {
             self.visible_nodes = .empty;
@@ -131,6 +132,7 @@ pub const AppState = struct {
         const prev_identity = self.getSelectedIdentity();
         if (self.current_batch) |*batch| {
             const arena = batch.arena.allocator();
+            self.sortChildrenRanges();
             self.buildVisibleNodes(arena) catch return;
         }
         // self.buildIndices() catch return;
@@ -263,6 +265,20 @@ pub const AppState = struct {
         }
     }
 
+    fn sortChildrenRanges(self: *AppState) void {
+        const n: usize = self.hot.len;
+        if (n == 0) return;
+        if (self.children_offsets.items.len != n + 1) return;
+
+        for (0..n) |i| {
+            const start: usize = @intCast(self.children_offsets.items[i]);
+            const end: usize = @intCast(self.children_offsets.items[i + 1]);
+            if (end - start <= 1) continue;
+
+            std.mem.sort(u32, self.children_flat.items[start..end], self, compareByNodeIndex);
+        }
+    }
+
     fn buildVisibleNodes(self: *AppState, arena: std.mem.Allocator) !void {
         self.visible_nodes = .empty;
 
@@ -283,6 +299,10 @@ pub const AppState = struct {
             if (!self.pid_to_index.contains(cold_item.ppid)) {
                 roots.appendAssumeCapacity(@intCast(idx));
             }
+        }
+
+        if (roots.items.len > 1) {
+            std.mem.sort(u32, roots.items, self, compareByNodeIndex);
         }
 
         try self.visible_nodes.ensureTotalCapacity(arena, n);
@@ -585,6 +605,10 @@ pub const AppState = struct {
 
 fn compareByIndex(ctx: *const AppState, a: usize, b: usize) bool {
     return sort.compareByIndex(ctx, a, b);
+}
+
+fn compareByNodeIndex(ctx: *const AppState, a: u32, b: u32) bool {
+    return compareByIndex(ctx, @intCast(a), @intCast(b));
 }
 
 pub const DrawContext = struct {
