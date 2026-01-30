@@ -20,4 +20,5 @@ pub const Action = enum {
     toggle_expand_all,
     jump_top,
     jump_bottom,
+    exit_search_view,
 };

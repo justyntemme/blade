@@ -9,9 +9,8 @@ pub fn handleEvent(app: *state.AppState, event: anytype) !void {
 
             //check app mode for search
             switch (app.mode) {
-                .normal => handleNormalMode(app, key),
+                .normal, .search_view => handleNormalMode(app, key),
                 .search_edit => handleSearchEditMode(app, key),
-                .search_view => handleSearchViewMode(app, key),
             }
         },
         .resize => |size| {
@@ -29,7 +28,7 @@ fn handleNormalMode(app: *state.AppState, key: anytype) void {
         return; //consume keypress to not process further during toast notification
     }
     const mapped_key = mapKey(key) orelse return;
-    const action = keymap.getAction(mapped_key, .normal) orelse return;
+    const action = keymap.getAction(mapped_key, app.mode) orelse return;
 
     executeAction(app, action);
 }
@@ -59,6 +58,7 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
         .clear_search => {
             app.search_len = 0;
             app.refreshFilter();
+            if (app.mode == .search_view) app.mode = .normal;
         },
         .kill_term => killSelected(app, false),
         .kill_force => killSelected(app, true),
@@ -68,6 +68,11 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
         .sort_by_mem => app.setSort(.mem),
         .toggle_expand => app.toggleSelectedExpansion(),
         .toggle_expand_all => app.toggleExpandAll(),
+        .exit_search_view => {
+            app.search_len = 0;
+            app.refreshFilter();
+            app.mode = .normal;
+        },
     }
 }
 
@@ -111,31 +116,6 @@ fn handleSearchEditMode(app: *state.AppState, key: anytype) void {
         // allow navigation while in search mode
         .up => app.up(),
         .down => app.down(),
-        else => {},
-    }
-}
-
-fn handleSearchViewMode(app: *state.AppState, key: anytype) void {
-    switch (key.code) {
-        .char => |c| switch (c) {
-            'q' => app.running = false,
-            'j' => app.down(),
-            'k' => app.up(),
-            '/' => app.mode = .search_edit,
-            '*' => app.toggleExpandAll(),
-            'g' => app.jumpTop(),
-            'G' => app.jumpBottom(),
-            'c' => {
-                app.searchClear();
-                app.refreshFilter();
-                app.mode = .normal;
-            },
-            else => {},
-        },
-        .enter => app.toggleSelectedExpansion(),
-        .up => app.up(),
-        .down => app.down(),
-        .esc => app.mode = .normal, // exit search view, keep filter
         else => {},
     }
 }

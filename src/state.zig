@@ -3,6 +3,7 @@ const channel = @import("thread_channel");
 const sort = @import("sort");
 const zigtui = @import("zigtui");
 const model = @import("model");
+const keymap = @import("event_keymap");
 // const platform = @import("platform");
 
 pub const ProcHot = struct {
@@ -62,7 +63,7 @@ pub const AppState = struct {
     sort_direction: SortDirection = .desc,
     active_toast: ?Toast = null,
     current_batch: ?channel.Batch = null,
-    mode: enum { normal, search_edit, search_view } = .normal,
+    mode: keymap.Mode = .normal,
     search_buf: [256]u8 = [_]u8{0} ** 256,
     search_len: usize = 0,
     indices: std.ArrayList(usize) = .empty,
