@@ -122,43 +122,38 @@ pub const AppState = struct {
         } else {
             self.visible_nodes = .empty;
         }
-        self.applySelection(prev_identity);
+        self.restoreSelection(prev_identity);
+        if (self.visible_nodes.items.len == 0) {
+            self.selected_item = 0;
+        } else {
+            self.selected_item = @min(self.selected_item, self.visible_nodes.items.len - 1);
+        }
+        self.scroll_offset = 0;
     }
 
     /// Re-sort and filter without repopulating data.
     /// Called on sort column/direction change.
     pub fn sortView(self: *AppState) void {
         const prev_identity = self.getSelectedIdentity();
-        if (self.current_batch) |*batch| {
-            const arena = batch.arena.allocator();
-            self.sortChildrenRanges();
-            self.buildVisibleNodes(arena) catch return;
-        }
-        self.applySelection(prev_identity);
+        self.sortChildrenRanges();
+        self.rebuildVisibleAndRestore(prev_identity, false);
     }
 
     /// Refresh filter without re-sorting.
     /// Called on search change.
     pub fn refreshFilter(self: *AppState) void {
         const prev_identity = self.getSelectedIdentity();
-        if (self.current_batch) |*batch| {
-            const arena = batch.arena.allocator();
-            self.buildVisibleNodes(arena) catch return;
-        }
-        // self.applyFilter() catch return;
-        self.applySelection(prev_identity);
+        self.rebuildVisibleAndRestore(prev_identity, false);
     }
 
     /// Stage 1: Populate view with ALL processes and computed CPU%.
     fn populateView(self: *AppState) !void {
         self.hot.shrinkRetainingCapacity(0);
-        for (self.cold.items) |cold_item| {
-            self.gpa.free(cold_item.name_lower);
-            self.gpa.free(cold_item.path_lower);
-        }
         self.cold.clearRetainingCapacity();
 
-        const batch = self.current_batch orelse return;
+        if (self.current_batch == null) return;
+        const batch = &self.current_batch.?;
+        const arena = batch.arena.allocator();
         const time_delta: i128 = if (self.previous_batch) |*prev|
             batch.timestamp_ns - prev.timestamp_ns
         else
@@ -185,9 +180,9 @@ pub const AppState = struct {
 
             const name_slice = std.mem.sliceTo(&proc_ptr.s_name, 0);
             const path_slice = std.mem.sliceTo(&proc_ptr.path, 0);
-            const name_lower = try self.gpa.alloc(u8, name_slice.len);
+            const name_lower = try arena.alloc(u8, name_slice.len);
             _ = std.ascii.lowerString(name_lower, name_slice);
-            const path_lower = try self.gpa.alloc(u8, path_slice.len);
+            const path_lower = try arena.alloc(u8, path_slice.len);
             _ = std.ascii.lowerString(path_lower, path_slice);
 
             // Append ALL items (no search filter here)
@@ -264,17 +259,28 @@ pub const AppState = struct {
         }
     }
 
+    fn childrenOf(self: *const AppState, idx: usize) []const u32 {
+        const start: usize = @intCast(self.children_offsets.items[idx]);
+        const end: usize = @intCast(self.children_offsets.items[idx + 1]);
+        return self.children_flat.items[start..end];
+    }
+
+    fn childrenOfMut(self: *AppState, idx: usize) []u32 {
+        const start: usize = @intCast(self.children_offsets.items[idx]);
+        const end: usize = @intCast(self.children_offsets.items[idx + 1]);
+        return self.children_flat.items[start..end];
+    }
+
     fn sortChildrenRanges(self: *AppState) void {
         const n: usize = self.hot.len;
         if (n == 0) return;
         if (self.children_offsets.items.len != n + 1) return;
 
         for (0..n) |i| {
-            const start: usize = @intCast(self.children_offsets.items[i]);
-            const end: usize = @intCast(self.children_offsets.items[i + 1]);
-            if (end - start <= 1) continue;
+            const children = self.childrenOfMut(i);
+            if (children.len <= 1) continue;
 
-            std.mem.sort(u32, self.children_flat.items[start..end], self, compareByNodeIndex);
+            std.mem.sort(u32, children, self, compareByNodeIndex);
         }
     }
 
@@ -335,9 +341,7 @@ pub const AppState = struct {
                 const node_u: usize = @intCast(item.node);
                 if (!item.visited) {
                     walk.appendAssumeCapacity(.{ .node = item.node, .visited = true });
-                    const child_start: usize = @intCast(self.children_offsets.items[node_u]);
-                    const child_end: usize = @intCast(self.children_offsets.items[node_u + 1]);
-                    const children = self.children_flat.items[child_start..child_end];
+                    const children = self.childrenOf(node_u);
                     var i: usize = children.len;
                     while (i > 0) {
                         i -= 1;
@@ -345,9 +349,7 @@ pub const AppState = struct {
                     }
                 } else {
                     var has_match = matches[node_u];
-                    const child_start: usize = @intCast(self.children_offsets.items[node_u]);
-                    const child_end: usize = @intCast(self.children_offsets.items[node_u + 1]);
-                    const children = self.children_flat.items[child_start..child_end];
+                    const children = self.childrenOf(node_u);
                     for (children) |child| {
                         if (subtree[@intCast(child)]) {
                             has_match = true;
@@ -387,10 +389,8 @@ pub const AppState = struct {
             stack.items.len = last_index;
 
             const data_idx: usize = @intCast(item.node);
-
-            const child_start: usize = @intCast(self.children_offsets.items[data_idx]);
-            const child_end: usize = @intCast(self.children_offsets.items[data_idx + 1]);
-            const has_children = child_end > child_start;
+            const children = self.childrenOf(data_idx);
+            const has_children = children.len > 0;
 
             const expanded_real = has_children and self.isExpanded(data_idx);
             var display_expanded = expanded_real;
@@ -419,7 +419,6 @@ pub const AppState = struct {
 
             if (!searching) {
                 if (!expanded_real) continue;
-                const children = self.children_flat.items[child_start..child_end];
                 var j: usize = children.len;
                 while (j > 0) {
                     j -= 1;
@@ -432,7 +431,6 @@ pub const AppState = struct {
                 }
             } else {
                 if (expanded_real) {
-                    const children = self.children_flat.items[child_start..child_end];
                     var j: usize = children.len;
                     while (j > 0) {
                         j -= 1;
@@ -444,8 +442,6 @@ pub const AppState = struct {
                         });
                     }
                 } else if (subtree_flags.?[data_idx]) {
-                    const children = self.children_flat.items[child_start..child_end];
-
                     var last_visible: ?u32 = null;
                     var k: usize = children.len;
                     while (k > 0) {
@@ -506,15 +502,27 @@ pub const AppState = struct {
         }
     }
 
-    /// Stage 4: Restore selection by identity, or clamp to valid range.
-    fn applySelection(self: *AppState, prev_identity: ?model.ProcIdentity) void {
+    fn rebuildVisibleAndRestore(self: *AppState, prev_identity: ?model.ProcIdentity, preserve_scroll: bool) void {
+        const batch = if (self.current_batch) |*b| b else return;
+        const prev_scroll = self.scroll_offset;
+        const arena = batch.arena.allocator();
+
+        self.buildVisibleNodes(arena) catch |err| {
+            self.showToastFmt("Build visible nodes failed: {}", .{err}, .err);
+            return;
+        };
+
         self.restoreSelection(prev_identity);
         if (self.visible_nodes.items.len == 0) {
             self.selected_item = 0;
-        } else {
-            self.selected_item = @min(self.selected_item, self.visible_nodes.items.len - 1);
+            self.scroll_offset = 0;
+            return;
         }
-        self.scroll_offset = 0;
+        self.selected_item = @min(self.selected_item, self.visible_nodes.items.len - 1);
+        self.scroll_offset = if (preserve_scroll)
+            @min(prev_scroll, self.visible_nodes.items.len - 1)
+        else
+            0;
     }
     pub fn down(self: *AppState) void {
         if (self.selected_item < self.visible_nodes.items.len -| 1) {
@@ -590,9 +598,7 @@ pub const AppState = struct {
         var parent_count: usize = 0;
 
         for (0..n) |i| {
-            const child_start: usize = @intCast(self.children_offsets.items[i]);
-            const child_end: usize = @intCast(self.children_offsets.items[i + 1]);
-            if (child_end > child_start) {
+            if (self.childrenOf(i).len > 0) {
                 parent_count += 1;
                 if (!self.isExpanded(i)) {
                     any_collapsed = true;
@@ -608,9 +614,7 @@ pub const AppState = struct {
                     return;
                 };
             for (0..n) |i| {
-                const child_start: usize = @intCast(self.children_offsets.items[i]);
-                const child_end: usize = @intCast(self.children_offsets.items[i + 1]);
-                if (child_end > child_start) {
+                if (self.childrenOf(i).len > 0) {
                     const id = model.ProcIdentity{
                         .pid = self.hot.items(.pid)[i],
                         .start_time_ns = self.hot.items(.start_time_ns)[i],
@@ -620,9 +624,7 @@ pub const AppState = struct {
             }
         } else {
             for (0..n) |i| {
-                const child_start: usize = @intCast(self.children_offsets.items[i]);
-                const child_end: usize = @intCast(self.children_offsets.items[i + 1]);
-                if (child_end > child_start) {
+                if (self.childrenOf(i).len > 0) {
                     const id = model.ProcIdentity{
                         .pid = self.hot.items(.pid)[i],
                         .start_time_ns = self.hot.items(.start_time_ns)[i],
@@ -632,23 +634,7 @@ pub const AppState = struct {
             }
         }
 
-        if (self.current_batch) |*batch| {
-            const prev_identity = self.getSelectedIdentity();
-            const prev_scroll = self.scroll_offset;
-            const arena = batch.arena.allocator();
-            self.buildVisibleNodes(arena) catch |err| {
-                self.showToastFmt("Build visible nodes failed: {}", .{err}, .err);
-                return;
-            };
-            self.restoreSelection(prev_identity);
-            if (self.visible_nodes.items.len == 0) {
-                self.selected_item = 0;
-                self.scroll_offset = 0;
-                return;
-            }
-            self.selected_item = @min(self.selected_item, self.visible_nodes.items.len - 1);
-            self.scroll_offset = @min(prev_scroll, self.visible_nodes.items.len - 1);
-        }
+        self.rebuildVisibleAndRestore(self.getSelectedIdentity(), true);
     }
 
     fn setExpandedSubtree(self: *AppState, root_idx: u32, expand: bool) !void {
@@ -667,9 +653,8 @@ pub const AppState = struct {
             stack.items.len = last;
 
             const node_u: usize = @intCast(node_idx);
-            const child_start: usize = @intCast(self.children_offsets.items[node_u]);
-            const child_end: usize = @intCast(self.children_offsets.items[node_u + 1]);
-            const has_children = child_end > child_start;
+            const children = self.childrenOf(node_u);
+            const has_children = children.len > 0;
 
             if (has_children) {
                 const id = model.ProcIdentity{
@@ -682,7 +667,6 @@ pub const AppState = struct {
                     _ = self.expanded_pids.remove(id);
                 }
 
-                const children = self.children_flat.items[child_start..child_end];
                 var i: usize = children.len;
                 while (i > 0) {
                     i -= 1;
@@ -707,25 +691,7 @@ pub const AppState = struct {
             return;
         };
 
-        // self.toggleExpanded(pid);
-
-        if (self.current_batch) |*batch| {
-            const prev_scroll = self.scroll_offset;
-            const arena = batch.arena.allocator();
-            self.buildVisibleNodes(arena) catch |err| {
-                self.showToastFmt("Build visible nodes failed: {}", .{err}, .err);
-                return;
-            };
-            self.restoreSelection(prev_identity);
-            if (self.visible_nodes.items.len == 0) {
-                self.selected_item = 0;
-                self.scroll_offset = 0;
-                return;
-            }
-            self.selected_item = @min(self.selected_item, self.visible_nodes.items.len - 1);
-            self.scroll_offset = @min(prev_scroll, self.visible_nodes.items.len - 1);
-            // self.applySelection(prev_identity);
-        }
+        self.rebuildVisibleAndRestore(prev_identity, true);
     }
 
     pub fn init(gpa: std.mem.Allocator) AppState {
@@ -741,10 +707,6 @@ pub const AppState = struct {
         self.sorted_indices.deinit(self.gpa);
         self.expanded_pids.deinit();
         self.hot.deinit(self.gpa);
-        for (self.cold.items) |cold_item| {
-            self.gpa.free(cold_item.name_lower);
-            self.gpa.free(cold_item.path_lower);
-        }
         self.cold.deinit(self.gpa);
         if (self.current_batch) |*batch| {
             batch.deinit();
