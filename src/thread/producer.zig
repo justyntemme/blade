@@ -35,19 +35,11 @@ fn fetchAndSend(queue: *channel.BatchQueue) !void {
     var batch_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     const arena_alloc = batch_arena.allocator();
     //create a new batch
-    var batch = channel.Batch{
+    const batch = channel.Batch{
         .arena = batch_arena,
-        .map = std.AutoHashMap(std.posix.pid_t, *platform.backend.Proc).init(arena_alloc),
+        .map = try platform.collectSnapshot(arena_alloc),
         .timestamp_ns = std.time.nanoTimestamp(),
     };
-    var raw_map = try platform.collectSnapshot(arena_alloc);
-    // const arena_alloc = batch.arena.allocator();
-    var iter = raw_map.iterator();
-    while (iter.next()) |entry| {
-        const p = try arena_alloc.create(platform.backend.Proc);
-        p.* = entry.value_ptr.*;
-        try batch.map.put(entry.key_ptr.*, p);
-    }
     var backoff_ns: u64 = 100_000; // Start at 100µs
     const max_backoff_ns: u64 = 10 * std.time.ns_per_ms; // Cap at 10ms
 
