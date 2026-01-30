@@ -483,7 +483,7 @@ pub const AppState = struct {
         }
 
         if (any_collapsed) {
-            const needed_capacity: u32 = @intCast(self.expanded_pids.count() + parent_count);
+            const needed_capacity: u32 = @intCast(@max(self.expanded_pids.count(), parent_count));
             self.expanded_pids.ensureTotalCapacity(needed_capacity) catch |err|
                 {
                     self.showToastFmt("Expand all failed: {}", .{err}, .err);
