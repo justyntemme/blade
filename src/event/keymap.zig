@@ -6,7 +6,8 @@ pub const Action = actions.Action;
 
 pub const Mode = enum {
     normal,
-    search,
+    search_edit,
+    search_view,
 };
 
 pub const KeyBinding = struct {
@@ -33,13 +34,15 @@ pub const keymap = [_]KeyBinding{
     //expand
     .{ .key = .{ .special = .enter }, .action = .toggle_expand, .modes = &.{.normal}, .description = "toggle expand" },
     // Navigation (both modes)
-    .{ .key = .{ .char = 'g' }, .action = .jump_top, .modes = &.{.normal}, .description = "top" },
+    .{ .key = .{ .char = 'g' }, .action = .jump_top, .modes = &.{
+        .normal,
+    }, .description = "top" },
     .{ .key = .{ .char = 'G' }, .action = .jump_bottom, .modes = &.{.normal}, .description = "bottom" },
-    .{ .key = .{ .char = '*' }, .action = .toggle_expand_all, .modes = &.{.normal}, .description = "Expand all" },
+    .{ .key = .{ .char = '*' }, .action = .toggle_expand_all, .modes = &.{ .normal, .search_view }, .description = "Expand all" },
     .{ .key = .{ .char = 'j' }, .action = .move_down, .modes = &.{.normal}, .description = "down" },
     .{ .key = .{ .char = 'k' }, .action = .move_up, .modes = &.{.normal}, .description = "up" },
-    .{ .key = .{ .special = .up }, .action = .move_up, .modes = &.{ .normal, .search }, .description = "" },
-    .{ .key = .{ .special = .down }, .action = .move_down, .modes = &.{ .normal, .search }, .description = "" },
+    .{ .key = .{ .special = .up }, .action = .move_up, .modes = &.{ .normal, .search_view }, .description = "" },
+    .{ .key = .{ .special = .down }, .action = .move_down, .modes = &.{ .normal, .search_view }, .description = "" },
     .{ .key = .{ .char = 'u' }, .action = .page_up, .modes = &.{.normal}, .description = "page up" },
     .{ .key = .{ .char = 'd' }, .action = .page_down, .modes = &.{.normal}, .description = "page down" },
     // Application
@@ -47,7 +50,7 @@ pub const keymap = [_]KeyBinding{
     .{ .key = .{ .special = .esc }, .action = .quit, .modes = &.{.normal}, .description = "" },
     // Search
     .{ .key = .{ .char = '/' }, .action = .start_search, .modes = &.{.normal}, .description = "search" },
-    .{ .key = .{ .char = 'c' }, .action = .clear_search, .modes = &.{.normal}, .description = "clear" },
+    .{ .key = .{ .char = 'c' }, .action = .clear_search, .modes = &.{ .normal, .search_view }, .description = "clear" },
 
     // Process control
     .{ .key = .{ .char = 'x' }, .action = .kill_term, .modes = &.{.normal}, .description = "kill" },

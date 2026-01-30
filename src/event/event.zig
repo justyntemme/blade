@@ -10,7 +10,8 @@ pub fn handleEvent(app: *state.AppState, event: anytype) !void {
             //check app mode for search
             switch (app.mode) {
                 .normal => handleNormalMode(app, key),
-                .search => handleSearchMode(app, key),
+                .search_edit => handleSearchEditMode(app, key),
+                .search_view => handleSearchViewMode(app, key),
             }
         },
         .resize => |size| {
@@ -54,7 +55,7 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
         .jump_top => app.jumpTop(),
         .jump_bottom => app.jumpBottom(),
         .quit => app.running = false,
-        .start_search => app.mode = .search,
+        .start_search => app.mode = .search_edit,
         .clear_search => {
             app.search_len = 0;
             app.refreshFilter();
@@ -87,19 +88,20 @@ fn killSelected(app: *state.AppState, force: bool) void {
     };
 }
 
-fn handleSearchMode(app: *state.AppState, key: anytype) void {
+fn handleSearchEditMode(app: *state.AppState, key: anytype) void {
     switch (key.code) {
         .char => |c| {
             if (c < 128) {
                 app.searchAppend(@intCast(c));
+                app.refreshFilter(); // live search
             }
         },
         .backspace => {
             app.searchBackspace();
+            app.refreshFilter(); // live search
         },
         .enter => {
-            app.refreshFilter();
-            app.mode = .normal;
+            app.mode = .search_view; // cement search
         },
         .esc => {
             app.searchClear();
@@ -109,6 +111,27 @@ fn handleSearchMode(app: *state.AppState, key: anytype) void {
         // allow navigation while in search mode
         .up => app.up(),
         .down => app.down(),
+        else => {},
+    }
+}
+
+fn handleSearchViewMode(app: *state.AppState, key: anytype) void {
+    switch (key.code) {
+        .char => |c| switch (c) {
+            'j' => app.down(),
+            'k' => app.up(),
+            '/' => app.mode = .search_edit,
+            'c' => {
+                app.searchClear();
+                app.refreshFilter();
+                app.mode = .normal;
+            },
+            else => {},
+        },
+        .enter => app.toggleSelectedExpansion(),
+        .up => app.up(),
+        .down => app.down(),
+        .esc => app.mode = .normal, // exit search view, keep filter
         else => {},
     }
 }

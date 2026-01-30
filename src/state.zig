@@ -62,7 +62,7 @@ pub const AppState = struct {
     sort_direction: SortDirection = .desc,
     active_toast: ?Toast = null,
     current_batch: ?channel.Batch = null,
-    mode: enum { normal, search } = .normal,
+    mode: enum { normal, search_edit, search_view } = .normal,
     search_buf: [256]u8 = [_]u8{0} ** 256,
     search_len: usize = 0,
     indices: std.ArrayList(usize) = .empty,
@@ -293,6 +293,7 @@ pub const AppState = struct {
             std.ascii.lowerString(&search_lower_buf, search)
         else
             search;
+
         var roots = std.ArrayListUnmanaged(u32){};
         try roots.ensureTotalCapacity(arena, n);
         for (self.cold.items, 0..) |cold_item, idx| {
@@ -300,29 +301,85 @@ pub const AppState = struct {
                 roots.appendAssumeCapacity(@intCast(idx));
             }
         }
-
         if (roots.items.len > 1) {
             std.mem.sort(u32, roots.items, self, compareByNodeIndex);
         }
 
+        var subtree_flags: ?[]bool = null;
+
+        if (searching) {
+            const matches = try arena.alloc(bool, n);
+            const subtree = try arena.alloc(bool, n);
+            @memset(matches, false);
+            @memset(subtree, false);
+
+            for (self.cold.items, 0..) |cold_item, idx| {
+                if (self.matchesSearch(cold_item, search_lower)) {
+                    matches[idx] = true;
+                }
+            }
+
+            const WalkItem = struct { node: u32, visited: bool };
+            var walk = std.ArrayListUnmanaged(WalkItem){};
+            try walk.ensureTotalCapacity(arena, n);
+
+            var r: usize = 0;
+            while (r < roots.items.len) : (r += 1) {
+                walk.appendAssumeCapacity(.{ .node = roots.items[r], .visited = false });
+            }
+
+            while (walk.items.len > 0) {
+                const last = walk.items.len - 1;
+                const item = walk.items[last];
+                walk.items.len = last;
+
+                const node_u: usize = @intCast(item.node);
+                if (!item.visited) {
+                    walk.appendAssumeCapacity(.{ .node = item.node, .visited = true });
+                    const child_start: usize = @intCast(self.children_offsets.items[node_u]);
+                    const child_end: usize = @intCast(self.children_offsets.items[node_u + 1]);
+                    const children = self.children_flat.items[child_start..child_end];
+                    var i: usize = children.len;
+                    while (i > 0) {
+                        i -= 1;
+                        walk.appendAssumeCapacity(.{ .node = children[i], .visited = false });
+                    }
+                } else {
+                    var has_match = matches[node_u];
+                    const child_start: usize = @intCast(self.children_offsets.items[node_u]);
+                    const child_end: usize = @intCast(self.children_offsets.items[node_u + 1]);
+                    const children = self.children_flat.items[child_start..child_end];
+                    for (children) |child| {
+                        if (subtree[@intCast(child)]) {
+                            has_match = true;
+                            break;
+                        }
+                    }
+                    subtree[node_u] = has_match;
+                }
+            }
+
+            subtree_flags = subtree;
+        }
+
         try self.visible_nodes.ensureTotalCapacity(arena, n);
 
-        const StackItem = struct {
-            node: u32,
-            depth: u16,
-            is_last: bool,
-        };
+        const StackItem = struct { node: u32, depth: u16, is_last: bool, force_show: bool };
         var stack = std.ArrayListUnmanaged(StackItem){};
         try stack.ensureTotalCapacity(arena, roots.items.len);
 
         var i: usize = roots.items.len;
         while (i > 0) {
             i -= 1;
-            stack.appendAssumeCapacity(.{
-                .node = roots.items[i],
-                .depth = 0,
-                .is_last = i == roots.items.len - 1,
-            });
+            const root = roots.items[i];
+            if (!searching or subtree_flags.?[@intCast(root)]) {
+                stack.appendAssumeCapacity(.{
+                    .node = root,
+                    .depth = 0,
+                    .is_last = i == roots.items.len - 1,
+                    .force_show = false,
+                });
+            }
         }
 
         while (stack.items.len > 0) {
@@ -331,25 +388,39 @@ pub const AppState = struct {
             stack.items.len = last_index;
 
             const data_idx: usize = @intCast(item.node);
-            const cold_item = self.cold.items[data_idx];
             const pid = self.hot.items(.pid)[data_idx];
 
             const child_start: usize = @intCast(self.children_offsets.items[data_idx]);
             const child_end: usize = @intCast(self.children_offsets.items[data_idx + 1]);
             const has_children = child_end > child_start;
-            const is_expanded = has_children and self.isExpanded(pid);
 
-            if (!searching or self.matchesSearch(cold_item, search_lower)) {
+            const expanded_real = has_children and self.isExpanded(pid);
+            var display_expanded = expanded_real;
+            if (searching and has_children and !display_expanded) {
+                if (subtree_flags.?[data_idx]) {
+                    display_expanded = true; // auto-expand ancestors in search view
+                }
+            }
+
+            const should_show = if (!searching)
+                true
+            else
+                subtree_flags.?[data_idx] or item.force_show;
+
+            if (should_show) {
                 self.visible_nodes.appendAssumeCapacity(.{
                     .data_idx = item.node,
                     .depth = item.depth,
                     .has_children = has_children,
                     .is_last = item.is_last,
-                    .is_expanded = is_expanded,
+                    .is_expanded = display_expanded,
                 });
             }
 
-            if (has_children and (is_expanded or searching)) {
+            if (!has_children) continue;
+
+            if (!searching) {
+                if (!expanded_real) continue;
                 const children = self.children_flat.items[child_start..child_end];
                 var j: usize = children.len;
                 while (j > 0) {
@@ -358,7 +429,49 @@ pub const AppState = struct {
                         .node = children[j],
                         .depth = item.depth + 1,
                         .is_last = j == children.len - 1,
+                        .force_show = false,
                     });
+                }
+            } else {
+                if (expanded_real) {
+                    const children = self.children_flat.items[child_start..child_end];
+                    var j: usize = children.len;
+                    while (j > 0) {
+                        j -= 1;
+                        stack.appendAssumeCapacity(.{
+                            .node = children[j],
+                            .depth = item.depth + 1,
+                            .is_last = j == children.len - 1,
+                            .force_show = true,
+                        });
+                    }
+                } else if (subtree_flags.?[data_idx]) {
+                    const children = self.children_flat.items[child_start..child_end];
+
+                    var last_visible: ?u32 = null;
+                    var k: usize = children.len;
+                    while (k > 0) {
+                        k -= 1;
+                        const child = children[k];
+                        if (subtree_flags.?[@intCast(child)]) {
+                            last_visible = child;
+                            break;
+                        }
+                    }
+                    if (last_visible) |last_child| {
+                        var j: usize = children.len;
+                        while (j > 0) {
+                            j -= 1;
+                            const child = children[j];
+                            if (!subtree_flags.?[@intCast(child)]) continue;
+                            stack.appendAssumeCapacity(.{
+                                .node = child,
+                                .depth = item.depth + 1,
+                                .is_last = child == last_child,
+                                .force_show = false,
+                            });
+                        }
+                    }
                 }
             }
         }

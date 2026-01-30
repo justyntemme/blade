@@ -152,7 +152,7 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
         buf.setString(path_col.x, y, path_display, style);
         y += 1;
     }
-    if (app.mode == .search) {
+    if (app.mode == .search_edit) {
         renderSearchInput(buf, footer_rect, app);
     } else {
         renderHelpBar(buf, footer_rect);
