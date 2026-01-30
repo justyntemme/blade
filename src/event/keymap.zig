@@ -56,10 +56,10 @@ pub const keymap = [_]KeyBinding{
     .{ .key = .{ .char = 'X' }, .action = .kill_force, .modes = &.{.normal}, .description = "kill -9" },
 
     // Sorting
-    .{ .key = .{ .char = 'P' }, .action = .sort_by_pid, .modes = &.{.normal}, .description = "sort PID" },
-    .{ .key = .{ .char = 'N' }, .action = .sort_by_name, .modes = &.{.normal}, .description = "sort Name" },
-    .{ .key = .{ .char = 'C' }, .action = .sort_by_cpu, .modes = &.{.normal}, .description = "sort CPU" },
-    .{ .key = .{ .char = 'M' }, .action = .sort_by_mem, .modes = &.{.normal}, .description = "sort mem" },
+    .{ .key = .{ .char = 'P' }, .action = .sort_by_pid, .modes = &.{ .normal, .search_view }, .description = "sort PID" },
+    .{ .key = .{ .char = 'N' }, .action = .sort_by_name, .modes = &.{ .normal, .search_view }, .description = "sort Name" },
+    .{ .key = .{ .char = 'C' }, .action = .sort_by_cpu, .modes = &.{ .normal, .search_view }, .description = "sort CPU" },
+    .{ .key = .{ .char = 'M' }, .action = .sort_by_mem, .modes = &.{ .normal, .search_view }, .description = "sort mem" },
 };
 
 pub fn getAction(key: Key, mode: Mode) ?Action {
