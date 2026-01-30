@@ -1,4 +1,4 @@
-const std = @import("std");
+// const std = @import("std");
 const state = @import("state");
 const keymap = @import("event_keymap");
 const platform = @import("platform");
@@ -67,17 +67,20 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
 }
 
 fn killSelected(app: *state.AppState, force: bool) void {
-    if (app.selected_item < app.indices.items.len) {
-        const data_idx = app.indices.items[app.selected_item];
-        const pid = app.hot.items(.pid)[data_idx];
-        platform.signal(pid, force) catch |err| {
-            app.showToastFmt("Kill failed: {}", .{err}, .err);
-            return;
-        };
-        app.buildView() catch {};
-    } else {
-        app.showToast("No process selected", .err);
+    if (app.visible_nodes.items.len == 0) {
+        app.showToast("No Process Selected", .err);
+        return;
     }
+    const idx = @min(app.selected_item, app.visible_nodes.items.len - 1);
+    const data_idx: usize = @intCast(app.visible_nodes.items[idx].data_idx);
+    const pid = app.hot.items(.pid)[data_idx];
+    platform.signal(pid, force) catch |err| {
+        app.showToastFmt("Kill failed: {}", .{err}, .err);
+        return;
+    };
+    app.buildView() catch |err| {
+        app.showToastFmt("BuidlView Failed: {}", .{err}, .err);
+    };
 }
 
 fn handleSearchMode(app: *state.AppState, key: anytype) void {

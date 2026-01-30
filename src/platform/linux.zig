@@ -7,7 +7,8 @@ pub const PlatformError = error{
 };
 
 pub const Proc = struct {
-    pid: std.posix.pid_t,
+    pid: std.posix.pid_t = 0,
+    ppid: std.posix.pid_t = 0,
     start_time_ns: i128 = 0,
     s_name: [256:0]u8,
     path: [4096]u8,

@@ -22,7 +22,8 @@ pub const pid_t = c.pid_t;
 //TODO: move to models such that we can use an
 //extend a shared model of  Proc object
 pub const Proc = struct {
-    pid: pid_t,
+    pid: pid_t = 0,
+    ppid: pid_t = 0,
     start_time_ns: i128 = 0,
     s_name: [256:0]u8,
     path: [4096]u8,
@@ -110,6 +111,7 @@ pub fn collectSnapshot(arena: std.mem.Allocator) PlatformError!std.AutoHashMap(p
             // SAFETY: s_name and path are fully written via @memcpy before struct is used
             var proc = Proc{
                 .pid = pid,
+                .ppid = @intCast(proc_info.pbi_ppid),
                 .start_time_ns = start_time_ns,
                 .s_name = undefined,
                 .path = undefined,

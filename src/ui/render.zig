@@ -108,9 +108,12 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
 
     var y: u16 = list_rect.y + 1;
     var idx: usize = app.scroll_offset;
-    while (idx < app.indices.items.len) : (idx += 1) {
+    while (idx < app.visible_nodes.items.len) : (idx += 1) {
         if (y >= list_rect.y + list_rect.height) break;
-        const data_idx = app.indices.items[idx];
+
+        const node = app.visible_nodes.items[idx];
+        const data_idx: usize = @intCast(node.data_idx);
+
         const style = if (idx == app.selected_item)
             _Style{ .bg = .blue, .fg = .white }
         else
@@ -132,11 +135,18 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
         const mem_mb = @as(f64, @floatFromInt(mem_rss)) / (1024.0 * 1024.0);
         const mem_str = std.fmt.bufPrint(&mem_buf, "{d:>6.1} MB", .{mem_mb}) catch "err";
 
-        const name_display = name[0..@min(name.len, name_col.width)];
+        const prefix_width = renderTreePrefix(buf, name_col.x, y, node, style, name_col.width);
+        const name_x = name_col.x + prefix_width;
+        const name_width: u16 = name_col.width -| prefix_width;
+
+        const name_display = name[0..@min(name.len, @as(usize, @intCast(name_width)))];
         const path_display = path[0..@min(path.len, path_col.width)];
 
         buf.setString(pid_col.x, y, pid_str, style);
-        buf.setString(name_col.x, y, name_display, style);
+        if (name_width > 0) {
+            buf.setString(name_x, y, name_display, style);
+        }
+
         buf.setString(cpu_col.x, y, cpu_str, style);
         buf.setString(mem_col.x, y, mem_str, style);
         buf.setString(path_col.x, y, path_display, style);
@@ -145,7 +155,6 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
     if (app.mode == .search) {
         renderSearchInput(buf, footer_rect, app);
     } else {
-        // });
         renderHelpBar(buf, footer_rect);
     }
     block.render(area, buf);
@@ -154,6 +163,38 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
     if (app.active_toast) |*toast| {
         renderToast(buf, toast, area);
     }
+}
+
+fn renderTreePrefix(
+    buf: *tui.render.Buffer,
+    x: u16,
+    y: u16,
+    node: state.VisibleNode,
+    style: _Style,
+    max_width: u16,
+) u16 {
+    var prefix_buf: [64]u8 = undefined;
+    var pos: usize = 0;
+
+    var d: u16 = 0;
+    while (d < node.depth and pos + 2 < prefix_buf.len) : (d += 1) {
+        prefix_buf[pos] = ' ';
+        prefix_buf[pos + 1] = ' ';
+        pos += 2;
+    }
+
+    const glyph: u8 = if (node.has_children) (if (node.is_expanded) 'v' else '>') else ' ';
+    if (pos + 2 <= prefix_buf.len) {
+        prefix_buf[pos] = glyph;
+        prefix_buf[pos + 1] = ' ';
+        pos += 2;
+    }
+
+    const width: u16 = @min(max_width, @as(u16, @intCast(pos)));
+    if (width > 0) {
+        buf.setString(x, y, prefix_buf[0..width], style);
+    }
+    return width;
 }
 
 fn renderHelpBar(buf: *tui.render.Buffer, rect: layout.Rect) void {

@@ -17,8 +17,17 @@ pub const ProcHotList = std.MultiArrayList(ProcHot);
 pub const ProcCold = struct {
     name: []const u8,
     path: []const u8,
+    ppid: std.posix.pid_t,
     name_lower: []const u8,
     path_lower: []const u8,
+};
+
+pub const VisibleNode = struct {
+    data_idx: u32,
+    depth: u16,
+    has_children: bool,
+    is_last: bool,
+    is_expanded: bool,
 };
 //TODO review this idea   Why slices instead of fixed arrays?
 // - Slices are 16 bytes (pointer + length) vs 4352 bytes for [256]u8 + [4096]u8
@@ -48,6 +57,7 @@ pub const AppState = struct {
     scroll_offset: usize = 0,
     hot: ProcHotList = .{},
     cold: std.ArrayList(ProcCold) = .empty,
+    visible_nodes: std.ArrayListUnmanaged(VisibleNode) = .empty,
     sort_column: SortColumn = .cpu,
     sort_direction: SortDirection = .desc,
     active_toast: ?Toast = null,
@@ -58,6 +68,10 @@ pub const AppState = struct {
     indices: std.ArrayList(usize) = .empty,
     sorted_indices: std.ArrayList(usize) = .empty,
     previous_batch: ?channel.Batch = null,
+    pid_to_index: std.AutoHashMap(std.posix.pid_t, u32),
+    children_offsets: std.ArrayListUnmanaged(u32) = .empty,
+    children_flat: std.ArrayListUnmanaged(u32) = .empty,
+    expanded_pids: std.AutoHashMap(std.posix.pid_t, void),
     pub fn showToast(self: *AppState, message: []const u8, level: ToastLevel) void {
         var toast = Toast{
             .level = level,
@@ -98,8 +112,16 @@ pub const AppState = struct {
     pub fn buildView(self: *AppState) !void {
         const prev_identity = self.getSelectedIdentity();
         try self.populateView();
-        try self.buildIndices();
-        try self.applyFilter();
+        if (self.current_batch) |*batch| {
+            const arena = batch.arena.allocator();
+            try self.buildPidIndexMap(arena);
+            try self.buildChildrenAdjacency(arena);
+            try self.buildVisibleNodes(arena);
+        } else {
+            self.visible_nodes = .empty;
+        }
+        // try self.buildIndices();
+        // try self.applyFilter();
         self.applySelection(prev_identity);
     }
 
@@ -107,8 +129,12 @@ pub const AppState = struct {
     /// Called on sort column/direction change.
     pub fn sortView(self: *AppState) void {
         const prev_identity = self.getSelectedIdentity();
-        self.buildIndices() catch return;
-        self.applyFilter() catch return;
+        if (self.current_batch) |*batch| {
+            const arena = batch.arena.allocator();
+            self.buildVisibleNodes(arena) catch return;
+        }
+        // self.buildIndices() catch return;
+        // self.applyFilter() catch return;
         self.applySelection(prev_identity);
     }
 
@@ -116,7 +142,11 @@ pub const AppState = struct {
     /// Called on search change.
     pub fn refreshFilter(self: *AppState) void {
         const prev_identity = self.getSelectedIdentity();
-        self.applyFilter() catch return;
+        if (self.current_batch) |*batch| {
+            const arena = batch.arena.allocator();
+            self.buildVisibleNodes(arena) catch return;
+        }
+        // self.applyFilter() catch return;
         self.applySelection(prev_identity);
     }
 
@@ -163,6 +193,7 @@ pub const AppState = struct {
             try self.cold.append(self.gpa, .{
                 .name = std.mem.sliceTo(&proc_ptr.s_name, 0),
                 .path = std.mem.sliceTo(&proc_ptr.path, 0),
+                .ppid = proc_ptr.ppid,
                 .name_lower = name_lower,
                 .path_lower = path_lower,
             });
@@ -176,10 +207,147 @@ pub const AppState = struct {
         std.debug.assert(self.hot.len == self.cold.items.len); // For development ensure hot is in sync
     }
 
+    fn buildPidIndexMap(self: *AppState, arena: std.mem.Allocator) !void {
+        self.pid_to_index = std.AutoHashMap(std.posix.pid_t, u32).init(arena);
+        try self.pid_to_index.ensureTotalCapacity(@intCast(self.hot.len));
+
+        const pids = self.hot.items(.pid);
+        for (pids, 0..) |pid, i| {
+            self.pid_to_index.putAssumeCapacity(pid, @intCast(i));
+        }
+    }
+
+    fn buildChildrenAdjacency(self: *AppState, arena: std.mem.Allocator) !void {
+        const n: usize = self.hot.len;
+        self.children_offsets = .empty;
+        self.children_flat = .empty;
+        if (n == 0) return;
+
+        const child_counts = try arena.alloc(u32, n);
+        @memset(child_counts, 0);
+
+        //count children
+        for (self.cold.items) |cold_item| {
+            if (self.pid_to_index.get(cold_item.ppid)) |parent_idx| {
+                const parent_u: usize = @intCast(parent_idx);
+                child_counts[parent_u] += 1;
+            }
+        }
+
+        try self.children_offsets.ensureTotalCapacity(arena, n + 1);
+        self.children_offsets.items.len = n + 1;
+
+        var total: u32 = 0;
+        for (child_counts, 0..) |count, i| {
+            self.children_offsets.items[i] = total;
+            total += count;
+        }
+        self.children_offsets.items[n] = total;
+
+        //allocate flat children array
+        const total_children: usize = @intCast(total);
+        try self.children_flat.ensureTotalCapacity(arena, total_children);
+        self.children_flat.items.len = total_children;
+
+        //fill with write cursor
+        const write_cursor = try arena.alloc(u32, n);
+        @memcpy(write_cursor, self.children_offsets.items[0..n]);
+
+        for (self.cold.items, 0..) |cold_item, child_i| {
+            if (self.pid_to_index.get(cold_item.ppid)) |parent_idx| {
+                const parent_u: usize = @intCast(parent_idx);
+                const cursor = &write_cursor[parent_u];
+                self.children_flat.items[@intCast(cursor.*)] = @intCast(child_i);
+                cursor.* += 1;
+            }
+        }
+    }
+
+    fn buildVisibleNodes(self: *AppState, arena: std.mem.Allocator) !void {
+        self.visible_nodes = .empty;
+
+        const n: usize = self.hot.len;
+        if (n == 0) return;
+        if (self.children_offsets.items.len != n + 1) return;
+
+        const search = self.searchSlice();
+        var search_lower_buf: [256]u8 = undefined;
+        const searching = search.len > 0;
+        const search_lower = if (searching)
+            std.ascii.lowerString(&search_lower_buf, search)
+        else
+            search;
+        var roots = std.ArrayListUnmanaged(u32){};
+        try roots.ensureTotalCapacity(arena, n);
+        for (self.cold.items, 0..) |cold_item, idx| {
+            if (!self.pid_to_index.contains(cold_item.ppid)) {
+                roots.appendAssumeCapacity(@intCast(idx));
+            }
+        }
+
+        try self.visible_nodes.ensureTotalCapacity(arena, n);
+
+        const StackItem = struct {
+            node: u32,
+            depth: u16,
+            is_last: bool,
+        };
+        var stack = std.ArrayListUnmanaged(StackItem){};
+        try stack.ensureTotalCapacity(arena, roots.items.len);
+
+        var i: usize = roots.items.len;
+        while (i > 0) {
+            i -= 1;
+            stack.appendAssumeCapacity(.{
+                .node = roots.items[i],
+                .depth = 0,
+                .is_last = i == roots.items.len - 1,
+            });
+        }
+
+        while (stack.items.len > 0) {
+            const last_index = stack.items.len - 1;
+            const item = stack.items[last_index];
+            stack.items.len = last_index;
+
+            const data_idx: usize = @intCast(item.node);
+            const cold_item = self.cold.items[data_idx];
+            const pid = self.hot.items(.pid)[data_idx];
+
+            const child_start: usize = @intCast(self.children_offsets.items[data_idx]);
+            const child_end: usize = @intCast(self.children_offsets.items[data_idx + 1]);
+            const has_children = child_end > child_start;
+            const is_expanded = has_children and self.isExpanded(pid);
+
+            if (!searching or self.matchesSearch(cold_item, search_lower)) {
+                self.visible_nodes.appendAssumeCapacity(.{
+                    .data_idx = item.node,
+                    .depth = item.depth,
+                    .has_children = has_children,
+                    .is_last = item.is_last,
+                    .is_expanded = is_expanded,
+                });
+            }
+
+            if (has_children and (is_expanded or searching)) {
+                const children = self.children_flat.items[child_start..child_end];
+                var j: usize = children.len;
+                while (j > 0) {
+                    j -= 1;
+                    stack.appendAssumeCapacity(.{
+                        .node = children[j],
+                        .depth = item.depth + 1,
+                        .is_last = j == children.len - 1,
+                    });
+                }
+            }
+        }
+    }
+
     /// Stage 2: Build sorted index array from view.
     fn buildIndices(self: *AppState) !void {
         self.sorted_indices.clearRetainingCapacity();
-        try self.sorted_indices.ensureTotalCapacity(self.gpa, self.hot.len);
+        try self.sorted_indices.ensureTotalCapacity(self.gpa, @intCast(self.hot.len));
         for (0..self.hot.len) |i| {
             self.sorted_indices.appendAssumeCapacity(i);
         }
@@ -210,15 +378,15 @@ pub const AppState = struct {
     /// Stage 4: Restore selection by identity, or clamp to valid range.
     fn applySelection(self: *AppState, prev_identity: ?model.ProcIdentity) void {
         self.restoreSelection(prev_identity);
-        if (self.indices.items.len == 0) {
+        if (self.visible_nodes.items.len == 0) {
             self.selected_item = 0;
         } else {
-            self.selected_item = @min(self.selected_item, self.indices.items.len - 1);
+            self.selected_item = @min(self.selected_item, self.visible_nodes.items.len - 1);
         }
         self.scroll_offset = 0;
     }
     pub fn down(self: *AppState) void {
-        if (self.selected_item < self.indices.items.len -| 1) {
+        if (self.selected_item < self.visible_nodes.items.len -| 1) {
             self.selected_item += 1;
         }
     }
@@ -247,15 +415,32 @@ pub const AppState = struct {
         self.search_len = 0;
     }
 
+    pub fn isExpanded(self: *const AppState, pid: std.posix.pid_t) bool {
+        return self.expanded_pids.contains(pid);
+    }
+
+    pub fn toggleExpanded(self: *AppState, pid: std.posix.pid_t) void {
+        if (self.expanded_pids.contains(pid)) {
+            _ = self.expanded_pids.remove(pid);
+        } else {
+            self.expanded_pids.put(pid, {}) catch |err| {
+                self.showToastFmt("Toggle expand failed: {}", .{err}, .err);
+            };
+        }
+    }
+
     pub fn init(gpa: std.mem.Allocator) AppState {
         return .{
             .gpa = gpa,
+            .pid_to_index = std.AutoHashMap(std.posix.pid_t, u32).init(gpa),
+            .expanded_pids = std.AutoHashMap(std.posix.pid_t, void).init(gpa),
         };
     }
 
     pub fn deinit(self: *AppState) void {
         self.indices.deinit(self.gpa);
         self.sorted_indices.deinit(self.gpa);
+        self.expanded_pids.deinit();
         self.hot.deinit(self.gpa);
         for (self.cold.items) |cold_item| {
             self.gpa.free(cold_item.name_lower);
@@ -298,18 +483,23 @@ pub const AppState = struct {
         return false;
     }
     fn getSelectedIdentity(self: *const AppState) ?model.ProcIdentity {
-        if (self.indices.items.len == 0) return null;
+        if (self.visible_nodes.items.len == 0) return null;
         //Clamp selected time within item bounds
-        const idx = @min(self.selected_item, self.indices.items.len - 1);
-        const data_idx = self.indices.items[idx];
-        return .{ .pid = self.hot.items(.pid)[data_idx], .start_time_ns = self.hot.items(.start_time_ns)[data_idx] };
+        const idx = @min(self.selected_item, self.visible_nodes.items.len - 1);
+        const node = self.visible_nodes.items[idx];
+        const data_idx: usize = @intCast(node.data_idx);
+        return .{
+            .pid = self.hot.items(.pid)[data_idx],
+            .start_time_ns = self.hot.items(.start_time_ns)[data_idx],
+        };
     }
 
     fn restoreSelection(self: *AppState, prev_identity: ?model.ProcIdentity) void {
         if (prev_identity) |identity| {
             const pids = self.hot.items(.pid);
             const start_times = self.hot.items(.start_time_ns);
-            for (self.indices.items, 0..) |data_idx, i| {
+            for (self.visible_nodes.items, 0..) |node, i| {
+                const data_idx: usize = @intCast(node.data_idx);
                 if (pids[data_idx] == identity.pid and start_times[data_idx] == identity.start_time_ns) {
                     self.selected_item = i;
                     return;
