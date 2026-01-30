@@ -478,7 +478,6 @@ pub const AppState = struct {
                 const pid = self.hot.items(.pid)[i];
                 if (!self.isExpanded(pid)) {
                     any_collapsed = true;
-                    break;
                 }
             }
         }
@@ -658,6 +657,7 @@ pub const AppState = struct {
     }
     fn getSelectedIdentity(self: *const AppState) ?model.ProcIdentity {
         if (self.visible_nodes.items.len == 0) return null;
+        if (self.selected_item == 0) return null;
         //Clamp selected time within item bounds
         const idx = @min(self.selected_item, self.visible_nodes.items.len - 1);
         const node = self.visible_nodes.items[idx];
