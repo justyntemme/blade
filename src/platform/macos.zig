@@ -10,7 +10,7 @@ const platform = @import("platform.zig");
 pub const PlatformError = error{
     FailedToGetProcessCount,
     FailedToGetProcessList,
-    FailedToGetProcPath,
+    FailedToGetProcessPath,
     OutOfMemory,
     PermissionDenied,
     ProcessNotFound,
@@ -56,7 +56,7 @@ pub fn collectSnapshot(arena: std.mem.Allocator) PlatformError!std.AutoHashMap(p
     const pids = try arena.alloc(pid_t, count);
     if (count <= 0) {
         std.debug.print("Failed to get process count\n", .{});
-        return error.FailedToGetProcPath;
+        return error.FailedToGetProcessCount;
     }
 
     // Get the actual PIDs
@@ -95,7 +95,7 @@ pub fn collectSnapshot(arena: std.mem.Allocator) PlatformError!std.AutoHashMap(p
         const task_size = c.proc_pidinfo(
             pid,
             c.PROC_PIDTASKINFO,
-            9,
+            0,
             &task_info,
             @sizeOf(c.proc_taskinfo),
         );
@@ -121,11 +121,21 @@ pub fn collectSnapshot(arena: std.mem.Allocator) PlatformError!std.AutoHashMap(p
             };
             @memcpy(proc.s_name[0..c_name.len], c_name);
             proc.s_name[c_name.len] = 0;
-            if (path_len != -1) {
-                @memcpy(proc.path[0..@intCast(path_len)], path_buf[0..@intCast(path_len)]);
+            if (path_len > 0) {
+                const len: usize = @intCast(@min(path_len, proc.path.len - 1));
+                @memcpy(proc.path[0..len], path_buf[0..len]);
+
                 proc.path[@intCast(path_len)] = 0;
             } else {
-                return error.FailedToGetProcessCount;
+                const e = std.posix.errno(0);
+                if (e == .SRCH) continue; // process exited between listing and path lookup
+                const err_label: []const u8 = switch (e) {
+                    .PERM => "[permission denied]",
+                    .NOENT => "[binary deleted]",
+                    else => "[path unavailable]",
+                };
+                @memcpy(proc.path[0..err_label.len], err_label);
+                proc.path[err_label.len] = 0;
             }
             try proc_map.put(pid, proc);
         }
