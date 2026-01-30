@@ -367,7 +367,7 @@ pub const AppState = struct {
 
         const StackItem = struct { node: u32, depth: u16, is_last: bool, force_show: bool };
         var stack = std.ArrayListUnmanaged(StackItem){};
-        try stack.ensureTotalCapacity(arena, roots.items.len);
+        try stack.ensureTotalCapacity(arena, n);
 
         var i: usize = roots.items.len;
         while (i > 0) {
