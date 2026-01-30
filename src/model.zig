@@ -18,6 +18,23 @@ pub const ProcIdentity = struct {
     }
 };
 
+pub const pid_t = std.posix.pid_t;
+
+pub const Proc = struct {
+    pid: pid_t = 0,
+    ppid: pid_t = 0,
+    start_time_ns: i128 = 0,
+    s_name: [256:0]u8,
+    path: [4096]u8,
+    mem_rss: u64 = 0,
+    total_user: u64 = 0,
+    total_system: u64 = 0,
+
+    pub fn identity(self: *const Proc) ProcIdentity {
+        return .{ .pid = self.pid, .start_time_ns = @intCast(self.start_time_ns) };
+    }
+};
+
 pub const ProcessSnapshot = struct {
     pid: std.posix.pid_t,
     start_time_ns: i128,

@@ -13,7 +13,7 @@ const platform = @import("platform");
 /// Invariant: Never store references to batch data outside the batch lifetime.
 pub const Batch = struct {
     arena: std.heap.ArenaAllocator,
-    map: std.AutoHashMap(platform.backend.pid_t, platform.backend.Proc),
+    map: std.AutoHashMap(platform.pid_t, platform.Proc),
     timestamp_ns: i128 = 0,
 
     pub fn deinit(self: *Batch) void {

@@ -9,10 +9,12 @@ pub const backend = switch (builtin.os.tag) {
     .windows => @import("windows.zig"),
     else => @compileError("Unsupported platform"),
 };
+pub const Proc = model.Proc;
+pub const pid_t = model.pid_t;
 
 pub const PlatformError = backend.PlatformError;
 
-pub fn collectSnapshot(arena: std.mem.Allocator) PlatformError!std.AutoHashMap(backend.pid_t, backend.Proc) {
+pub fn collectSnapshot(arena: std.mem.Allocator) PlatformError!std.AutoHashMap(pid_t, Proc) {
     return backend.collectSnapshot(arena);
 }
 

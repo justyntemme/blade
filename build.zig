@@ -88,6 +88,7 @@ pub fn build(b: *std.Build) void {
 
     thread_channel_mod.addImport("spsc_queue", spsc_mod);
     thread_channel_mod.addImport("platform", platform_mod);
+    thread_channel_mod.addImport("model", model_mod);
 
     thread_producer_mod.addImport("thread_channel", thread_channel_mod);
     thread_producer_mod.addImport("platform", platform_mod);

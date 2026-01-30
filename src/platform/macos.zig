@@ -7,6 +7,9 @@ const c = @cImport({
 const model = @import("model");
 const platform = @import("platform.zig");
 
+pub const Proc = model.Proc;
+pub const pid_t = model.pid_t;
+
 pub const PlatformError = error{
     FailedToGetProcessCount,
     FailedToGetProcessList,
@@ -17,38 +20,20 @@ pub const PlatformError = error{
     Unexpected,
 };
 
-pub const pid_t = c.pid_t;
+pub fn toSnapshot(proc: *const Proc, arena: std.mem.Allocator) !model.ProcessSnapshot {
+    const name_slice = std.mem.sliceTo(&proc.s_name, 0);
+    const path_slice = std.mem.sliceTo(&proc.path, 0);
+    return .{
+        .pid = proc.pid,
+        .start_time_ns = @intCast(proc.start_time_ns),
+        .cpu_total_ns = proc.total_user + proc.total_system,
+        .mem_rss_bytes = proc.mem_rss,
+        .state = .unkown,
+        .name = try arena.dupe(u8, name_slice),
+        .path = try arena.dupe(u8, path_slice),
+    };
+}
 
-//TODO: move to models such that we can use an
-//extend a shared model of  Proc object
-pub const Proc = struct {
-    pid: pid_t = 0,
-    ppid: pid_t = 0,
-    start_time_ns: i128 = 0,
-    s_name: [256:0]u8,
-    path: [4096]u8,
-    mem_rss: u64 = 0,
-    total_user: u64 = 0,
-    total_system: u64 = 0,
-
-    pub fn identity(self: *const Proc) model.ProcIdentity {
-        return .{ .pid = self.pid, .start_time_ns = @intCast(self.start_time_ns) };
-    }
-
-    pub fn toSnapshop(self: *const Proc, arena: std.mem.Allocator) !model.ProcessSnapshot {
-        const name_slice = std.mem.sliceTo(&self.s_name, 0);
-        const path_slice = std.mem.sliceTo(&self.path, 0);
-        return .{
-            .pid = self.pid,
-            .start_time_ns = @intCast(self.start_time_ns),
-            .cpu_total_ns = self.total_user + self.total_system,
-            .mem_rss_bytes = self.mem_rss,
-            .state = .unkown,
-            .name = try arena.dupe(u8, name_slice),
-            .path = try arena.dupe(u8, path_slice),
-        };
-    }
-};
 pub fn collectSnapshot(arena: std.mem.Allocator) PlatformError!std.AutoHashMap(pid_t, Proc) {
     var proc_map: std.AutoHashMap(pid_t, Proc) = .init(arena);
     const bytes = c.proc_listpids(c.PROC_ALL_PIDS, 0, null, 0);
