@@ -17,6 +17,7 @@ We use _ as an indicator that these resources are imported
 from an external module. This also ensures that if tui ever
 changes their API, we have less places in the code to change.
 
+use .empty instead of .{} when possible (arrays as one example)
 * Allocators
 We use an arena allocator for the procMap
 as we wipe away the entire map every redraw, and pass over
@@ -81,11 +82,23 @@ and avoids per-node allocations since the array grows in chunks. Bulk frees beco
 single deinit; the main downside is removing individual nodes, which should be handled
 via a freelist that tracks reusable slots.
 
+** Handles > pointers (quick summary)
+Summary of the approach from “Handles are the better pointers”:
+Move memory ownership into centralized systems, store items in dense arrays,
+and expose only index handles to the rest of the code. Convert handles to
+pointers only inside the owning system, and only for short-lived access.
+Use extra handle bits (or per-slot generation counters) to detect stale or
+reused slots (use-after-free), and keep pointers out of public APIs to avoid
+fragmentation, cache misses, and hidden retention.
+
+Source:
+https://floooh.github.io/2018/06/17/handles-vs-pointers.html
+
 Practical rule:
 - Keep data in contiguous arrays.
 - Use typed index handles to prevent mixing unrelated indices.
 - If you must delete single nodes, add a freelist rather than shifting arrays.
-
+- zig utilizies multiarryaylist to allow this functionality
 Example (condensed typed handle):
 #+BEGIN_SRC zig
 const NodeId = enum(u32) { none = 0, _ };
@@ -103,17 +116,6 @@ Goal: keep OO abstraction + memory safety while still tuning cache behavior.
 Source:
 https://www.doc.ic.ac.uk/~scd/ShapesOnwards.pdf
 
-** Handles > pointers (quick summary)
-Summary of the approach from “Handles are the better pointers”:
-Move memory ownership into centralized systems, store items in dense arrays,
-and expose only index handles to the rest of the code. Convert handles to
-pointers only inside the owning system, and only for short-lived access.
-Use extra handle bits (or per-slot generation counters) to detect stale or
-reused slots (use-after-free), and keep pointers out of public APIs to avoid
-fragmentation, cache misses, and hidden retention.
-
-Source:
-https://floooh.github.io/2018/06/17/handles-vs-pointers.html
 * Layout management
 we use an internal (well plan to use) layout engine instead of something 
 like Clay, because we feel the project is not sophisticated enough in 
@@ -121,3 +123,108 @@ functionality to require a full library. I feel that it makes most sense
 to build an internal layout engine specific to our needs that is slim 
 and built into the project rather than a library we must rely on. This
 may change in the future if feature sets grow beyond what can easily be managed.
+
+* Common Pitfalls (AoS -> SoA) and How We Avoid Them
+
+This section reflects common issues reported in Zig docs and discussions, and shows how the plan avoids them.
+
+** Holding pointers/slices across resizes
+- Pitfall: `ArrayList.items` (and other list slices) can become invalid after a resize. Zig docs explicitly warn that element pointers are invalid after resizing operations. citeturn0search1turn0search3
+- How we avoid it:
+  - We do not store pointers into SoA arrays across growth operations.
+  - We rebuild index lists per batch and treat them as ephemeral.
+  - Any cached slices are only used within a single frame or batch.
+
+** Inconsistent allocator usage with unmanaged containers
+- Pitfall: `ArrayListAlignedUnmanaged` must use the same allocator for its entire lifetime. citeturn0search1
+- How we avoid it:
+  - All SoA lists are created and destroyed within a batch using the batch allocator.
+  - We do not mix allocators for a single container's lifetime.
+
+** Mixing hot and cold data in the same structure
+- Pitfall: SoA loses its benefits if hot fields (pid/cpu/mem) and cold fields (path/cmdline) are stored together.
+- How we avoid it:
+  - Lessons 4-5 separate hot SoA fields from cold string storage.
+  - Rendering resolves cold strings only for visible rows.
+
+** Sorting field arrays directly (breaking identity)
+- Pitfall: Sorting `cpu[]` directly breaks the mapping to `pid[]`, `mem[]`, etc.
+- How we avoid it:
+  - We sort an `indices[]` list and use it to access all fields (Lesson 7).
+
+** Forgetting canonical ownership/lifetime rules for slices
+- Pitfall: In Zig, slices are pointers and the programmer is responsible for ensuring lifetime and ownership correctness. citeturn0search3
+- How we avoid it:
+  - All string slices are backed by a batch-owned arena.
+  - The UI only reads slices that live as long as the batch.
+
+** Overusing MultiArrayList without using its API correctly
+- Pitfall: MultiArrayList stores separate lists per field; you should access fields through `slice()` and `.items(.)` to keep consistent pointers. citeturn0search0
+- How we avoid it:
+  - We always access SoA fields via `items(.field)` or a `slice()` from the same list.
+  - We never assume a field layout beyond the official API.
+
+** Non-deterministic sorting (no tie-breakers)
+- Pitfall: If CPU% is equal, the sort order may become unstable between frames.
+- How we avoid it:
+  - All comparators include a deterministic tie-breaker (pid or start_time).
+
+** Leaking platform-specific fields into core
+- Pitfall: If raw OS structs leak into core, it becomes harder to support multiple platforms.
+- How we avoid it:
+  - Lessons 1 and 6 enforce conversion into canonical `ProcessSnapshot` fields.
+
+
+* Falcon 9 Architecture: Durable, Modular, and Fast
+ The Falcon 9 analogy means:
+  - Clear stage separation (layers and responsibilities).
+  - Reusability (components and models reused in new features).
+  - Clean interfaces (each module is swappable without side effects).
+  - Stability under stress (long sessions, high process counts).
+* Avoid these patterns because they lead to future refactors or performance regressions:
+ - Scattered platform checks in UI or state modules.
+ - Multiple representations of the same data (duplicate caches). (unless its creating quick use views)
+ - Hidden ownership (implicit deinit or reliance on drop order).
+ - Using mutable global state instead of explicit context structs.
+ - Recomputing metrics in the UI layer.
+ - Mixing rendering with data collection or signal handling.
+ - Large switch statements that grow indefinitely (use registries).
+ - Per-frame allocations or formatting for every row.
+ - Using indices instead of stable identity keys. 
+ - Feature-specific hacks in render paths.
+
+
+* Zig Documentation References (Stable and Master)
+ 
+ All code must be validated against the Zig version you ship. Use the matching docs.
+** Stable (Zig 0.15.2) reference links:
+- Build system: https://ziglang.org/documentation/0.15.2/#Build-System
+- Arena allocator: https://ziglang.org/documentation/0.15.2/std/#std.heap.ArenaAllocator
+- Threads: https://ziglang.org/documentation/0.15.2/std/#std.Thread
+- Atomics: https://ziglang.org/documentation/0.15.2/std/#std.atomic
+- Sorting: https://ziglang.org/documentation/0.15.2/std/#std.sort
+- Style guide: https://ziglang.org/documentation/0.15.2/#Style-Guide
+- Builtin and OS selection: https://ziglang.org/documentation/0.15.2/#import and https://ziglang.org/documentation/0.15.2/std/#std.builtin
+
+* Compile-Time OS Selection (Comptime Patterns)
+ 
+ Prefer compile-time OS selection to avoid runtime branching and duplication.
+ 
+ ```zig
+ const builtin = @import("builtin");
+ 
+ const platform = switch (builtin.os.tag) {
+     .macos => @import("platform/macos.zig"),
+     .linux => @import("platform/linux.zig"),
+     else => @compileError("Unsupported OS"),
+ };
+
+* Build System Best Practices (Zig)
+ Use the modern build system and avoid deprecated patterns.
+
+*  UI Library review
+- Keep zigtui for now and wrap it behind a UI abstraction layer.
+- If a migration is needed, evaluate libvaxis first for depth and platform support.
+- Consider TUI.zig if you want a richer widget framework and can adopt its runtime.
+- Avoid zig-spoon due to GPL license unless licensing changes.
+- Keep the UI layer decoupled so backend swaps do not force refactors.

@@ -1,0 +1,940 @@
+#+TITLE: Arena Allocator + SPSC Queue Architecture
+#+AUTHOR: Blade Project
+#+DATE: 2025-01-10
+#+STARTUP: overview
+
+* Overview
+
+This document details the implementation of a polling-based process monitor using
+an SPSC queue for thread communication and arena allocators for efficient memory
+management.
+
+** Goals
+
+1. Non-blocking UI (data fetching on background thread)
+2. Efficient memory management (arena allocator per batch)
+3. Clean ownership transfer via queue
+4. Consumer-side filtering for instant search
+5. Selection preservation across refreshes
+
+** Architecture
+
+#+begin_example
+┌─────────────────────────────────────────────────────────────────┐
+│                         DATA THREAD                              │
+│                                                                 │
+│   every 2 seconds:                                              │
+│       arena = ArenaAllocator.init(page_allocator)               │
+│       map = HashMap(*Proc).init()                               │
+│                                                                 │
+│       for each process from getProcList():                      │
+│           p = arena.create(Proc)                                │
+│           map.put(pid, p)                                       │
+│                                                                 │
+│       queue.push(Batch{ .arena = arena, .map = map })           │
+│       // ownership transferred, do NOT deinit                   │
+│                                                                 │
+└───────────────────────────────┬─────────────────────────────────┘
+                                │
+                                │ SPSC Queue
+                                │ (transfers Batch struct, ~48 bytes)
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                         UI THREAD (main)                         │
+│                                                                 │
+│   every frame:                                                  │
+│       if queue.tryPop() -> newBatch:                            │
+│           app.currentBatch.deinit()   // free old arena         │
+│           app.currentBatch = newBatch // take ownership         │
+│           app.procs = newBatch.map    // update reference       │
+│           app.rebuildView()           // apply filter, sort     │
+│                                                                 │
+│       handleInput()                                             │
+│       render(app.view)                                          │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+#+end_example
+
+* Data Structures
+
+** Batch (transferred through queue)
+
+#+begin_src zig
+pub const Batch = struct {
+    arena: std.heap.ArenaAllocator,
+    map: std.AutoHashMap(pid_t, *Proc),
+
+    pub fn deinit(self: *Batch) void {
+        self.map.deinit();
+        self.arena.deinit();
+    }
+};
+#+end_src
+
+The Batch owns:
+- An arena allocator (holds all Proc memory)
+- A HashMap of pointers into that arena
+
+When =deinit()= is called:
+1. HashMap metadata is freed
+2. Arena releases all Proc memory in one operation
+
+** Queue Type
+
+#+begin_src zig
+const spsc = @import("spsc-queue");
+
+pub const BatchQueue = spsc.SpscQueue(Batch, .{ .capacity = 4 });
+#+end_src
+
+Small capacity (4) because:
+- Only need to buffer a few batches
+- Consumer processes faster than producer produces
+- Smaller memory footprint
+
+* Implementation Steps
+
+** Step 1: Add Dependencies
+
+*** build.zig.zon
+
+#+begin_src zig
+.dependencies = .{
+    .zigtui = .{
+        .path = "zigtui",
+    },
+    .@"spsc-queue" = .{
+        .url = "git+https://github.com/freref/spsc-queue.git",
+        .hash = "PLACEHOLDER",  // Run zig build, copy actual hash from error
+    },
+},
+#+end_src
+
+*** build.zig
+
+Add the module to your executable:
+
+#+begin_src zig
+const spsc = b.dependency("spsc-queue", .{
+    .target = target,
+    .optimize = optimize,
+});
+
+// In exe module setup:
+exe.root_module.addImport("spsc-queue", spsc.module("spsc-queue"));
+#+end_src
+
+** Step 2: Create src/channel.zig
+
+This file defines the message types and queue.
+
+#+begin_src zig
+const std = @import("std");
+const spsc = @import("spsc-queue");
+const proc = @import("proc/proc.zig");
+
+/// A batch of process data with its own memory arena
+pub const Batch = struct {
+    arena: std.heap.ArenaAllocator,
+    map: std.AutoHashMap(proc.pid_t, *proc.Proc),
+
+    /// Initialize an empty batch
+    pub fn init(backing_allocator: std.mem.Allocator) Batch {
+        return .{
+            .arena = std.heap.ArenaAllocator.init(backing_allocator),
+            .map = std.AutoHashMap(proc.pid_t, *proc.Proc).init(backing_allocator),
+        };
+    }
+
+    /// Free all memory owned by this batch
+    pub fn deinit(self: *Batch) void {
+        self.map.deinit();
+        self.arena.deinit();
+    }
+};
+
+/// The queue type for transferring batches between threads
+pub const BatchQueue = spsc.SpscQueue(Batch, .{ .capacity = 4 });
+
+/// Initialize a new queue
+pub fn initQueue(allocator: std.mem.Allocator) !BatchQueue {
+    return BatchQueue.init(allocator);
+}
+#+end_src
+
+** Step 3: Create src/data_thread.zig
+
+The background thread that polls for process data.
+
+#+begin_src zig
+const std = @import("std");
+const proc = @import("proc/proc.zig");
+const channel = @import("channel.zig");
+
+const POLL_INTERVAL_MS: u64 = 2000;
+
+/// Arguments passed to the data thread
+pub const ThreadArgs = struct {
+    queue: *channel.BatchQueue,
+    running: *std.atomic.Value(bool),
+};
+
+/// Entry point for the data thread
+pub fn run(args: ThreadArgs) void {
+    while (args.running.load(.acquire)) {
+        fetchAndSend(args.queue) catch |err| {
+            std.debug.print("Data thread error: {}\n", .{err});
+        };
+
+        // Sleep for poll interval
+        std.time.sleep(POLL_INTERVAL_MS * std.time.ns_per_ms);
+    }
+}
+
+fn fetchAndSend(queue: *channel.BatchQueue) !void {
+    // Create batch with arena
+    var batch = channel.Batch{
+        .arena = std.heap.ArenaAllocator.init(std.heap.page_allocator),
+        .map = std.AutoHashMap(proc.pid_t, *proc.Proc).init(std.heap.page_allocator),
+    };
+
+    // Fetch processes - reuse existing getProcList logic but allocate in arena
+    const arena_alloc = batch.arena.allocator();
+
+    // Get raw process data
+    var raw_map = try proc.getProcList(arena_alloc);
+    defer rawMap.deinit();
+
+    // Copy into arena-allocated Procs
+    var iter = raw_map.iterator();
+    while (iter.next()) |entry| {
+        const p = try arena_alloc.create(proc.Proc);
+        p.* = entry.value_ptr.*;
+        try batch.map.put(entry.key_ptr.*, p);
+    }
+
+    // Push to queue (ownership transfers)
+    // Spin if queue is full (unlikely with capacity 4)
+    while (!queue.tryPush(batch)) {
+        std.atomic.spinLoopHint();
+    }
+}
+#+end_src
+
+** Step 4: Update src/state.zig
+
+Add batch management and selection preservation.
+
+#+begin_src zig
+const std = @import("std");
+const proc = @import("proc/proc.zig");
+const channel = @import("channel.zig");
+
+pub const AppState = struct {
+    running: bool = true,
+    allocator: std.mem.Allocator,
+
+    // Data
+    currentBatch: ?channel.Batch = null,
+    procs: ?*std.AutoHashMap(proc.pid_t, *proc.Proc) = null,
+
+    // View (derived from procs)
+    view: std.ArrayList(*proc.Proc) = .{},
+
+    // Selection (by PID for stability)
+    selected_pid: ?proc.pid_t = null,
+    selected_index: usize = 0,
+    scroll_offset: usize = 0,
+
+    // Filtering
+    search_query: []const u8 = "",
+
+    pub fn init(allocator: std.mem.Allocator) AppState {
+        return .{
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *AppState) void {
+        self.view.deinit(self.allocator);
+        if (self.currentBatch) |*batch| {
+            batch.deinit();
+        }
+    }
+
+    /// Receive new batch from queue, replace current
+    pub fn receiveBatch(self: *AppState, newBatch: channel.Batch) void {
+        // Free old batch
+        if (self.currentBatch) |*old| {
+            old.deinit();
+        }
+
+        // Take ownership of new batch
+        self.currentBatch = newBatch;
+        self.procs = &self.currentBatch.?.map;
+
+        // Rebuild view with current filter
+        self.rebuildView();
+    }
+
+    /// Rebuild view from procs, applying filter and preserving selection
+    pub fn rebuildView(self: *AppState) void {
+        self.view.clearRetainingCapacity();
+
+        if (self.procs) |procs| {
+            var iter = procs.iterator();
+            while (iter.next()) |entry| {
+                const p = entry.value_ptr.*;
+                if (self.matchesFilter(p)) {
+                    self.view.append(self.allocator, p) catch {};
+                }
+            }
+        }
+
+        // Restore selection by PID
+        self.restoreSelection();
+    }
+
+    /// Check if process matches current search filter
+    fn matchesFilter(self: *AppState, p: *proc.Proc) bool {
+        if (self.search_query.len == 0) return true;
+
+        const name = std.mem.sliceTo(&p.Sname, 0);
+        return std.mem.indexOf(u8, name, self.search_query) != null;
+    }
+
+    /// Find selected_pid in view and update selected_index
+    fn restoreSelection(self: *AppState) void {
+        if (self.selected_pid) |pid| {
+            for (self.view.items, 0..) |p, i| {
+                if (p.PID == pid) {
+                    self.selected_index = i;
+                    self.adjustScroll();
+                    return;
+                }
+            }
+        }
+
+        // PID not found (process exited or filter excluded it)
+        // Fall back to index 0
+        self.selected_index = 0;
+        self.scroll_offset = 0;
+    }
+
+    /// Adjust scroll to keep selection visible
+    fn adjustScroll(self: *AppState) void {
+        // Will be called with visible_rows from render context
+        // For now, just ensure we don't scroll past selection
+        if (self.selected_index < self.scroll_offset) {
+            self.scroll_offset = self.selected_index;
+        }
+    }
+
+    /// Update selection (called from input handler)
+    pub fn selectNext(self: *AppState) void {
+        if (self.selected_index < self.view.items.len -| 1) {
+            self.selected_index += 1;
+            self.selected_pid = self.view.items[self.selected_index].PID;
+        }
+    }
+
+    pub fn selectPrev(self: *AppState) void {
+        if (self.selected_index > 0) {
+            self.selected_index -= 1;
+            self.selected_pid = self.view.items[self.selected_index].PID;
+        }
+    }
+};
+
+pub const DrawContext = struct {
+    state: *AppState,
+    allocator: std.mem.Allocator,
+};
+#+end_src
+
+** Step 5: Update src/event.zig
+
+Use new selection methods.
+
+#+begin_src zig
+const state = @import("state.zig");
+
+pub fn handleEvent(app: *state.AppState, event: anytype) void {
+    switch (event) {
+        .key => |key| {
+            switch (key.code) {
+                .char => |c| {
+                    if (c == 'q') app.running = false;
+                },
+                .esc => app.running = false,
+                .up => app.selectPrev(),
+                .down => app.selectNext(),
+                else => {},
+            }
+        },
+        else => {},
+    }
+}
+#+end_src
+
+** Step 6: Update src/main.zig
+
+Spawn thread and drain queue.
+
+#+begin_src zig
+const std = @import("std");
+const tui = @import("zigtui");
+const proc = @import("proc/proc.zig");
+const state = @import("state.zig");
+const render = @import("render.zig");
+const events = @import("event.zig");
+const channel = @import("channel.zig");
+const data_thread = @import("data_thread.zig");
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // Initialize backend
+    var backend = try tui.backend.AnsiBackend.init(allocator);
+    defer backend.deinit();
+
+    // Initialize terminal
+    var terminal = try tui.terminal.Terminal.init(allocator, backend.interface());
+    defer terminal.deinit();
+
+    try terminal.hideCursor();
+
+    // Initialize app state
+    var app = state.AppState.init(allocator);
+    defer app.deinit();
+
+    // Initialize queue
+    var queue = try channel.initQueue(allocator);
+    defer queue.deinit();
+
+    // Thread-safe running flag
+    var thread_running = std.atomic.Value(bool).init(true);
+
+    // Spawn data thread
+    const thread_args = data_thread.ThreadArgs{
+        .queue = &queue,
+        .running = &thread_running,
+    };
+    const handle = try std.Thread.spawn(.{}, data_thread.run, .{thread_args});
+
+    // Main loop
+    while (app.running) {
+        // Drain queue (non-blocking)
+        if (queue.tryPop()) |batch| {
+            app.receiveBatch(batch);
+        }
+
+        // Poll for input events (100ms timeout)
+        const event = try backend.interface().pollEvent(100);
+        events.handleEvent(&app, event);
+
+        // Render
+        const ctx = state.DrawContext{ .state = &app, .allocator = allocator };
+        try terminal.draw(ctx, render.render);
+    }
+
+    // Signal thread to stop
+    thread_running.store(false, .release);
+
+    // Wait for thread to finish
+    handle.join();
+
+    try terminal.showCursor();
+}
+#+end_src
+
+** Step 7: Update src/render.zig
+
+Handle empty state (loading).
+
+#+begin_src zig
+const std = @import("std");
+const tui = @import("zigtui");
+const state = @import("state.zig");
+const proc = @import("proc/proc.zig");
+
+const _Rect = tui.render.Rect;
+const _Style = tui.style.Style;
+const _Modifier = tui.style.Modifier;
+
+pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
+    const app = draw_ctx.state;
+
+    const area = buf.getArea();
+
+    // Title changes based on loading state
+    const title = if (app.procs == null)
+        "Processes (loading...)"
+    else
+        "Processes";
+
+    const block = tui.widgets.Block{
+        .title = title,
+        .borders = tui.widgets.Borders.all(),
+        .border_style = _Style{ .fg = .cyan },
+    };
+
+    const inner = _Rect{
+        .x = area.x + 1,
+        .y = area.y + 1,
+        .width = area.width -| 2,
+        .height = area.height -| 2,
+    };
+
+    // Show loading message if no data yet
+    if (app.procs == null) {
+        buf.setString(inner.x, inner.y, "Fetching processes...", _Style{ .fg = .yellow });
+        block.render(area, buf);
+        return;
+    }
+
+    // Scroll logic
+    const visible_rows = inner.height -| 1;
+    if (visible_rows > 0) {
+        if (app.selected_index >= app.scroll_offset + visible_rows) {
+            app.scroll_offset = app.selected_index - visible_rows + 1;
+        }
+        if (app.selected_index < app.scroll_offset) {
+            app.scroll_offset = app.selected_index;
+        }
+    }
+
+    // Header
+    buf.setString(inner.x, inner.y, "PID    NAME", _Style{
+        .fg = .cyan,
+        .modifier = _Modifier{ .bold = true },
+    });
+
+    // Process list
+    var y: u16 = inner.y + 1;
+    var idx: usize = app.scroll_offset;
+    while (idx < app.view.items.len) : (idx += 1) {
+        if (y >= inner.y + inner.height) break;
+        const p = app.view.items[idx];
+        const style = if (idx == app.selected_index)
+            _Style{ .bg = .blue, .fg = .white }
+        else
+            _Style{ .fg = .white };
+        var pid_buf: [8]u8 = undefined;
+        const pid_str = std.fmt.bufPrint(&pid_buf, "{d:<7}", .{p.PID}) catch "???";
+        const name = std.mem.sliceTo(&p.Sname, 0);
+
+        buf.setString(inner.x, y, pid_str, style);
+        buf.setString(inner.x + 8, y, name, style);
+        y += 1;
+    }
+
+    block.render(area, buf);
+}
+#+end_src
+
+* Key Concepts
+
+** Ownership Transfer
+
+The queue transfers ownership, not just data:
+
+#+begin_example
+Producer                    Queue                     Consumer
+─────────────────────────────────────────────────────────────────
+1. Creates Batch
+   (arena + map)
+         │
+         └──────> 2. tryPush(batch) ─────> 3. tryPop() -> batch
+                     Producer loses           Consumer gains
+                     ownership                ownership
+                                                   │
+                                                   └──> 4. deinit()
+                                                        when replaced
+#+end_example
+
+** Selection Stability
+
+#+begin_example
+Before refresh:           After refresh:
+┌─────────────────┐       ┌─────────────────┐
+│ PID 100 vim     │       │ PID 100 vim     │  ← selection preserved
+│ PID 200 bash  ◄─┼─sel   │ PID 200 bash  ◄─┼─ by PID, not index
+│ PID 300 ssh     │       │ PID 400 new     │  ← new process appeared
+└─────────────────┘       │ PID 300 ssh     │
+                          └─────────────────┘
+#+end_example
+
+** Filter Flow
+
+#+begin_example
+procs (HashMap)          rebuildView()              view (ArrayList)
+┌─────────────────┐                               ┌─────────────────┐
+│ All 400 procs   │ ──── matchesFilter() ────>   │ Filtered procs  │
+│                 │      (search_query)          │ (pointers only) │
+└─────────────────┘                               └─────────────────┘
+                                                          │
+                                                          ▼
+                                                  ┌─────────────────┐
+                                                  │ Render to screen│
+                                                  └─────────────────┘
+#+end_example
+
+* Testing
+
+** Build
+
+#+begin_src shell
+zig build
+#+end_src
+
+Watch for:
+- Dependency hash errors (copy actual hash)
+- Import path errors
+- Type mismatches
+
+** Run
+
+#+begin_src shell
+zig build run
+#+end_src
+
+Expected behavior:
+1. Window shows "Processes (loading...)"
+2. After ~100ms, process list appears
+3. Every 2 seconds, data refreshes (invisible to user)
+4. Selection stays on same PID across refreshes
+5. Up/Down navigation works
+6. 'q' exits
+
+** Verify Threading
+
+Add debug prints:
+
+#+begin_src zig
+// In data_thread.zig fetchAndSend():
+std.debug.print("Data thread: pushed batch with {} processes\n", .{batch.map.count()});
+
+// In main.zig queue drain:
+if (queue.tryPop()) |batch| {
+    std.debug.print("UI thread: received batch with {} processes\n", .{batch.map.count()});
+    app.receiveBatch(batch);
+}
+#+end_src
+
+* Architectural Decision: Why Not kqueue Hybrid?
+
+A tempting alternative is to use kqueue for removals:
+
+#+begin_example
+Poll Thread (adds only)     kqueue Thread (removes only)
+        │                            │
+        ▼                            ▼
+   map.put(pid)                 map.remove(pid)
+        │                            │
+        └────────────┬───────────────┘
+                     ▼
+              Shared Map
+#+end_example
+
+*Why this is problematic:*
+
+1. *Distributed State* - Two sources of truth. When they disagree, who wins?
+
+2. *Registration Complexity* - kqueue requires registering each PID individually.
+   400 processes = 400 kevent() syscalls at startup. More expensive than polling.
+
+3. *Unbounded Growth* - If kqueue misses an exit, zombie entries accumulate forever.
+   Full refresh is correct by construction every 2 seconds.
+
+4. *Concurrency* - Two threads mutating same map requires mutex (defeats lock-free)
+   or lock-free data structure (complex, error-prone).
+
+5. *Wrong Optimization* - 50ms work every 2000ms = 2.5% CPU. Not a bottleneck.
+
+*Conclusion:* Simple polling with full refresh is correct, simple, and fast enough.
+
+* Planned Feature: Sorting (Phased Implementation)
+
+Sorting will be implemented in phases to keep the architecture simple.
+
+** V1: Memory Sorting (No State Required)
+
+*** Overview
+
+V1 implements memory-based sorting only. Memory usage is an instantaneous value
+that requires no delta calculation.
+
+Hotkeys:
+- =m= - Sort by memory (RSS)
+- =n= - Sort by name
+- =p= - Sort by PID (default)
+
+*** Extend Proc Struct
+
+#+begin_src zig
+pub const Proc = struct {
+    PID: pid_t,
+    Sname: [256:0]u8,
+    Path: [4096]u8,
+
+    // V1: Memory only
+    resident_size: usize,   // Memory in bytes (RSS)
+};
+#+end_src
+
+*** Fetch Memory Data
+
+Use =proc_pidinfo= with =PROC_PIDTASKINFO=:
+
+#+begin_src zig
+var task_info: c.proc_taskinfo = undefined;
+const size = c.proc_pidinfo(
+    pid,
+    c.PROC_PIDTASKINFO,
+    0,
+    &task_info,
+    @sizeOf(c.proc_taskinfo),
+);
+
+if (size > 0) {
+    proc.resident_size = task_info.pti_resident_size;
+}
+#+end_src
+
+*** Sort Mode State
+
+#+begin_src zig
+pub const SortMode = enum {
+    pid,
+    name,
+    memory,
+    // cpu,  // V2
+};
+
+pub const SortOrder = enum {
+    ascending,
+    descending,
+};
+
+pub const AppState = struct {
+    // ... existing fields ...
+
+    sort_mode: SortMode = .memory,       // Default: sort by memory
+    sort_order: SortOrder = .descending, // Default: highest first
+};
+#+end_src
+
+*** Sorting in rebuildView
+
+#+begin_src zig
+pub fn rebuildView(self: *AppState) void {
+    self.view.clearRetainingCapacity();
+
+    // ... filter into view ...
+
+    // Sort based on current mode
+    const items = self.view.items;
+    switch (self.sort_mode) {
+        .pid => std.mem.sort(*Proc, items, {}, comparePid),
+        .name => std.mem.sort(*Proc, items, {}, compareName),
+        .memory => std.mem.sort(*Proc, items, {}, compareMemory),
+    }
+
+    // Reverse if descending
+    if (self.sort_order == .descending) {
+        std.mem.reverse(*Proc, items);
+    }
+
+    self.restoreSelection();
+}
+
+fn compareMemory(_: void, a: *Proc, b: *Proc) bool {
+    return a.resident_size < b.resident_size;
+}
+
+fn compareName(_: void, a: *Proc, b: *Proc) bool {
+    const a_name = std.mem.sliceTo(&a.Sname, 0);
+    const b_name = std.mem.sliceTo(&b.Sname, 0);
+    return std.mem.lessThan(u8, a_name, b_name);
+}
+
+fn comparePid(_: void, a: *Proc, b: *Proc) bool {
+    return a.PID < b.PID;
+}
+#+end_src
+
+*** Hotkey Handling (V1)
+
+#+begin_src zig
+.char => |c| {
+    switch (c) {
+        'q' => app.running = false,
+        'm' => app.setSortMode(.memory),
+        'n' => app.setSortMode(.name),
+        'p' => app.setSortMode(.pid),
+        else => {},
+    }
+},
+#+end_src
+
+*** V1 Implementation Order
+
+1. Extend Proc struct with =resident_size=
+2. Update proc.zig to fetch =PROC_PIDTASKINFO=
+3. Add SortMode/SortOrder to AppState
+4. Add compare functions and sorting in rebuildView
+5. Add hotkey handling
+6. Update header to show sort indicator and memory column
+
+** V2: CPU Sorting (Requires State)
+
+*** Overview
+
+V2 adds CPU percentage sorting. This requires tracking previous CPU times
+to calculate the delta between samples.
+
+CPU% formula:
+#+begin_example
+cpu_percent = (current_cpu_time - previous_cpu_time) / poll_interval * 100
+#+end_example
+
+*** State Management
+
+Producer maintains a HashMap of previous CPU times:
+
+#+begin_src zig
+// In data_thread.zig - persists across poll cycles
+var prev_cpu_times: std.AutoHashMap(pid_t, u64) = undefined;
+
+pub fn init(allocator: std.mem.Allocator) void {
+    prev_cpu_times = std.AutoHashMap(pid_t, u64).init(allocator);
+}
+
+fn fetchAndSend(queue: *BatchQueue) !void {
+    // ... fetch current data ...
+
+    var iter = batch.map.iterator();
+    while (iter.next()) |entry| {
+        const p = entry.value_ptr.*;
+
+        if (prev_cpu_times.get(p.PID)) |prev_time| {
+            const delta = p.cpu_time_us -| prev_time;  // Saturating sub
+            p.cpu_percent = @as(f32, @floatFromInt(delta)) /
+                            @as(f32, @floatFromInt(POLL_INTERVAL_MS * 1000)) * 100.0;
+        } else {
+            p.cpu_percent = 0.0;  // First sample
+        }
+
+        try prev_cpu_times.put(p.PID, p.cpu_time_us);
+    }
+
+    // Clean up stale entries (processes that exited)
+    // Optional: iterate prev_cpu_times, remove PIDs not in current batch
+
+    queue.push(batch);
+}
+#+end_src
+
+*** Smoothing (Optional Enhancement)
+
+To avoid jumpy CPU% values, use exponential smoothing:
+
+#+begin_src zig
+const SMOOTHING_ALPHA: f32 = 0.3;  // Higher = more reactive, lower = smoother
+
+// Instead of direct assignment:
+p.cpu_percent = SMOOTHING_ALPHA * new_percent + (1.0 - SMOOTHING_ALPHA) * prev_percent;
+#+end_src
+
+This requires storing the previous smoothed value as well.
+
+*** Extended Proc Struct for V2
+
+#+begin_src zig
+pub const Proc = struct {
+    PID: pid_t,
+    Sname: [256:0]u8,
+    Path: [4096]u8,
+
+    // V1: Memory
+    resident_size: usize,
+
+    // V2: CPU
+    cpu_time_us: u64,   // Raw cumulative CPU time
+    cpu_percent: f32,   // Calculated percentage
+};
+#+end_src
+
+*** V2 Hotkeys
+
+#+begin_src zig
+'c' => app.setSortMode(.cpu),
+#+end_src
+
+** UI Display
+
+*** Header with Sort Indicator
+
+#+begin_src zig
+const sort_indicator = switch (app.sort_mode) {
+    .memory => if (app.sort_order == .descending) "MEM▼" else "MEM▲",
+    .name => if (app.sort_order == .descending) "NAME▼" else "NAME▲",
+    .pid => if (app.sort_order == .descending) "PID▼" else "PID▲",
+    .cpu => if (app.sort_order == .descending) "CPU▼" else "CPU▲",  // V2
+};
+#+end_src
+
+*** Memory Column Formatting
+
+#+begin_src zig
+fn formatMemory(bytes: usize, buf: *[8]u8) []const u8 {
+    if (bytes >= 1024 * 1024 * 1024) {
+        return std.fmt.bufPrint(buf, "{d:.1}G", .{@as(f32, @floatFromInt(bytes)) / (1024 * 1024 * 1024)}) catch "???";
+    } else if (bytes >= 1024 * 1024) {
+        return std.fmt.bufPrint(buf, "{d:.1}M", .{@as(f32, @floatFromInt(bytes)) / (1024 * 1024)}) catch "???";
+    } else if (bytes >= 1024) {
+        return std.fmt.bufPrint(buf, "{d:.1}K", .{@as(f32, @floatFromInt(bytes)) / 1024}) catch "???";
+    } else {
+        return std.fmt.bufPrint(buf, "{d}B", .{bytes}) catch "???";
+    }
+}
+#+end_src
+
+* Next Objective: Memory/CPU Columns
+
+Priority for next session:
+1. Add =resident_size= to Proc struct
+2. Fetch =PROC_PIDTASKINFO= in proc.zig
+3. Add MEM column to render
+4. Implement column layout system (see below)
+5. Add sort by memory hotkey
+
+* Future Enhancements
+
+| Feature              | Change Required                                   |
+|----------------------+---------------------------------------------------|
+| Search input         | Add text input handling, update search_query      |
+| Sort by column       | See "Planned Feature: CPU/Memory Sorting" above   |
+| Process details      | Enter key shows modal with full Path, etc.        |
+| Kill process         | 'k' key sends signal to selected_pid              |
+| Multiple views       | Tab between different filtered views              |
+| Screen resize        | Handle .resize event, recalc visible_rows/scroll  |
+| Vim page navigation  | u/d for half-page up/down based on visible_rows   |
+| Status bar           | Bottom bar showing hotkeys: j/k /:filter q:quit   |
+| Column layout system | Config-driven columns with flex/fixed widths      |
+
+* Summary
+
+This architecture provides:
+
+1. **Non-blocking UI** - Data fetching never freezes the interface
+2. **Efficient memory** - Arena allocator = one alloc, one free per batch
+3. **Clean ownership** - Queue transfers complete batches, no shared state
+4. **Instant filtering** - Consumer-side filtering, no round-trip to thread
+5. **Stable selection** - PID-based selection survives refreshes
+
+Proceed to implementation when ready.
