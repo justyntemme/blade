@@ -43,6 +43,12 @@ pub fn main() !void {
         .mutex = &mutex,
     };
     const handle = try std.Thread.spawn(.{}, producer.run, .{thread_args});
+    defer {
+        thread_running.store(false, .release);
+        condition.signal();
+        handle.join();
+    }
+    defer terminal.showCursor() catch {};
 
     while (app.running) {
         if (queue.front()) |batch_ptr| {
@@ -62,8 +68,4 @@ pub fn main() !void {
         // Draw UI
         try terminal.draw(ctx, render.render);
     }
-    thread_running.store(false, .release);
-    condition.signal();
-    handle.join();
-    try terminal.showCursor();
 }
