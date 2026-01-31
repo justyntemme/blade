@@ -87,3 +87,12 @@ pub const VisibleNode = struct {
 
 pub const SortColumn = enum { pid, name, cpu, mem, path };
 pub const SortDirection = enum { asc, desc };
+
+pub const SortContext = struct {
+    pids: []const pid_t,
+    cpu_percents: []const f32,
+    mem_rsss: []const u64,
+    cold_items: []const ProcCold,
+    sort_column: SortColumn,
+    sort_direction: SortDirection,
+};

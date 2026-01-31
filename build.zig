@@ -18,7 +18,7 @@ pub fn build(b: *std.Build) void {
     const module_target = b.graph.host;
 
     const model_mod = b.createModule(.{
-        .root_source_file = b.path("src/types/model.zig"),
+        .root_source_file = b.path("src/model.zig"),
         .target = module_target,
         .optimize = optimize,
     });
@@ -28,23 +28,31 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const sort_mod = b.createModule(.{
-        .root_source_file = b.path("src/sort.zig"),
+    const procs_sort_mod = b.createModule(.{
+        .root_source_file = b.path("src/procs/sort.zig"),
         .target = module_target,
         .optimize = optimize,
     });
-    const tree_mod = b.createModule(.{
-        .root_source_file = b.path("src/types/tree.zig"),
+    const procs_tree_mod = b.createModule(.{
+        .root_source_file = b.path("src/procs/tree.zig"),
         .target = module_target,
         .optimize = optimize,
     });
-    const state_mod = b.createModule(.{
-        .root_source_file = b.path("src/state.zig"),
-        .target = module_target,
-        .optimize = optimize,
-    });
+
     const thread_channel_mod = b.createModule(.{
         .root_source_file = b.path("src/thread/channel.zig"),
+        .target = module_target,
+        .optimize = optimize,
+    });
+
+    const procs_mod = b.createModule(.{
+        .root_source_file = b.path("src/procs/store.zig"),
+        .target = module_target,
+        .optimize = optimize,
+    });
+
+    const state_mod = b.createModule(.{
+        .root_source_file = b.path("src/state.zig"),
         .target = module_target,
         .optimize = optimize,
     });
@@ -84,16 +92,22 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    tree_mod.addImport("model", model_mod);
+    // procs domain wiring
+    procs_sort_mod.addImport("model", model_mod);
+    procs_tree_mod.addImport("model", model_mod);
+    procs_mod.addImport("model", model_mod);
+    procs_mod.addImport("procs_tree", procs_tree_mod);
+    procs_mod.addImport("procs_sort", procs_sort_mod);
+    procs_mod.addImport("thread_channel", thread_channel_mod);
 
+    // state wiring
     state_mod.addImport("thread_channel", thread_channel_mod);
-    state_mod.addImport("sort", sort_mod);
-    state_mod.addImport("tree", tree_mod);
+    state_mod.addImport("procs", procs_mod);
     state_mod.addImport("zigtui", zigtui_mod);
     state_mod.addImport("model", model_mod);
-    state_mod.addImport("platform", platform_mod);
     state_mod.addImport("event_keymap", event_keymap_mod);
 
+    // thread wiring
     thread_channel_mod.addImport("spsc_queue", spsc_mod);
     thread_channel_mod.addImport("platform", platform_mod);
     thread_channel_mod.addImport("model", model_mod);
@@ -101,16 +115,19 @@ pub fn build(b: *std.Build) void {
     thread_producer_mod.addImport("thread_channel", thread_channel_mod);
     thread_producer_mod.addImport("platform", platform_mod);
 
+    // event wiring
     event_keymap_mod.addImport("event_action", event_action_mod);
     event_mod.addImport("event_keymap", event_keymap_mod);
     event_mod.addImport("state", state_mod);
     event_mod.addImport("platform", platform_mod);
 
+    // ui wiring
     ui_render_mod.addImport("state", state_mod);
     ui_render_mod.addImport("ui_layout", ui_layout_mod);
     ui_render_mod.addImport("event_keymap", event_keymap_mod);
     ui_render_mod.addImport("zigtui", zigtui_mod);
 
+    // main wiring
     main_mod.addImport("event", event_mod);
     main_mod.addImport("ui_render", ui_render_mod);
     main_mod.addImport("state", state_mod);
@@ -119,6 +136,7 @@ pub fn build(b: *std.Build) void {
     main_mod.addImport("zigtui", zigtui_mod);
     main_mod.addImport("spsc_queue", spsc_mod);
 
+    // platform wiring
     platform_mod.addImport("model", model_mod);
 
     const exe = b.addExecutable(.{

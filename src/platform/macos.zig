@@ -39,6 +39,7 @@ pub fn collectSnapshot(arena: std.mem.Allocator) PlatformError!std.AutoHashMap(p
     const bytes = c.proc_listpids(c.PROC_ALL_PIDS, 0, null, 0);
     const count = @divExact(@as(usize, @intCast(bytes)), @sizeOf(pid_t));
     const pids = try arena.alloc(pid_t, count);
+    defer arena.free(pids);
     if (count <= 0) {
         std.debug.print("Failed to get process count\n", .{});
         return error.FailedToGetProcessCount;
