@@ -18,7 +18,7 @@ pub fn build(b: *std.Build) void {
     const module_target = b.graph.host;
 
     const model_mod = b.createModule(.{
-        .root_source_file = b.path("src/model.zig"),
+        .root_source_file = b.path("src/types/model.zig"),
         .target = module_target,
         .optimize = optimize,
     });
@@ -30,6 +30,11 @@ pub fn build(b: *std.Build) void {
 
     const sort_mod = b.createModule(.{
         .root_source_file = b.path("src/sort.zig"),
+        .target = module_target,
+        .optimize = optimize,
+    });
+    const tree_mod = b.createModule(.{
+        .root_source_file = b.path("src/types/tree.zig"),
         .target = module_target,
         .optimize = optimize,
     });
@@ -79,8 +84,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    tree_mod.addImport("model", model_mod);
+
     state_mod.addImport("thread_channel", thread_channel_mod);
     state_mod.addImport("sort", sort_mod);
+    state_mod.addImport("tree", tree_mod);
     state_mod.addImport("zigtui", zigtui_mod);
     state_mod.addImport("model", model_mod);
     state_mod.addImport("platform", platform_mod);

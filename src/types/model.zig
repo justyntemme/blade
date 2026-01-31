@@ -59,3 +59,31 @@ pub const SystemSnapshot = struct {
     load_avg_5m: f32,
     load_avg_15m: f32,
 };
+
+pub const ProcHot = struct {
+    pid: std.posix.pid_t,
+    start_time_ns: i128,
+    cpu_percent: f32,
+    mem_rss: u64,
+};
+
+pub const ProcHotList = std.MultiArrayList(ProcHot);
+
+pub const ProcCold = struct {
+    name: []const u8,
+    path: []const u8,
+    ppid: std.posix.pid_t,
+    name_lower: []const u8,
+    path_lower: []const u8,
+};
+
+pub const VisibleNode = struct {
+    data_idx: u32,
+    depth: u16,
+    has_children: bool,
+    is_last: bool,
+    is_expanded: bool,
+};
+
+pub const SortColumn = enum { pid, name, cpu, mem, path };
+pub const SortDirection = enum { asc, desc };

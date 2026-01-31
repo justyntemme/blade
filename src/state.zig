@@ -4,39 +4,15 @@ const sort = @import("sort");
 const zigtui = @import("zigtui");
 const model = @import("model");
 const keymap = @import("event_keymap");
-// const platform = @import("platform");
+const tree = @import("tree");
 
-pub const ProcHot = struct {
-    pid: std.posix.pid_t,
-    start_time_ns: i128,
-    cpu_percent: f32,
-    mem_rss: u64,
-};
-
-pub const ProcHotList = std.MultiArrayList(ProcHot);
-
-pub const ProcCold = struct {
-    name: []const u8,
-    path: []const u8,
-    ppid: std.posix.pid_t,
-    name_lower: []const u8,
-    path_lower: []const u8,
-};
-
-pub const VisibleNode = struct {
-    data_idx: u32,
-    depth: u16,
-    has_children: bool,
-    is_last: bool,
-    is_expanded: bool,
-};
-//TODO review this idea   Why slices instead of fixed arrays?
-// - Slices are 16 bytes (pointer + length) vs 4352 bytes for [256]u8 + [4096]u8
-// - The actual string bytes still live in the batch's Proc structs
-// - We're just storing a view into that data
-
-pub const SortColumn = enum { pid, name, cpu, mem, path };
-pub const SortDirection = enum { asc, desc };
+// Re-exports for backward compatibility (used by render.zig, etc.)
+pub const ProcHot = model.ProcHot;
+pub const ProcHotList = model.ProcHotList;
+pub const ProcCold = model.ProcCold;
+pub const VisibleNode = model.VisibleNode;
+pub const SortColumn = model.SortColumn;
+pub const SortDirection = model.SortDirection;
 
 pub const ToastLevel = enum { info, success, warning, err };
 pub const Toast = struct {
@@ -68,8 +44,7 @@ pub const AppState = struct {
     search_len: usize = 0,
     previous_batch: ?channel.Batch = null,
     pid_to_index: std.AutoHashMap(std.posix.pid_t, u32),
-    children_offsets: std.ArrayListUnmanaged(u32) = .empty,
-    children_flat: std.ArrayListUnmanaged(u32) = .empty,
+    adjacency: tree.Adjacency = .{},
     expanded_pids: std.AutoHashMap(model.ProcIdentity, void),
     pub fn showToast(self: *AppState, message: []const u8, level: ToastLevel) void {
         var toast = Toast{
@@ -113,9 +88,9 @@ pub const AppState = struct {
         try self.populateView();
         if (self.current_batch) |*batch| {
             const arena = batch.arena.allocator();
-            try self.buildPidIndexMap(arena);
-            try self.buildChildrenAdjacency(arena);
-            self.sortChildrenRanges();
+            self.pid_to_index = try tree.buildPidIndexMap(self.hot.items(.pid), arena);
+            self.adjacency = try tree.buildAdjacency(self.cold.items, self.pid_to_index, self.hot.len, arena);
+            tree.sortChildren(&self.adjacency, self.hot.len, self, compareByNodeIndex);
         } else {
             self.visible_nodes = .empty;
             self.selected_item = 0;
@@ -129,7 +104,7 @@ pub const AppState = struct {
     /// Called on sort column/direction change.
     pub fn sortView(self: *AppState) void {
         const prev_identity = self.getSelectedIdentity();
-        self.sortChildrenRanges();
+        tree.sortChildren(&self.adjacency, self.hot.len, self, compareByNodeIndex);
         self.rebuildVisibleAndRestore(prev_identity, false);
     }
 
@@ -197,280 +172,22 @@ pub const AppState = struct {
         std.debug.assert(self.hot.len == self.cold.items.len); // For development ensure hot is in sync
     }
 
-    fn buildPidIndexMap(self: *AppState, arena: std.mem.Allocator) !void {
-        self.pid_to_index = std.AutoHashMap(std.posix.pid_t, u32).init(arena);
-        try self.pid_to_index.ensureTotalCapacity(@intCast(self.hot.len));
-
-        const pids = self.hot.items(.pid);
-        for (pids, 0..) |pid, i| {
-            self.pid_to_index.putAssumeCapacity(pid, @intCast(i));
-        }
-    }
-
-    fn buildChildrenAdjacency(self: *AppState, arena: std.mem.Allocator) !void {
-        const n: usize = self.hot.len;
-        self.children_offsets = .empty;
-        self.children_flat = .empty;
-        if (n == 0) return;
-
-        const child_counts = try arena.alloc(u32, n);
-        @memset(child_counts, 0);
-
-        //count children
-        for (self.cold.items) |cold_item| {
-            if (self.pid_to_index.get(cold_item.ppid)) |parent_idx| {
-                const parent_u: usize = @intCast(parent_idx);
-                child_counts[parent_u] += 1;
-            }
-        }
-
-        try self.children_offsets.ensureTotalCapacity(arena, n + 1);
-        self.children_offsets.items.len = n + 1;
-
-        var total: u32 = 0;
-        for (child_counts, 0..) |count, i| {
-            self.children_offsets.items[i] = total;
-            total += count;
-        }
-        self.children_offsets.items[n] = total;
-
-        //allocate flat children array
-        const total_children: usize = @intCast(total);
-        try self.children_flat.ensureTotalCapacity(arena, total_children);
-        self.children_flat.items.len = total_children;
-
-        //fill with write cursor
-        const write_cursor = try arena.alloc(u32, n);
-        @memcpy(write_cursor, self.children_offsets.items[0..n]);
-
-        for (self.cold.items, 0..) |cold_item, child_i| {
-            if (self.pid_to_index.get(cold_item.ppid)) |parent_idx| {
-                const parent_u: usize = @intCast(parent_idx);
-                const cursor = &write_cursor[parent_u];
-                self.children_flat.items[@intCast(cursor.*)] = @intCast(child_i);
-                cursor.* += 1;
-            }
-        }
-    }
-
-    fn childrenOf(self: *const AppState, idx: usize) []const u32 {
-        const start: usize = @intCast(self.children_offsets.items[idx]);
-        const end: usize = @intCast(self.children_offsets.items[idx + 1]);
-        return self.children_flat.items[start..end];
-    }
-
-    fn childrenOfMut(self: *AppState, idx: usize) []u32 {
-        const start: usize = @intCast(self.children_offsets.items[idx]);
-        const end: usize = @intCast(self.children_offsets.items[idx + 1]);
-        return self.children_flat.items[start..end];
-    }
-
-    fn sortChildrenRanges(self: *AppState) void {
-        const n: usize = self.hot.len;
-        if (n == 0) return;
-        if (self.children_offsets.items.len != n + 1) return;
-
-        for (0..n) |i| {
-            const children = self.childrenOfMut(i);
-            if (children.len <= 1) continue;
-
-            std.mem.sort(u32, children, self, compareByNodeIndex);
-        }
-    }
-
-    fn buildVisibleNodes(self: *AppState, arena: std.mem.Allocator) !void {
-        self.visible_nodes = .empty;
-
-        const n: usize = self.hot.len;
-        if (n == 0) return;
-        if (self.children_offsets.items.len != n + 1) return;
-
-        const search = self.searchSlice();
-        var search_lower_buf: [256]u8 = undefined;
-        const searching = search.len > 0;
-        const search_lower = if (searching)
-            std.ascii.lowerString(&search_lower_buf, search)
-        else
-            search;
-
-        var roots = std.ArrayListUnmanaged(u32){};
-        try roots.ensureTotalCapacity(arena, n);
-        for (self.cold.items, 0..) |cold_item, idx| {
-            if (!self.pid_to_index.contains(cold_item.ppid)) {
-                roots.appendAssumeCapacity(@intCast(idx));
-            }
-        }
-        if (roots.items.len > 1) {
-            std.mem.sort(u32, roots.items, self, compareByNodeIndex);
-        }
-
-        var subtree_flags: ?[]bool = null;
-
-        if (searching) {
-            const matches = try arena.alloc(bool, n);
-            const subtree = try arena.alloc(bool, n);
-            @memset(matches, false);
-            @memset(subtree, false);
-
-            for (self.cold.items, 0..) |cold_item, idx| {
-                if (self.matchesSearch(cold_item, search_lower)) {
-                    matches[idx] = true;
-                }
-            }
-
-            const WalkItem = struct { node: u32, visited: bool };
-            var walk = std.ArrayListUnmanaged(WalkItem){};
-            try walk.ensureTotalCapacity(arena, n);
-
-            var r: usize = 0;
-            while (r < roots.items.len) : (r += 1) {
-                walk.appendAssumeCapacity(.{ .node = roots.items[r], .visited = false });
-            }
-
-            while (walk.items.len > 0) {
-                const last = walk.items.len - 1;
-                const item = walk.items[last];
-                walk.items.len = last;
-
-                const node_u: usize = @intCast(item.node);
-                if (!item.visited) {
-                    walk.appendAssumeCapacity(.{ .node = item.node, .visited = true });
-                    const children = self.childrenOf(node_u);
-                    var i: usize = children.len;
-                    while (i > 0) {
-                        i -= 1;
-                        walk.appendAssumeCapacity(.{ .node = children[i], .visited = false });
-                    }
-                } else {
-                    var has_match = matches[node_u];
-                    const children = self.childrenOf(node_u);
-                    for (children) |child| {
-                        if (subtree[@intCast(child)]) {
-                            has_match = true;
-                            break;
-                        }
-                    }
-                    subtree[node_u] = has_match;
-                }
-            }
-
-            subtree_flags = subtree;
-        }
-
-        try self.visible_nodes.ensureTotalCapacity(arena, n);
-
-        const StackItem = struct { node: u32, depth: u16, is_last: bool, force_show: bool };
-        var stack = std.ArrayListUnmanaged(StackItem){};
-        try stack.ensureTotalCapacity(arena, n);
-
-        var i: usize = roots.items.len;
-        while (i > 0) {
-            i -= 1;
-            const root = roots.items[i];
-            if (!searching or subtree_flags.?[@intCast(root)]) {
-                stack.appendAssumeCapacity(.{
-                    .node = root,
-                    .depth = 0,
-                    .is_last = i == roots.items.len - 1,
-                    .force_show = false,
-                });
-            }
-        }
-
-        while (stack.items.len > 0) {
-            const last_index = stack.items.len - 1;
-            const item = stack.items[last_index];
-            stack.items.len = last_index;
-
-            const data_idx: usize = @intCast(item.node);
-            const children = self.childrenOf(data_idx);
-            const has_children = children.len > 0;
-
-            const expanded_real = has_children and self.isExpanded(data_idx);
-            var display_expanded = expanded_real;
-            if (searching and has_children and !display_expanded) {
-                if (subtree_flags.?[data_idx]) {
-                    display_expanded = true; // auto-expand ancestors in search view
-                }
-            }
-
-            const should_show = if (!searching)
-                true
-            else
-                subtree_flags.?[data_idx] or item.force_show;
-
-            if (should_show) {
-                self.visible_nodes.appendAssumeCapacity(.{
-                    .data_idx = item.node,
-                    .depth = item.depth,
-                    .has_children = has_children,
-                    .is_last = item.is_last,
-                    .is_expanded = expanded_real,
-                });
-            }
-
-            if (!has_children) continue;
-
-            if (!searching) {
-                if (!expanded_real) continue;
-                var j: usize = children.len;
-                while (j > 0) {
-                    j -= 1;
-                    stack.appendAssumeCapacity(.{
-                        .node = children[j],
-                        .depth = item.depth + 1,
-                        .is_last = j == children.len - 1,
-                        .force_show = false,
-                    });
-                }
-            } else {
-                if (expanded_real) {
-                    var j: usize = children.len;
-                    while (j > 0) {
-                        j -= 1;
-                        stack.appendAssumeCapacity(.{
-                            .node = children[j],
-                            .depth = item.depth + 1,
-                            .is_last = j == children.len - 1,
-                            .force_show = true,
-                        });
-                    }
-                } else if (subtree_flags.?[data_idx]) {
-                    var last_visible: ?u32 = null;
-                    var k: usize = children.len;
-                    while (k > 0) {
-                        k -= 1;
-                        const child = children[k];
-                        if (subtree_flags.?[@intCast(child)]) {
-                            last_visible = child;
-                            break;
-                        }
-                    }
-                    if (last_visible) |last_child| {
-                        var j: usize = children.len;
-                        while (j > 0) {
-                            j -= 1;
-                            const child = children[j];
-                            if (!subtree_flags.?[@intCast(child)]) continue;
-                            stack.appendAssumeCapacity(.{
-                                .node = child,
-                                .depth = item.depth + 1,
-                                .is_last = child == last_child,
-                                .force_show = false,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     fn rebuildVisibleAndRestore(self: *AppState, prev_identity: ?model.ProcIdentity, preserve_scroll: bool) void {
         const batch = if (self.current_batch) |*b| b else return;
         const prev_scroll = self.scroll_offset;
         const arena = batch.arena.allocator();
 
-        self.buildVisibleNodes(arena) catch |err| {
+        self.visible_nodes = tree.buildVisibleNodes(
+            self.hot,
+            self.cold.items,
+            &self.adjacency,
+            self.pid_to_index,
+            &self.expanded_pids,
+            self.searchSlice(),
+            self,
+            compareByNodeIndex,
+            arena,
+        ) catch |err| {
             self.showToastFmt("Build visible nodes failed: {}", .{err}, .err);
             return;
         };
@@ -555,13 +272,13 @@ pub const AppState = struct {
     pub fn toggleExpandAll(self: *AppState) void {
         const n: usize = self.hot.len;
         if (n == 0) return;
-        if (self.children_offsets.items.len != n + 1) return;
+        if (self.adjacency.offsets.items.len != n + 1) return;
 
         var any_collapsed = false;
         var parent_count: usize = 0;
 
         for (0..n) |i| {
-            if (self.childrenOf(i).len > 0) {
+            if (self.adjacency.childrenOf(i).len > 0) {
                 parent_count += 1;
                 if (!self.isExpanded(i)) {
                     any_collapsed = true;
@@ -570,7 +287,6 @@ pub const AppState = struct {
         }
 
         if (any_collapsed) {
-            // const needed_capacity: u32 = @intCast(@max(self.expanded_pids.count(), parent_count));
             const needed_capacity: u32 = @intCast(self.expanded_pids.count() + parent_count);
             self.expanded_pids.ensureTotalCapacity(needed_capacity) catch |err|
                 {
@@ -578,7 +294,7 @@ pub const AppState = struct {
                     return;
                 };
             for (0..n) |i| {
-                if (self.childrenOf(i).len > 0) {
+                if (self.adjacency.childrenOf(i).len > 0) {
                     const id = model.ProcIdentity{
                         .pid = self.hot.items(.pid)[i],
                         .start_time_ns = self.hot.items(.start_time_ns)[i],
@@ -588,7 +304,7 @@ pub const AppState = struct {
             }
         } else {
             for (0..n) |i| {
-                if (self.childrenOf(i).len > 0) {
+                if (self.adjacency.childrenOf(i).len > 0) {
                     const id = model.ProcIdentity{
                         .pid = self.hot.items(.pid)[i],
                         .start_time_ns = self.hot.items(.start_time_ns)[i],
@@ -604,7 +320,7 @@ pub const AppState = struct {
     fn setExpandedSubtree(self: *AppState, root_idx: u32, expand: bool) !void {
         const n: usize = self.hot.len;
         if (n == 0) return;
-        if (self.children_offsets.items.len != n + 1) return error.invalidState;
+        if (self.adjacency.offsets.items.len != n + 1) return error.invalidState;
 
         var stack = std.ArrayListUnmanaged(u32){};
         defer stack.deinit(self.gpa);
@@ -617,7 +333,7 @@ pub const AppState = struct {
             stack.items.len = last;
 
             const node_u: usize = @intCast(node_idx);
-            const children = self.childrenOf(node_u);
+            const children = self.adjacency.childrenOf(node_u);
             const has_children = children.len > 0;
 
             if (has_children) {
@@ -691,20 +407,6 @@ pub const AppState = struct {
         };
     }
 
-    fn matchesSearch(self: *const AppState, cold_data: ProcCold, search: []const u8) bool {
-        _ = self; //unused for now but keeps method on appstate for future changes
-        //Buffers
-
-        if (std.mem.indexOf(u8, cold_data.name_lower, search) != null) {
-            return true;
-        }
-
-        if (std.mem.indexOf(u8, cold_data.path_lower, search) != null) {
-            return true;
-        }
-
-        return false;
-    }
     fn getSelectedIdentity(self: *const AppState) ?model.ProcIdentity {
         if (self.visible_nodes.items.len == 0) return null;
         if (self.selected_item == 0) return null;
