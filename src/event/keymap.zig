@@ -31,6 +31,7 @@ pub const SpecialKey = enum {
 };
 
 pub const keymap = [_]KeyBinding{
+    .{ .key = .{ .char = '?' }, .action = .show_help, .modes = &.{ .normal, .search_view }, .description = "Show Help" },
     //expand
     .{ .key = .{ .special = .enter }, .action = .toggle_expand, .modes = &.{ .normal, .search_view }, .description = "toggle expand" },
     // Navigation (both modes)
