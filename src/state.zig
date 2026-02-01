@@ -5,11 +5,6 @@ const zigtui = @import("zigtui");
 const model = @import("model");
 const keymap = @import("event_keymap");
 
-// Re-exports for backward compatibility (used by render.zig, etc.)
-pub const ProcHot = model.ProcHot;
-pub const ProcHotList = model.ProcHotList;
-pub const ProcCold = model.ProcCold;
-pub const VisibleNode = model.VisibleNode;
 pub const SortColumn = model.SortColumn;
 pub const SortDirection = model.SortDirection;
 
@@ -118,17 +113,18 @@ pub const AppState = struct {
     }
 
     pub fn toggleSelectedExpansion(self: *AppState) void {
-        if (self.procs.visible_nodes.items.len == 0) return;
+        const rows = self.procs.render_rows.items;
+        if (rows.len == 0) return;
 
         const prev = self.getSelectedIdentity();
-        const idx = @min(self.selected_item, self.procs.visible_nodes.items.len - 1);
-        const node = self.procs.visible_nodes.items[idx];
-        if (!node.has_children) return;
+        const idx = @min(self.selected_item, rows.len - 1);
+        const row = rows[idx];
+        if (!row.has_children) return;
 
-        const data_idx: usize = @intCast(node.data_idx);
+        const data_idx: usize = @intCast(row.data_idx);
         const expand = !self.procs.isExpanded(data_idx);
 
-        self.procs.setExpandedSubtree(node.data_idx, expand) catch |err| {
+        self.procs.setExpandedSubtree(row.data_idx, expand) catch |err| {
             self.showToastFmt("Expand failed: {}", .{err}, .err);
             return;
         };
@@ -146,11 +142,11 @@ pub const AppState = struct {
     }
 
     fn getSelectedIdentity(self: *const AppState) ?model.ProcIdentity {
-        if (self.procs.visible_nodes.items.len == 0) return null;
+        const rows = self.procs.render_rows.items;
+        if (rows.len == 0) return null;
         if (self.selected_item == 0) return null;
-        const idx = @min(self.selected_item, self.procs.visible_nodes.items.len - 1);
-        const node = self.procs.visible_nodes.items[idx];
-        const data_idx: usize = @intCast(node.data_idx);
+        const idx = @min(self.selected_item, rows.len - 1);
+        const data_idx: usize = @intCast(rows[idx].data_idx);
         return self.procs.identityAt(data_idx);
     }
 
@@ -164,16 +160,17 @@ pub const AppState = struct {
 
     fn restoreAndClamp(self: *AppState, prev_identity: ?model.ProcIdentity) void {
         self.restoreSelection(prev_identity);
-        if (self.procs.visible_nodes.items.len == 0) {
+        const len = self.procs.render_rows.items.len;
+        if (len == 0) {
             self.selected_item = 0;
             self.scroll_offset = 0;
         } else {
-            self.selected_item = @min(self.selected_item, self.procs.visible_nodes.items.len - 1);
+            self.selected_item = @min(self.selected_item, len - 1);
         }
     }
 
     pub fn down(self: *AppState) void {
-        if (self.selected_item < self.procs.visible_nodes.items.len -| 1) {
+        if (self.selected_item < self.procs.render_rows.items.len -| 1) {
             self.selected_item += 1;
         }
     }
@@ -184,12 +181,13 @@ pub const AppState = struct {
     }
 
     pub fn jumpBottom(self: *AppState) void {
-        if (self.procs.visible_nodes.items.len == 0) {
+        const len = self.procs.render_rows.items.len;
+        if (len == 0) {
             self.selected_item = 0;
             self.scroll_offset = 0;
             return;
         }
-        self.selected_item = self.procs.visible_nodes.items.len - 1;
+        self.selected_item = len - 1;
     }
 
     pub fn up(self: *AppState) void {

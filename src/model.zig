@@ -29,10 +29,6 @@ pub const Proc = struct {
     mem_rss: u64 = 0,
     total_user: u64 = 0,
     total_system: u64 = 0,
-
-    pub fn identity(self: *const Proc) ProcIdentity {
-        return .{ .pid = self.pid, .start_time_ns = @intCast(self.start_time_ns) };
-    }
 };
 
 pub const ProcessSnapshot = struct {
@@ -44,10 +40,6 @@ pub const ProcessSnapshot = struct {
 
     name: []const u8,
     path: []const u8,
-
-    pub fn identity(self: *const ProcessSnapshot) ProcIdentity {
-        return .{ .pid = self.pid, .start_time_ns = self.start_time_ns };
-    }
 };
 
 pub const SystemSnapshot = struct {
@@ -83,6 +75,18 @@ pub const VisibleNode = struct {
     has_children: bool,
     is_last: bool,
     is_expanded: bool,
+};
+
+pub const RenderRow = struct {
+    pid: pid_t,
+    cpu_percent: f32,
+    mem_rss: u64,
+    name: []const u8,
+    path: []const u8,
+    depth: u16,
+    has_children: bool,
+    is_expanded: bool,
+    data_idx: u32,
 };
 
 pub const SortColumn = enum { pid, name, cpu, mem, path };

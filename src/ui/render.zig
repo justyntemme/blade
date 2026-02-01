@@ -3,6 +3,7 @@ const tui = @import("zigtui");
 const state = @import("state");
 const layout = @import("ui_layout");
 const keymap = @import("event_keymap");
+const model = @import("model");
 
 const _Style = tui.style.Style;
 const _Modifier = tui.style.Modifier;
@@ -108,39 +109,32 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
 
     var y: u16 = list_rect.y + 1;
     var idx: usize = app.scroll_offset;
-    while (idx < app.procs.visible_nodes.items.len) : (idx += 1) {
+    const rows = app.procs.render_rows.items;
+    while (idx < rows.len) : (idx += 1) {
         if (y >= list_rect.y + list_rect.height) break;
 
-        const node = app.procs.visible_nodes.items[idx];
-        const data_idx: usize = @intCast(node.data_idx);
+        const row = rows[idx];
 
         const style = if (idx == app.selected_item)
             _Style{ .bg = .blue, .fg = .white }
         else
             _Style{ .fg = .white };
-        const pid = app.procs.hot.items(.pid)[data_idx];
-        const cpu_percent = app.procs.hot.items(.cpu_percent)[data_idx];
-        const mem_rss = app.procs.hot.items(.mem_rss)[data_idx];
-
-        //cold
-        const name = app.procs.cold.items[data_idx].name;
-        const path = app.procs.cold.items[data_idx].path;
 
         var pid_buf: [8]u8 = undefined;
-        const pid_str = std.fmt.bufPrint(&pid_buf, "{d:<7}", .{pid}) catch "err";
+        const pid_str = std.fmt.bufPrint(&pid_buf, "{d:<7}", .{row.pid}) catch "err";
         var cpu_buf: [7]u8 = undefined;
-        const cpu_str = std.fmt.bufPrint(&cpu_buf, "{d:>5.1}%", .{cpu_percent}) catch "err";
+        const cpu_str = std.fmt.bufPrint(&cpu_buf, "{d:>5.1}%", .{row.cpu_percent}) catch "err";
 
         var mem_buf: [10]u8 = undefined;
-        const mem_mb = @as(f64, @floatFromInt(mem_rss)) / (1024.0 * 1024.0);
+        const mem_mb = @as(f64, @floatFromInt(row.mem_rss)) / (1024.0 * 1024.0);
         const mem_str = std.fmt.bufPrint(&mem_buf, "{d:>6.1} MB", .{mem_mb}) catch "err";
 
-        const prefix_width = renderTreePrefix(buf, name_col.x, y, node, style, name_col.width);
+        const prefix_width = renderTreePrefix(buf, name_col.x, y, row, style, name_col.width);
         const name_x = name_col.x + prefix_width;
         const name_width: u16 = name_col.width -| prefix_width;
 
-        const name_display = name[0..@min(name.len, @as(usize, @intCast(name_width)))];
-        const path_display = path[0..@min(path.len, path_col.width)];
+        const name_display = row.name[0..@min(row.name.len, @as(usize, @intCast(name_width)))];
+        const path_display = row.path[0..@min(row.path.len, path_col.width)];
 
         buf.setString(pid_col.x, y, pid_str, style);
         if (name_width > 0) {
@@ -169,7 +163,7 @@ fn renderTreePrefix(
     buf: *tui.render.Buffer,
     x: u16,
     y: u16,
-    node: state.VisibleNode,
+    row: model.RenderRow,
     style: _Style,
     max_width: u16,
 ) u16 {
@@ -177,13 +171,13 @@ fn renderTreePrefix(
     var pos: usize = 0;
 
     var d: u16 = 0;
-    while (d < node.depth and pos + 2 < prefix_buf.len) : (d += 1) {
+    while (d < row.depth and pos + 2 < prefix_buf.len) : (d += 1) {
         prefix_buf[pos] = ' ';
         prefix_buf[pos + 1] = ' ';
         pos += 2;
     }
 
-    const glyph: u8 = if (node.has_children) (if (node.is_expanded) 'v' else '>') else ' ';
+    const glyph: u8 = if (row.has_children) (if (row.is_expanded) 'v' else '>') else ' ';
     if (pos + 2 <= prefix_buf.len) {
         prefix_buf[pos] = glyph;
         prefix_buf[pos + 1] = ' ';

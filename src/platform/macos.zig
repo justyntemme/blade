@@ -20,20 +20,6 @@ pub const PlatformError = error{
     Unexpected,
 };
 
-pub fn toSnapshot(proc: *const Proc, arena: std.mem.Allocator) !model.ProcessSnapshot {
-    const name_slice = std.mem.sliceTo(&proc.s_name, 0);
-    const path_slice = std.mem.sliceTo(&proc.path, 0);
-    return .{
-        .pid = proc.pid,
-        .start_time_ns = @intCast(proc.start_time_ns),
-        .cpu_total_ns = proc.total_user + proc.total_system,
-        .mem_rss_bytes = proc.mem_rss,
-        .state = .unkown,
-        .name = try arena.dupe(u8, name_slice),
-        .path = try arena.dupe(u8, path_slice),
-    };
-}
-
 pub fn collectSnapshot(arena: std.mem.Allocator) PlatformError!std.AutoHashMap(pid_t, Proc) {
     var proc_map: std.AutoHashMap(pid_t, Proc) = .init(arena);
     const bytes = c.proc_listpids(c.PROC_ALL_PIDS, 0, null, 0);

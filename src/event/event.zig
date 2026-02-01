@@ -2,8 +2,9 @@
 const state = @import("state");
 const keymap = @import("event_keymap");
 const platform = @import("platform");
+const tui = @import("zigtui");
 
-pub fn handleEvent(app: *state.AppState, event: anytype) !void {
+pub fn handleEvent(app: *state.AppState, event: tui.Event) !void {
     switch (event) {
         .key => |key| {
 
@@ -22,7 +23,7 @@ pub fn handleEvent(app: *state.AppState, event: anytype) !void {
     }
 }
 
-fn handleNormalMode(app: *state.AppState, key: anytype) void {
+fn handleNormalMode(app: *state.AppState, key: tui.KeyEvent) void {
     if (app.active_toast != null) {
         app.active_toast = null;
         return; //consume keypress to not process further during toast notification
@@ -33,7 +34,7 @@ fn handleNormalMode(app: *state.AppState, key: anytype) void {
     executeAction(app, action);
 }
 
-fn mapKey(key: anytype) ?keymap.Key {
+fn mapKey(key: tui.KeyEvent) ?keymap.Key {
     return switch (key.code) {
         .char => |c| .{ .char = @intCast(c) },
         .up => .{ .special = .up },
@@ -77,13 +78,13 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
 }
 
 fn killSelected(app: *state.AppState, force: bool) void {
-    if (app.procs.visible_nodes.items.len == 0) {
+    const rows = app.procs.render_rows.items;
+    if (rows.len == 0) {
         app.showToast("No Process Selected", .err);
         return;
     }
-    const idx = @min(app.selected_item, app.procs.visible_nodes.items.len - 1);
-    const data_idx: usize = @intCast(app.procs.visible_nodes.items[idx].data_idx);
-    const pid = app.procs.hot.items(.pid)[data_idx];
+    const idx = @min(app.selected_item, rows.len - 1);
+    const pid = rows[idx].pid;
     platform.signal(pid, force) catch |err| {
         app.showToastFmt("Kill failed: {}", .{err}, .err);
         return;
@@ -91,7 +92,7 @@ fn killSelected(app: *state.AppState, force: bool) void {
     app.buildView();
 }
 
-fn handleSearchEditMode(app: *state.AppState, key: anytype) void {
+fn handleSearchEditMode(app: *state.AppState, key: tui.KeyEvent) void {
     switch (key.code) {
         .char => |c| {
             if (c < 128) {

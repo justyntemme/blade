@@ -8,6 +8,7 @@ pub const Store = struct {
     hot: model.ProcHotList = .{},
     cold: std.ArrayList(model.ProcCold) = .empty,
     visible_nodes: std.ArrayListUnmanaged(model.VisibleNode) = .empty,
+    render_rows: std.ArrayListUnmanaged(model.RenderRow) = .empty,
     sort_column: model.SortColumn = .cpu,
     sort_direction: model.SortDirection = .desc,
     adjacency: tree.Adjacency = .{},
@@ -29,6 +30,7 @@ pub const Store = struct {
         self.expanded_pids.deinit();
         self.hot.deinit(self.gpa);
         self.cold.deinit(self.gpa);
+        self.render_rows.deinit(self.gpa);
         if (self.current_batch) |*batch| {
             batch.deinit();
         }
@@ -154,6 +156,7 @@ pub const Store = struct {
             _sort.compareByNodeIndex,
             arena,
         );
+        try self.materializeRenderRows();
     }
 
     pub fn buildPipeline(self: *Store, search: []const u8) !void {
@@ -166,6 +169,7 @@ pub const Store = struct {
             tree.sortChildren(&self.adjacency, self.hot.len, ctx, _sort.compareByNodeIndex);
         } else {
             self.visible_nodes = .empty;
+            self.render_rows.clearRetainingCapacity();
             return;
         }
         try self.rebuildVisible(search);
@@ -223,6 +227,30 @@ pub const Store = struct {
                     try stack.append(self.gpa, children[i]);
                 }
             }
+        }
+    }
+
+    pub fn materializeRenderRows(self: *Store) !void {
+        self.render_rows.clearRetainingCapacity();
+        try self.render_rows.ensureTotalCapacity(self.gpa, self.visible_nodes.items.len);
+
+        const pids = self.hot.items(.pid);
+        const cpus = self.hot.items(.cpu_percent);
+        const mems = self.hot.items(.mem_rss);
+
+        for (self.visible_nodes.items) |vn| {
+            const di: usize = @intCast(vn.data_idx);
+            self.render_rows.appendAssumeCapacity(.{
+                .pid = pids[di],
+                .cpu_percent = cpus[di],
+                .mem_rss = mems[di],
+                .name = self.cold.items[di].name,
+                .path = self.cold.items[di].path,
+                .depth = vn.depth,
+                .has_children = vn.has_children,
+                .is_expanded = vn.is_expanded,
+                .data_idx = vn.data_idx,
+            });
         }
     }
 
