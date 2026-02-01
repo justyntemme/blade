@@ -153,6 +153,10 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
     }
     block.render(area, buf);
 
+    if (app.mode == .help) {
+        renderHelpView(buf, area);
+    }
+
     // Render toast notifications as overlay
     if (app.active_toast) |*toast| {
         renderToast(buf, toast, area);
@@ -189,6 +193,107 @@ fn renderTreePrefix(
         buf.setString(x, y, prefix_buf[0..width], style);
     }
     return width;
+}
+
+fn renderHelpView(buf: *tui.render.Buffer, area: tui.render.Rect) void {
+    const categories = [_][]const u8{ "Navigation", "Search", "Tree", "Sorting", "Process", "General" };
+
+    // Measure content heigh: title + blank + category + dismiss
+    var total_lines: u16 = 3; // title + blank line + dismiss line
+    for (categories) |cat| {
+        var has_entries = false;
+        for (keymap.keymap) |binding| {
+            if (binding.description.len == 0) continue;
+            if (!std.mem.eql(u8, binding.category, cat)) continue;
+            has_entries = true;
+            total_lines += 1;
+        }
+        if (has_entries) total_lines += 2;
+    }
+
+    //Box dems
+    const box_width: u16 = @min(60, area.width -| 4);
+    const box_height: u16 = @min(total_lines, area.height -| 2);
+    const box_x: u16 = area.x + (area.width -| box_width) / 2;
+    const box_y: u16 = area.y + (area.height -| box_height) / 2;
+
+    //clear box area
+    const bg_style = _Style{ .bg = .dark_gray };
+    var cy: u16 = box_y;
+
+    while (cy < box_y + box_height) : (cy += 1) {
+        var blank_buf: [80]u8 = [_]u8{' '} ** 80;
+        const w: usize = @min(box_width, blank_buf.len);
+        buf.setString(box_x, cy, blank_buf[0..w], bg_style);
+    }
+
+    // title
+    const title = "Help / Keybindings";
+    const title_x = box_x + (box_width -| @as(u16, @intCast(title.len))) / 2;
+    buf.setString(title_x, box_y, title, _Style{ .fg = .cyan, .bg = .dark_gray, .modifier = _Modifier{ .bold = true } });
+
+    const cat_style = _Style{ .fg = .cyan, .bg = .dark_gray, .modifier = _Modifier{ .bold = true } };
+    const key_style = _Style{ .fg = .yellow, .bg = .dark_gray };
+    const desc_style = _Style{ .fg = .white, .bg = .dark_gray };
+
+    var y: u16 = box_y + 2; // skip title + blank
+    const max_y = box_y + box_height -| 1; // reserve last line for dismiss
+
+    for (categories) |cat| {
+        var has_entries = false;
+        for (keymap.keymap) |binding| {
+            if (binding.description.len == 0) continue;
+            if (!std.mem.eql(u8, binding.category, cat)) continue;
+            has_entries = true;
+        }
+        if (!has_entries) continue;
+        if (y >= max_y) break;
+        // cat header
+        buf.setString(box_x + 1, y, cat, cat_style);
+        y += 1;
+
+        // Entries
+        for (keymap.keymap) |binding| {
+            if (y >= max_y) break;
+            if (binding.description.len == 0) continue;
+            if (!std.mem.eql(u8, binding.category, cat)) continue;
+
+            const key_str = switch (binding.key) {
+                .char => |ch| &[_]u8{ch},
+                .special => |s| switch (s) {
+                    .up => "up",
+                    .down => "dn",
+                    .esc => "esc",
+                    .enter => "enter",
+                    .backspace => "bksp",
+                },
+            };
+            //Format " {key:<14}{description}"
+            var line_buf: [60]u8 = [_]u8{' '} ** 60;
+            const indent = 3;
+            const key_col = indent;
+            const desc_col = indent + 14;
+
+            for (key_str, 0..) |ch, i| {
+                if (key_col + i < line_buf.len) line_buf[key_col + i] = ch;
+            }
+            for (binding.description, 0..) |ch, i| {
+                if (desc_col + i < line_buf.len) line_buf[desc_col + i] = ch;
+            }
+
+            const line_w: usize = @min(box_width -| 2, line_buf.len);
+            buf.setString(box_x + 1, y, line_buf[0..line_w], desc_style);
+            //overlay the key portion with key_style
+            buf.setString(box_x + 1 + indent, y, key_str, key_style);
+            y += 1;
+        }
+        y += 1; //blank line between cat
+    }
+
+    //dismiss hint
+    const dismiss = "(press ? or esc to close)";
+    const dismiss_x = box_x + (box_width -| @as(u16, @intCast(dismiss.len))) / 2;
+    buf.setString(dismiss_x, box_y + box_height - 1, dismiss, _Style{ .fg = .gray, .bg = .dark_gray });
 }
 
 fn renderHelpBar(buf: *tui.render.Buffer, rect: layout.Rect) void {

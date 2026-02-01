@@ -8,7 +8,7 @@ pub fn handleEvent(app: *state.AppState, event: tui.Event) !void {
         .key => |key| {
             //check app mode for search
             switch (app.mode) {
-                .normal, .search_view => handleNormalMode(app, key),
+                .normal, .search_view, .help => handleNormalMode(app, key),
                 .search_edit => handleSearchEditMode(app, key),
             }
         },
@@ -46,7 +46,14 @@ fn mapKey(key: tui.KeyEvent) ?keymap.Key {
 
 fn executeAction(app: *state.AppState, action: keymap.Action) void {
     switch (action) {
-        .show_help => showHelp(app),
+        .show_help => {
+            if (app.mode == .help) {
+                app.mode = app.previous_mode;
+            } else {
+                app.previous_mode = app.mode;
+                app.mode = .help;
+            }
+        },
         .move_up => app.up(),
         .move_down => app.down(),
         .page_up => for (0..5) |_| app.up(),
@@ -91,17 +98,9 @@ fn killSelected(app: *state.AppState, force: bool) void {
     app.buildView();
 }
 
-fn showHelp(app: *state.AppState) void {
-    var search_edit_help_buf: [512]u8 = [_]u8{' '} ** 512;
-    var search_view_help_buf: [512]u8 = [_]u8{' '} ** 512;
-    var normal_help_buf: [512]u8 = [_]u8{' '} ** 512;
-    const search_edit_help = keymap.getHelpText(.search_edit, &search_edit_help_buf);
-    const search_view_help = keymap.getHelpText(.search_view, &search_view_help_buf);
-    const normal_help = keymap.getHelpText(.search_edit, &normal_help_buf);
-    //TODO migrate to showHelp as toast is meant for single line and this cuases a buffer overflow
-    app.showToastFmt("{s}\n{s}\n{s}", .{ search_edit_help, search_view_help, normal_help }, .info);
-}
-
+// This is special as we may have arbitruary keys that can not map
+// Thus creating a need for a special function that modifies state rather
+// than executes actions
 fn handleSearchEditMode(app: *state.AppState, key: tui.KeyEvent) void {
     switch (key.code) {
         .char => |c| {
