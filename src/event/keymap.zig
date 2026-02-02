@@ -29,32 +29,32 @@ pub const SpecialKey = enum {
 };
 
 pub const keymap = [_]KeyBinding{
-    .{ .key = .{ .char = '?' }, .action = .show_help, .modes = &.{ .normal, .search_view }, .description = "Show Help", .category = "General" },
-    // Process detail
-    .{ .key = .{ .special = .enter }, .action = .open_detail, .modes = &.{ .normal, .search_view }, .description = "details", .category = "Process" },
+    .{ .key = .{ .char = '?' }, .action = .show_help, .modes = &.{ .normal, .search_view, .help }, .description = "Show Help", .category = "General" },
+
+    // Navigation (all scrollable modes)
+    .{ .key = .{ .char = 'j' }, .action = .move_down, .modes = &.{ .normal, .search_view, .help, .detail }, .description = "down", .category = "Navigation" },
+    .{ .key = .{ .char = 'k' }, .action = .move_up, .modes = &.{ .normal, .search_view, .help, .detail }, .description = "up", .category = "Navigation" },
+    .{ .key = .{ .special = .up }, .action = .move_up, .modes = &.{ .normal, .search_view, .help, .detail }, .description = "" },
+    .{ .key = .{ .special = .down }, .action = .move_down, .modes = &.{ .normal, .search_view, .help, .detail }, .description = "" },
+    .{ .key = .{ .char = 'u' }, .action = .page_up, .modes = &.{ .normal, .search_view, .help, .detail }, .description = "page up", .category = "Navigation" },
+    .{ .key = .{ .char = 'd' }, .action = .page_down, .modes = &.{ .normal, .search_view, .help, .detail }, .description = "page down", .category = "Navigation" },
+    .{ .key = .{ .char = 'g' }, .action = .jump_top, .modes = &.{ .normal, .search_view, .help, .detail }, .description = "top", .category = "Navigation" },
+    .{ .key = .{ .char = 'G' }, .action = .jump_bottom, .modes = &.{ .normal, .search_view, .help, .detail }, .description = "bottom", .category = "Navigation" },
+
     // Tree expand/collapse
     .{ .key = .{ .special = .tab }, .action = .toggle_expand, .modes = &.{ .normal, .search_view }, .description = "toggle expand", .category = "Tree" },
-    // Navigation (both modes)
-    .{ .key = .{ .char = 'g' }, .action = .jump_top, .modes = &.{ .normal, .search_view }, .description = "top", .category = "Navigation" },
-    .{ .key = .{ .char = 'G' }, .action = .jump_bottom, .modes = &.{ .normal, .search_view }, .description = "bottom", .category = "Navigation" },
+    .{ .key = .{ .char = ' ' }, .action = .toggle_expand, .modes = &.{ .normal, .search_view }, .description = "" },
     .{ .key = .{ .char = '*' }, .action = .toggle_expand_all, .modes = &.{ .normal, .search_view }, .description = "Expand all", .category = "Tree" },
-    .{ .key = .{ .char = 'j' }, .action = .move_down, .modes = &.{ .normal, .search_view }, .description = "down", .category = "Navigation" },
-    .{ .key = .{ .char = 'k' }, .action = .move_up, .modes = &.{ .normal, .search_view }, .description = "up", .category = "Navigation" },
-    .{ .key = .{ .special = .up }, .action = .move_up, .modes = &.{ .normal, .search_view }, .description = "" },
-    .{ .key = .{ .special = .down }, .action = .move_down, .modes = &.{ .normal, .search_view }, .description = "" },
-    .{ .key = .{ .char = 'u' }, .action = .page_up, .modes = &.{ .normal, .search_view }, .description = "page up", .category = "Navigation" },
-    .{ .key = .{ .char = 'd' }, .action = .page_down, .modes = &.{ .normal, .search_view }, .description = "page down", .category = "Navigation" },
-    // Application
-    .{ .key = .{ .char = 'q' }, .action = .quit, .modes = &.{ .normal, .search_view }, .description = "quit", .category = "General" },
-    .{ .key = .{ .special = .esc }, .action = .quit, .modes = &.{.normal}, .description = "" },
-    // Search
-    .{ .key = .{ .special = .esc }, .action = .exit_search_view, .modes = &.{.search_view}, .description = "Exit search", .category = "Search" },
-    .{ .key = .{ .char = '/' }, .action = .start_search, .modes = &.{ .normal, .search_view }, .description = "search", .category = "Search" },
-    .{ .key = .{ .char = 'c' }, .action = .clear_search, .modes = &.{ .normal, .search_view }, .description = "clear", .category = "Search" },
 
-    // Process control
+    // Process
+    .{ .key = .{ .special = .enter }, .action = .open_detail, .modes = &.{ .normal, .search_view }, .description = "details", .category = "Process" },
     .{ .key = .{ .char = 'x' }, .action = .kill_term, .modes = &.{.normal}, .description = "kill", .category = "Process" },
     .{ .key = .{ .char = 'X' }, .action = .kill_force, .modes = &.{.normal}, .description = "kill -9", .category = "Process" },
+
+    // Search
+    .{ .key = .{ .char = '/' }, .action = .start_search, .modes = &.{ .normal, .search_view }, .description = "search", .category = "Search" },
+    .{ .key = .{ .char = 'c' }, .action = .clear_search, .modes = &.{ .normal, .search_view }, .description = "clear", .category = "Search" },
+    .{ .key = .{ .special = .esc }, .action = .exit_search_view, .modes = &.{.search_view}, .description = "Exit search", .category = "Search" },
 
     // Sorting
     .{ .key = .{ .char = 'P' }, .action = .sort_by_pid, .modes = &.{ .normal, .search_view }, .description = "sort PID", .category = "Sorting" },
@@ -62,22 +62,17 @@ pub const keymap = [_]KeyBinding{
     .{ .key = .{ .char = 'C' }, .action = .sort_by_cpu, .modes = &.{ .normal, .search_view }, .description = "sort CPU", .category = "Sorting" },
     .{ .key = .{ .char = 'M' }, .action = .sort_by_mem, .modes = &.{ .normal, .search_view }, .description = "sort mem", .category = "Sorting" },
 
-    // Help mode (close help)
-    .{ .key = .{ .char = '?' }, .action = .show_help, .modes = &.{.help}, .description = "" },
+    // Application
+    .{ .key = .{ .char = 'q' }, .action = .quit, .modes = &.{ .normal, .search_view }, .description = "quit", .category = "General" },
+    .{ .key = .{ .special = .esc }, .action = .quit, .modes = &.{.normal}, .description = "" },
+
+    // Help mode (close)
     .{ .key = .{ .special = .esc }, .action = .show_help, .modes = &.{.help}, .description = "" },
     .{ .key = .{ .char = 'q' }, .action = .show_help, .modes = &.{.help}, .description = "" },
 
-    // Detail mode
+    // Detail mode (close)
     .{ .key = .{ .special = .esc }, .action = .close_detail, .modes = &.{.detail}, .description = "" },
     .{ .key = .{ .char = 'q' }, .action = .close_detail, .modes = &.{.detail}, .description = "" },
-    .{ .key = .{ .char = 'j' }, .action = .move_down, .modes = &.{.detail}, .description = "" },
-    .{ .key = .{ .char = 'k' }, .action = .move_up, .modes = &.{.detail}, .description = "" },
-    .{ .key = .{ .special = .up }, .action = .move_up, .modes = &.{.detail}, .description = "" },
-    .{ .key = .{ .special = .down }, .action = .move_down, .modes = &.{.detail}, .description = "" },
-    .{ .key = .{ .char = 'u' }, .action = .page_up, .modes = &.{.detail}, .description = "" },
-    .{ .key = .{ .char = 'd' }, .action = .page_down, .modes = &.{.detail}, .description = "" },
-    .{ .key = .{ .char = 'g' }, .action = .jump_top, .modes = &.{.detail}, .description = "" },
-    .{ .key = .{ .char = 'G' }, .action = .jump_bottom, .modes = &.{.detail}, .description = "" },
 };
 
 pub fn getAction(key: Key, mode: Mode) ?Action {

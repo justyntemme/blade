@@ -3,6 +3,7 @@ const c = @cImport({
     @cInclude("libproc.h");
     @cInclude("sys/proc_info.h");
     @cInclude("sys/sysctl.h");
+    @cInclude("pwd.h");
 });
 
 const model = @import("model");
@@ -169,33 +170,93 @@ pub fn collectProcessDetail(pid: pid_t, arena: std.mem.Allocator) PlatformError!
     else
         arena.dupe(u8, "[path unavailable]") catch return error.OutOfMemory;
 
-    // Cmdline via KERN_PROCARGS2
-    const cmdline = blk: {
+    // Cmdline + environ via KERN_PROCARGS2
+    // Buffer format: [argc:u32][exec_path\0][padding\0s][arg0\0]...[argN\0][env0\0]...[envM\0]
+    const ArgsResult = struct { cmdline: []const u8, environ: []const []const u8 };
+    const unavail = "[unavailable]";
+    const parsed_args = blk: {
         var mib = [4]c_int{ c.CTL_KERN, c.KERN_PROCARGS2, pid, 0 };
         var arg_size: usize = 0;
         if (std.c.sysctl(&mib, 3, null, &arg_size, null, 0) != 0) {
-            break :blk arena.dupe(u8, "[unavailable]") catch return error.OutOfMemory;
+            break :blk ArgsResult{
+                .cmdline = arena.dupe(u8, unavail) catch return error.OutOfMemory,
+                .environ = &.{},
+            };
         }
-        const arg_buf = arena.alloc(u8, arg_size) catch {
-            break :blk arena.dupe(u8, "[unavailable]") catch return error.OutOfMemory;
+        const arg_buf = arena.alloc(u8, arg_size) catch break :blk ArgsResult{
+            .cmdline = arena.dupe(u8, unavail) catch return error.OutOfMemory,
+            .environ = &.{},
         };
         if (std.c.sysctl(&mib, 3, arg_buf.ptr, &arg_size, null, 0) != 0) {
-            break :blk arena.dupe(u8, "[unavailable]") catch return error.OutOfMemory;
-        }
-        if (arg_size > 4) {
-            const args_data = arg_buf[4..arg_size];
-            const display = arena.alloc(u8, args_data.len) catch {
-                break :blk arena.dupe(u8, "[unavailable]") catch return error.OutOfMemory;
+            break :blk ArgsResult{
+                .cmdline = arena.dupe(u8, unavail) catch return error.OutOfMemory,
+                .environ = &.{},
             };
-            for (args_data, 0..) |byte, i| {
-                display[i] = if (byte == 0) ' ' else byte;
-            }
-            var end: usize = display.len;
-            while (end > 0 and display[end - 1] == ' ') end -= 1;
-            break :blk display[0..end];
         }
-        break :blk arena.dupe(u8, "[unavailable]") catch return error.OutOfMemory;
+        if (arg_size <= 4) break :blk ArgsResult{
+            .cmdline = arena.dupe(u8, unavail) catch return error.OutOfMemory,
+            .environ = &.{},
+        };
+
+        // Read argc from first 4 bytes
+        const argc: u32 = @bitCast(arg_buf[0..4].*);
+        var pos: usize = 4;
+
+        // Skip exec path (null-terminated)
+        while (pos < arg_size and arg_buf[pos] != 0) pos += 1;
+        // Skip padding nulls
+        while (pos < arg_size and arg_buf[pos] == 0) pos += 1;
+
+        // Parse argc arguments → cmdline (join with spaces)
+        const args_start = pos;
+        var args_count: u32 = 0;
+        while (pos < arg_size and args_count < argc) {
+            if (arg_buf[pos] == 0) args_count += 1;
+            pos += 1;
+        }
+        const args_data = arg_buf[args_start..pos];
+        const display = arena.alloc(u8, args_data.len) catch break :blk ArgsResult{
+            .cmdline = arena.dupe(u8, unavail) catch return error.OutOfMemory,
+            .environ = &.{},
+        };
+        for (args_data, 0..) |byte, i| {
+            display[i] = if (byte == 0) ' ' else byte;
+        }
+        var end: usize = display.len;
+        while (end > 0 and display[end - 1] == ' ') end -= 1;
+        const cmdline_str = display[0..end];
+
+        // Parse remaining null-terminated strings → environ
+        // Reserve-first: count env vars, allocate once, then fill
+        while (pos < arg_size and arg_buf[pos] == 0) pos += 1;
+
+        var env_count: usize = 0;
+        var scan = pos;
+        while (scan < arg_size) {
+            const start = scan;
+            while (scan < arg_size and arg_buf[scan] != 0) scan += 1;
+            if (scan > start) env_count += 1;
+            if (scan < arg_size) scan += 1;
+        }
+
+        const env_slices = arena.alloc([]const u8, env_count) catch break :blk ArgsResult{
+            .cmdline = cmdline_str, .environ = &.{},
+        };
+        var env_idx: usize = 0;
+        while (pos < arg_size and env_idx < env_count) {
+            const start = pos;
+            while (pos < arg_size and arg_buf[pos] != 0) pos += 1;
+            if (pos > start) {
+                env_slices[env_idx] = arena.dupe(u8, arg_buf[start..pos]) catch break;
+                env_idx += 1;
+            }
+            if (pos < arg_size) pos += 1;
+        }
+
+        break :blk ArgsResult{ .cmdline = cmdline_str, .environ = env_slices };
     };
+    const cmdline = parsed_args.cmdline;
+    const environ = parsed_args.environ;
 
     // CWD via PROC_PIDVNODEPATHINFO
     const cwd = blk: {
@@ -230,7 +291,7 @@ pub fn collectProcessDetail(pid: pid_t, arena: std.mem.Allocator) PlatformError!
     // User name from UID
     const uid: u32 = bsd.pbi_uid;
     const user_name = blk: {
-        const pw = std.c.getpwuid(uid);
+        const pw = c.getpwuid(uid);
         if (pw) |pwd| {
             const name_slice = std.mem.sliceTo(pwd.*.pw_name, 0);
             break :blk arena.dupe(u8, name_slice) catch return error.OutOfMemory;
@@ -265,5 +326,6 @@ pub fn collectProcessDetail(pid: pid_t, arena: std.mem.Allocator) PlatformError!
         .virtual_mem = task.pti_virtual_size,
         .fd_count = fd_count,
         .start_time_ns = start_sec * std.time.ns_per_s + start_usec * std.time.ns_per_us,
+        .environ = environ,
     };
 }

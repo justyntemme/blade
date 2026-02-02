@@ -92,6 +92,7 @@ pub const ProcessDetail = struct {
     virtual_mem: u64,
     fd_count: u32,
     start_time_ns: i128,
+    environ: []const []const u8,
 };
 
 pub const RenderRow = struct {

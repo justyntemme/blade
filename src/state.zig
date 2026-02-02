@@ -37,6 +37,7 @@ pub const AppState = struct {
     detail_data: ?model.ProcessDetail = null,
     detail_arena: ?std.heap.ArenaAllocator = null,
     detail_scroll: usize = 0,
+    help_scroll: usize = 0,
     procs: procs.Store,
 
     pub fn init(gpa: std.mem.Allocator) AppState {

@@ -52,18 +52,25 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
                 app.mode = app.previous_mode;
             } else {
                 app.previous_mode = app.mode;
+                app.help_scroll = 0;
                 app.mode = .help;
             }
         },
         .move_up => {
-            if (app.mode == .detail) app.detailScrollUp() else app.up();
+            if (app.mode == .detail) app.detailScrollUp() else if (app.mode == .help) {
+                if (app.help_scroll > 0) app.help_scroll -= 1;
+            } else app.up();
         },
         .move_down => {
-            if (app.mode == .detail) app.detailScrollDown() else app.down();
+            if (app.mode == .detail) app.detailScrollDown() else if (app.mode == .help) {
+                app.help_scroll += 1;
+            } else app.down();
         },
         .page_up => {
             if (app.mode == .detail) {
                 for (0..10) |_| app.detailScrollUp();
+            } else if (app.mode == .help) {
+                app.help_scroll -|= 10;
             } else {
                 for (0..5) |_| app.up();
             }
@@ -71,15 +78,21 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
         .page_down => {
             if (app.mode == .detail) {
                 for (0..10) |_| app.detailScrollDown();
+            } else if (app.mode == .help) {
+                app.help_scroll += 10;
             } else {
                 for (0..5) |_| app.down();
             }
         },
         .jump_top => {
-            if (app.mode == .detail) app.detail_scroll = 0 else app.jumpTop();
+            if (app.mode == .detail) app.detail_scroll = 0 else if (app.mode == .help) {
+                app.help_scroll = 0;
+            } else app.jumpTop();
         },
         .jump_bottom => {
-            if (app.mode == .detail) app.detailScrollToBottom() else app.jumpBottom();
+            if (app.mode == .detail) app.detailScrollToBottom() else if (app.mode == .help) {
+                app.help_scroll = ~@as(usize, 0);
+            } else app.jumpBottom();
         },
         .quit => app.running = false,
         .start_search => app.mode = .search_edit,
