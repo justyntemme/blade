@@ -62,6 +62,7 @@ pub const keymap = [_]KeyBinding{
     // Help mode (close help)
     .{ .key = .{ .char = '?' }, .action = .show_help, .modes = &.{.help}, .description = "" },
     .{ .key = .{ .special = .esc }, .action = .show_help, .modes = &.{.help}, .description = "" },
+    .{ .key = .{ .char = 'q' }, .action = .show_help, .modes = &.{.help}, .description = "" },
 };
 
 pub fn getAction(key: Key, mode: Mode) ?Action {

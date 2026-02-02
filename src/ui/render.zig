@@ -149,7 +149,7 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
     if (app.mode == .search_edit) {
         renderSearchInput(buf, footer_rect, app);
     } else {
-        renderHelpBar(buf, footer_rect);
+        renderStatusBar(buf, footer_rect, app);
     }
     block.render(area, buf);
 
@@ -218,7 +218,7 @@ fn renderHelpView(buf: *tui.render.Buffer, area: tui.render.Rect) void {
     const box_y: u16 = area.y + (area.height -| box_height) / 2;
 
     //clear box area
-    const bg_style = _Style{ .bg = .dark_gray };
+    const bg_style = _Style{ .bg = .reset };
     var cy: u16 = box_y;
 
     while (cy < box_y + box_height) : (cy += 1) {
@@ -230,11 +230,11 @@ fn renderHelpView(buf: *tui.render.Buffer, area: tui.render.Rect) void {
     // title
     const title = "Help / Keybindings";
     const title_x = box_x + (box_width -| @as(u16, @intCast(title.len))) / 2;
-    buf.setString(title_x, box_y, title, _Style{ .fg = .cyan, .bg = .dark_gray, .modifier = _Modifier{ .bold = true } });
+    buf.setString(title_x, box_y, title, _Style{ .fg = .light_white, .modifier = _Modifier{ .bold = true } });
 
-    const cat_style = _Style{ .fg = .cyan, .bg = .dark_gray, .modifier = _Modifier{ .bold = true } };
-    const key_style = _Style{ .fg = .yellow, .bg = .dark_gray };
-    const desc_style = _Style{ .fg = .white, .bg = .dark_gray };
+    const cat_style = _Style{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } };
+    const key_style = _Style{ .fg = .light_yellow, .modifier = _Modifier{ .bold = true } };
+    const desc_style = _Style{ .fg = .light_white };
 
     var y: u16 = box_y + 2; // skip title + blank
     const max_y = box_y + box_height -| 1; // reserve last line for dismiss
@@ -293,7 +293,81 @@ fn renderHelpView(buf: *tui.render.Buffer, area: tui.render.Rect) void {
     //dismiss hint
     const dismiss = "(press ? or esc to close)";
     const dismiss_x = box_x + (box_width -| @as(u16, @intCast(dismiss.len))) / 2;
-    buf.setString(dismiss_x, box_y + box_height - 1, dismiss, _Style{ .fg = .gray, .bg = .dark_gray });
+    buf.setString(dismiss_x, box_y + box_height - 1, dismiss, _Style{ .fg = .white });
+}
+
+fn renderStatusBar(buf: *tui.render.Buffer, rect: layout.Rect, app: *const state.AppState) void {
+    var status_buf: [256]u8 = [_]u8{' '} ** 256;
+    var pos: usize = 0;
+
+    // Segment 1: process count "{visible}/{total} shown"
+    const visible = app.procs.render_rows.items.len;
+    const total = app.procs.hot.len;
+    if (std.fmt.bufPrint(status_buf[pos..], "{d}/{d} shown", .{ visible, total })) |slice| {
+        pos += slice.len;
+    } else |_| {}
+
+    // Separator
+    if (pos + 3 < status_buf.len) {
+        @memcpy(status_buf[pos..][0..3], " | ");
+        pos += 3;
+    }
+
+    // Segment 2: last update "updated {N}s ago"
+    if (app.last_update_ns > 0) {
+        const now = std.time.nanoTimestamp();
+        const delta_ns = now - app.last_update_ns;
+        const delta_s: u64 = @intCast(@max(0, @divTrunc(delta_ns, std.time.ns_per_s)));
+        if (std.fmt.bufPrint(status_buf[pos..], "updated {d}s ago", .{delta_s})) |slice| {
+            pos += slice.len;
+        } else |_| {}
+    } else {
+        const no_data = "no data";
+        @memcpy(status_buf[pos..][0..no_data.len], no_data);
+        pos += no_data.len;
+    }
+
+    // Separator
+    if (pos + 3 < status_buf.len) {
+        @memcpy(status_buf[pos..][0..3], " | ");
+        pos += 3;
+    }
+
+    // Segment 3: sort indicator "sort: CPUv"
+    const col_name: []const u8 = switch (app.procs.sort_column) {
+        .pid => "PID",
+        .name => "Name",
+        .cpu => "CPU",
+        .mem => "MEM",
+        .path => "Path",
+    };
+    const dir_glyph: []const u8 = if (app.procs.sort_direction == .desc) "v" else "^";
+    if (std.fmt.bufPrint(status_buf[pos..], "sort: {s}{s}", .{ col_name, dir_glyph })) |slice| {
+        pos += slice.len;
+    } else |_| {}
+
+    // Segment 4 (search_view only): search query
+    if (app.mode == .search_view) {
+        const query = app.searchSlice();
+        if (query.len > 0) {
+            if (pos + 3 < status_buf.len) {
+                @memcpy(status_buf[pos..][0..3], " | ");
+                pos += 3;
+            }
+            if (std.fmt.bufPrint(status_buf[pos..], "search: \"{s}\"", .{query})) |slice| {
+                pos += slice.len;
+            } else |_| {}
+        }
+    }
+
+    // Right-aligned ?:help hint
+    const hint = "?:help";
+    const width: usize = @min(rect.width, status_buf.len);
+    const hint_x: u16 = rect.x + rect.width -| @as(u16, @intCast(hint.len));
+    const left_end: usize = @min(pos, width);
+
+    buf.setString(rect.x, rect.y, status_buf[0..left_end], _Style{ .fg = .white });
+    buf.setString(hint_x, rect.y, hint, _Style{ .fg = .white });
 }
 
 fn renderHelpBar(buf: *tui.render.Buffer, rect: layout.Rect) void {

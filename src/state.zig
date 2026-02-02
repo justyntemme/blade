@@ -31,6 +31,7 @@ pub const AppState = struct {
     previous_mode: keymap.Mode = .normal,
     search_buf: [256]u8 = [_]u8{0} ** 256,
     search_len: usize = 0,
+    last_update_ns: i128 = 0,
     procs: procs.Store,
 
     pub fn init(gpa: std.mem.Allocator) AppState {
@@ -138,6 +139,7 @@ pub const AppState = struct {
     }
 
     pub fn receive_batch(self: *AppState, new_batch: channel.Batch) void {
+        self.last_update_ns = new_batch.timestamp_ns;
         self.procs.receiveBatch(new_batch);
         self.buildView();
     }
