@@ -22,4 +22,6 @@ pub const Action = enum {
     jump_bottom,
     exit_search_view,
     show_help,
+    open_detail,
+    close_detail,
 };
