@@ -77,6 +77,23 @@ pub const VisibleNode = struct {
     is_expanded: bool,
 };
 
+pub const ProcessDetail = struct {
+    pid: pid_t,
+    ppid: pid_t,
+    name: []const u8,
+    path: []const u8,
+    cmdline: []const u8,
+    cwd: []const u8,
+    user_name: []const u8,
+    uid: u32,
+    state: ProcState,
+    thread_count: u32,
+    nice: i32,
+    virtual_mem: u64,
+    fd_count: u32,
+    start_time_ns: i128,
+};
+
 pub const RenderRow = struct {
     pid: pid_t,
     cpu_percent: f32,
