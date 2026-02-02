@@ -8,7 +8,7 @@ pub fn handleEvent(app: *state.AppState, event: tui.Event) !void {
         .key => |key| {
             //check app mode for search
             switch (app.mode) {
-                .normal, .search_view, .help => handleNormalMode(app, key),
+                .normal, .search_view, .help, .detail => handleNormalMode(app, key),
                 .search_edit => handleSearchEditMode(app, key),
             }
         },
@@ -40,6 +40,7 @@ fn mapKey(key: tui.KeyEvent) ?keymap.Key {
         .esc => .{ .special = .esc },
         .enter => .{ .special = .enter },
         .backspace => .{ .special = .backspace },
+        .tab => .{ .special = .tab },
         else => null,
     };
 }
@@ -54,12 +55,32 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
                 app.mode = .help;
             }
         },
-        .move_up => app.up(),
-        .move_down => app.down(),
-        .page_up => for (0..5) |_| app.up(),
-        .page_down => for (0..5) |_| app.down(),
-        .jump_top => app.jumpTop(),
-        .jump_bottom => app.jumpBottom(),
+        .move_up => {
+            if (app.mode == .detail) app.detailScrollUp() else app.up();
+        },
+        .move_down => {
+            if (app.mode == .detail) app.detailScrollDown() else app.down();
+        },
+        .page_up => {
+            if (app.mode == .detail) {
+                for (0..10) |_| app.detailScrollUp();
+            } else {
+                for (0..5) |_| app.up();
+            }
+        },
+        .page_down => {
+            if (app.mode == .detail) {
+                for (0..10) |_| app.detailScrollDown();
+            } else {
+                for (0..5) |_| app.down();
+            }
+        },
+        .jump_top => {
+            if (app.mode == .detail) app.detail_scroll = 0 else app.jumpTop();
+        },
+        .jump_bottom => {
+            if (app.mode == .detail) app.detailScrollToBottom() else app.jumpBottom();
+        },
         .quit => app.running = false,
         .start_search => app.mode = .search_edit,
         .clear_search => {
@@ -80,6 +101,14 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
             app.refreshFilter();
             app.mode = .normal;
         },
+        .open_detail => {
+            const rows = app.procs.render_rows.items;
+            if (rows.len == 0) return;
+            const idx = @min(app.selected_item, rows.len - 1);
+            const pid = rows[idx].pid;
+            app.openDetail(pid);
+        },
+        .close_detail => app.closeDetail(),
     }
 }
 
