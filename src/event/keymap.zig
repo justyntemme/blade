@@ -4,7 +4,7 @@ const actions = @import("event_action");
 
 pub const Action = actions.Action;
 
-pub const Mode = enum { normal, search_edit, search_view, help };
+pub const Mode = enum { normal, search_edit, search_view, help, detail };
 
 pub const KeyBinding = struct {
     key: Key,
@@ -25,12 +25,15 @@ pub const SpecialKey = enum {
     esc,
     enter,
     backspace,
+    tab,
 };
 
 pub const keymap = [_]KeyBinding{
     .{ .key = .{ .char = '?' }, .action = .show_help, .modes = &.{ .normal, .search_view }, .description = "Show Help", .category = "General" },
-    //expand
-    .{ .key = .{ .special = .enter }, .action = .toggle_expand, .modes = &.{ .normal, .search_view }, .description = "toggle expand", .category = "Tree" },
+    // Process detail
+    .{ .key = .{ .special = .enter }, .action = .open_detail, .modes = &.{ .normal, .search_view }, .description = "details", .category = "Process" },
+    // Tree expand/collapse
+    .{ .key = .{ .special = .tab }, .action = .toggle_expand, .modes = &.{ .normal, .search_view }, .description = "toggle expand", .category = "Tree" },
     // Navigation (both modes)
     .{ .key = .{ .char = 'g' }, .action = .jump_top, .modes = &.{ .normal, .search_view }, .description = "top", .category = "Navigation" },
     .{ .key = .{ .char = 'G' }, .action = .jump_bottom, .modes = &.{ .normal, .search_view }, .description = "bottom", .category = "Navigation" },
@@ -63,6 +66,18 @@ pub const keymap = [_]KeyBinding{
     .{ .key = .{ .char = '?' }, .action = .show_help, .modes = &.{.help}, .description = "" },
     .{ .key = .{ .special = .esc }, .action = .show_help, .modes = &.{.help}, .description = "" },
     .{ .key = .{ .char = 'q' }, .action = .show_help, .modes = &.{.help}, .description = "" },
+
+    // Detail mode
+    .{ .key = .{ .special = .esc }, .action = .close_detail, .modes = &.{.detail}, .description = "" },
+    .{ .key = .{ .char = 'q' }, .action = .close_detail, .modes = &.{.detail}, .description = "" },
+    .{ .key = .{ .char = 'j' }, .action = .move_down, .modes = &.{.detail}, .description = "" },
+    .{ .key = .{ .char = 'k' }, .action = .move_up, .modes = &.{.detail}, .description = "" },
+    .{ .key = .{ .special = .up }, .action = .move_up, .modes = &.{.detail}, .description = "" },
+    .{ .key = .{ .special = .down }, .action = .move_down, .modes = &.{.detail}, .description = "" },
+    .{ .key = .{ .char = 'u' }, .action = .page_up, .modes = &.{.detail}, .description = "" },
+    .{ .key = .{ .char = 'd' }, .action = .page_down, .modes = &.{.detail}, .description = "" },
+    .{ .key = .{ .char = 'g' }, .action = .jump_top, .modes = &.{.detail}, .description = "" },
+    .{ .key = .{ .char = 'G' }, .action = .jump_bottom, .modes = &.{.detail}, .description = "" },
 };
 
 pub fn getAction(key: Key, mode: Mode) ?Action {
@@ -76,54 +91,3 @@ pub fn getAction(key: Key, mode: Mode) ?Action {
     return null;
 }
 
-pub fn getHelpText(mode: Mode, buf: []u8) []const u8 {
-    var pos: usize = 0;
-
-    for (keymap) |binding| {
-        if (binding.description.len == 0) continue;
-
-        var in_mode = false;
-        for (binding.modes) |m| {
-            if (m == mode) {
-                in_mode = true;
-                break;
-            }
-        }
-        if (!in_mode) continue;
-
-        const key_str = switch (binding.key) {
-            .char => |c| &[_]u8{c},
-            .special => |s| switch (s) {
-                .up => "↑",
-                .down => "↓",
-                .esc => "esc",
-                .enter => "enter",
-                .backspace => "bksp",
-            },
-        };
-
-        if (pos > 0 and pos + 2 < buf.len) {
-            buf[pos] = ' ';
-            buf[pos + 1] = ' ';
-            pos += 2;
-        }
-
-        //add key:description
-        for (key_str) |c| {
-            if (pos >= buf.len) break;
-            buf[pos] = c;
-            pos += 1;
-        }
-        if (pos < buf.len) {
-            buf[pos] = ':';
-            pos += 1;
-        }
-        for (binding.description) |c| {
-            if (pos >= buf.len) break;
-            buf[pos] = c;
-            pos += 1;
-        }
-    }
-
-    return buf[0..pos];
-}
