@@ -32,6 +32,11 @@ pub const AppState = struct {
     search_buf: [256]u8 = [_]u8{0} ** 256,
     search_len: usize = 0,
     last_update_ns: i128 = 0,
+    detail_queue: *channel.DetailQueue = undefined,
+    detail_pid: ?model.pid_t = null,
+    detail_data: ?model.ProcessDetail = null,
+    detail_arena: ?std.heap.ArenaAllocator = null,
+    detail_scroll: usize = 0,
     procs: procs.Store,
 
     pub fn init(gpa: std.mem.Allocator) AppState {
@@ -42,6 +47,7 @@ pub const AppState = struct {
     }
 
     pub fn deinit(self: *AppState) void {
+        self.closeDetail();
         self.procs.deinit();
     }
 
@@ -138,10 +144,19 @@ pub const AppState = struct {
         self.restoreAndClamp(prev);
     }
 
-    pub fn receive_batch(self: *AppState, new_batch: channel.Batch) void {
+    pub fn receiveBatch(self: *AppState, new_batch: channel.Batch) void {
         self.last_update_ns = new_batch.timestamp_ns;
         self.procs.receiveBatch(new_batch);
         self.buildView();
+
+        //close detail view if the inspected process exits
+        if (self.detail_pid) |dpid| {
+            const exists = self.procs.pid_to_index.get(dpid) != null;
+            if (!exists) {
+                self.showToast("Process exited", .warning);
+                self.closeDetail();
+            }
+        }
     }
 
     fn getSelectedIdentity(self: *const AppState) ?model.ProcIdentity {
@@ -214,6 +229,73 @@ pub const AppState = struct {
         if (self.search_len > 0) {
             self.search_len -= 1;
         }
+    }
+
+    pub fn openDetail(self: *AppState, pid: model.pid_t) void {
+        self.closeDetail();
+        self.detail_pid = pid;
+        self.detail_data = null;
+        self.detail_scroll = 0;
+        self.previous_mode = self.mode;
+        self.mode = .detail;
+
+        const thread = std.Thread.spawn(.{}, collectDetailWorker, .{ self.detail_queue, pid, self.gpa }) catch {
+            self.showToast("Detail collection failed", .err);
+            self.mode = self.previous_mode;
+            return;
+        };
+        thread.detach();
+    }
+
+    fn collectDetailWorker(queue: *channel.DetailQueue, pid: model.pid_t, gpa: std.mem.Allocator) void {
+        const platform = @import("platform");
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        const alloc = arena.allocator();
+
+        const data = platform.collectProcessDetail(pid, alloc) catch {
+            arena.deinit();
+            return;
+        };
+
+        if (!queue.tryPush(.{ .arena = arena, .data = data, .pid = pid })) {
+            arena.deinit();
+        }
+    }
+
+    pub fn receiveDetail(self: *AppState, result: channel.DetailResult) void {
+        if (self.detail_pid) |current_pid| {
+            if (current_pid == result.pid and self.mode == .detail) {
+                if (self.detail_arena) |*old| old.deinit();
+                self.detail_arena = result.arena;
+                self.detail_data = result.data;
+                return;
+            }
+        }
+        var r = result;
+        r.deinit();
+    }
+
+    pub fn closeDetail(self: *AppState) void {
+        if (self.detail_arena) |*arena| {
+            arena.deinit();
+        }
+        self.detail_arena = null;
+        self.detail_data = null;
+        self.detail_pid = null;
+        if (self.mode == .detail) {
+            self.mode = self.previous_mode;
+        }
+    }
+    pub fn detailScrollUp(self: *AppState) void {
+        if (self.detail_scroll > 0) self.detail_scroll -= 1;
+    }
+
+    pub fn detailScrollDown(self: *AppState) void {
+        self.detail_scroll += 1;
+    }
+
+    pub fn detailScrollToBottom(self: *AppState) void {
+        self.detail_scroll = std.math.maxInt(usize);
     }
 
     pub fn searchClear(self: *AppState) void {
