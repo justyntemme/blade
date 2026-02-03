@@ -149,13 +149,13 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
 }
 
 fn killSelected(app: *state.AppState, force: bool) void {
-    if (app.procs.visible_nodes.items.len == 0) {
+    const rows = app.procs.render_rows.items;
+    if (rows.len == 0) {
         app.showToast("No Process Selected", .err);
         return;
     }
-    const idx = @min(app.selected_item, app.procs.visible_nodes.items.len - 1);
-    const data_idx: usize = @intCast(app.procs.visible_nodes.items[idx].data_idx);
-    const pid = app.procs.hot.items(.pid)[data_idx];
+    const idx = @min(app.selected_item, rows.len - 1);
+    const pid = rows[idx].pid;
     platform.signal(pid, force) catch |err| {
         app.showToastFmt("Kill failed: {}", .{err}, .err);
         return;

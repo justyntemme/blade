@@ -151,23 +151,23 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
 
     var y: u16 = list_rect.y + 1;
     var idx: usize = app.scroll_offset;
-    while (idx < app.procs.visible_nodes.items.len) : (idx += 1) {
+    const rows = app.procs.render_rows.items;
+    while (idx < rows.len) : (idx += 1) {
         if (y >= list_rect.y + list_rect.height) break;
 
-        const node = app.procs.visible_nodes.items[idx];
-        const data_idx: usize = @intCast(node.data_idx);
+        const row = rows[idx];
+        const is_selected = idx == app.selected_item;
 
-        const style = if (idx == app.selected_item)
-            _Style{ .bg = .blue, .fg = .white }
-        else
-            _Style{ .fg = .white };
-        const pid = app.procs.hot.items(.pid)[data_idx];
-        const cpu_percent = app.procs.hot.items(.cpu_percent)[data_idx];
-        const mem_rss = app.procs.hot.items(.mem_rss)[data_idx];
+        // Per-column styles
+        const name_style: _Style = if (is_selected) .{ .bg = .blue, .fg = .white } else .{ .fg = .white };
+        const secondary_style: _Style = if (is_selected) .{ .bg = .blue, .fg = .gray } else .{ .fg = .gray };
+        const prefix_style: _Style = if (is_selected) .{ .bg = .blue, .fg = .gray } else .{ .fg = .gray };
 
-        //cold
-        const name = app.procs.cold.items[data_idx].name;
-        const path = app.procs.cold.items[data_idx].path;
+        const cpu_fg = cpuColor(row.cpu_percent);
+        const cpu_style: _Style = if (is_selected) .{ .bg = .blue, .fg = cpu_fg } else .{ .fg = cpu_fg };
+
+        const mem_fg = memColor(row.mem_rss);
+        const mem_style: _Style = if (is_selected) .{ .bg = .blue, .fg = mem_fg } else .{ .fg = mem_fg };
 
         var pid_buf: [8]u8 = undefined;
         const pid_str = std.fmt.bufPrint(&pid_buf, "{d:<7}", .{row.pid}) catch "err";
