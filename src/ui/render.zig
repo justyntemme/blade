@@ -402,7 +402,7 @@ fn renderHelpColumn(
                         .esc => "esc",
                         .enter => "enter",
                         .backspace => "bksp",
-                        .tab => "tab",
+                        .tab => "tab/S-Ent",
                     },
                 };
                 var line_buf: [60]u8 = [_]u8{' '} ** 60;
