@@ -77,36 +77,6 @@ pub const VisibleNode = struct {
     is_expanded: bool,
 };
 
-pub const ProcessDetail = struct {
-    pid: pid_t,
-    ppid: pid_t,
-    name: []const u8,
-    path: []const u8,
-    cmdline: []const u8,
-    cwd: []const u8,
-    user_name: []const u8,
-    uid: u32,
-    state: ProcState,
-    thread_count: u32,
-    nice: i32,
-    virtual_mem: u64,
-    fd_count: u32,
-    start_time_ns: i128,
-    environ: []const []const u8,
-};
-
-pub const RenderRow = struct {
-    pid: pid_t,
-    cpu_percent: f32,
-    mem_rss: u64,
-    name: []const u8,
-    path: []const u8,
-    depth: u16,
-    has_children: bool,
-    is_expanded: bool,
-    data_idx: u32,
-};
-
 pub const SortColumn = enum { pid, name, cpu, mem, path };
 pub const SortDirection = enum { asc, desc };
 
