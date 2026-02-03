@@ -32,3 +32,7 @@ pub const Capabilities = packed struct {
 pub fn capabilities() Capabilities {
     return backend.capabilities();
 }
+
+pub fn collectProcessDetail(pid: std.posix.pid_t, arena: std.mem.Allocator) PlatformError!model.ProcessDetail {
+    return backend.collectProcessDetail(pid, arena);
+}

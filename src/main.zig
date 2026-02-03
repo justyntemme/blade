@@ -24,11 +24,17 @@ pub fn main() !void {
 
     // Hide cursor
     try terminal.hideCursor();
+    try terminal.enableKeyboardProtocol(.{ .mode = .kitty });
+    defer terminal.disableKeyboardProtocol() catch {};
     var app = state.AppState.init(gpa_alloc);
     app.terminal = &terminal;
     defer app.deinit();
     var queue = try channel.initQueue(gpa_alloc);
     defer queue.deinit();
+    // details queue
+    var detail_queue = try channel.DetailQueue.initCapacity(gpa_alloc, 2);
+    defer detail_queue.deinit();
+    app.detail_queue = &detail_queue;
 
     // Thread synch
     var mutex: std.Thread.Mutex = .{};
@@ -54,7 +60,13 @@ pub fn main() !void {
         if (queue.front()) |batch_ptr| {
             const batch = batch_ptr.*;
             queue.pop();
-            app.receive_batch(batch);
+            app.receiveBatch(batch);
+        }
+
+        if (detail_queue.front()) |result_ptr| {
+            const result = result_ptr.*;
+            detail_queue.pop();
+            app.receiveDetail(result);
         }
 
         // Poll for events (100ms timeout)

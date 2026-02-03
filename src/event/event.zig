@@ -1,15 +1,14 @@
-// const std = @import("std");
 const state = @import("state");
 const keymap = @import("event_keymap");
 const platform = @import("platform");
+const tui = @import("zigtui");
 
-pub fn handleEvent(app: *state.AppState, event: anytype) !void {
+pub fn handleEvent(app: *state.AppState, event: tui.Event) !void {
     switch (event) {
         .key => |key| {
-
             //check app mode for search
             switch (app.mode) {
-                .normal, .search_view => handleNormalMode(app, key),
+                .normal, .search_view, .help, .detail => handleNormalMode(app, key),
                 .search_edit => handleSearchEditMode(app, key),
             }
         },
@@ -22,7 +21,7 @@ pub fn handleEvent(app: *state.AppState, event: anytype) !void {
     }
 }
 
-fn handleNormalMode(app: *state.AppState, key: anytype) void {
+fn handleNormalMode(app: *state.AppState, key: tui.KeyEvent) void {
     if (app.active_toast != null) {
         app.active_toast = null;
         return; //consume keypress to not process further during toast notification
@@ -33,7 +32,10 @@ fn handleNormalMode(app: *state.AppState, key: anytype) void {
     executeAction(app, action);
 }
 
-fn mapKey(key: anytype) ?keymap.Key {
+fn mapKey(key: tui.KeyEvent) ?keymap.Key {
+    // Shift+Enter → toggle expand (mapped to tab)
+    if (key.code == .enter and key.modifiers.shift) return .{ .special = .tab };
+
     return switch (key.code) {
         .char => |c| .{ .char = @intCast(c) },
         .up => .{ .special = .up },
@@ -41,18 +43,78 @@ fn mapKey(key: anytype) ?keymap.Key {
         .esc => .{ .special = .esc },
         .enter => .{ .special = .enter },
         .backspace => .{ .special = .backspace },
+        .tab => .{ .special = .tab },
         else => null,
     };
 }
 
 fn executeAction(app: *state.AppState, action: keymap.Action) void {
     switch (action) {
-        .move_up => app.up(),
-        .move_down => app.down(),
-        .page_up => for (0..5) |_| app.up(),
-        .page_down => for (0..5) |_| app.down(),
-        .jump_top => app.jumpTop(),
-        .jump_bottom => app.jumpBottom(),
+        .show_help => {
+            if (app.mode == .help) {
+                app.mode = app.previous_mode;
+            } else {
+                app.previous_mode = app.mode;
+                app.help_scroll = 0;
+                app.mode = .help;
+            }
+        },
+        .move_up => {
+            if (app.mode == .detail) {
+                if (app.detail_focus == .left) app.detailScrollUp() else {
+                    if (app.detail_right_scroll > 0) app.detail_right_scroll -= 1;
+                }
+            } else if (app.mode == .help) {
+                if (app.help_scroll > 0) app.help_scroll -= 1;
+            } else app.up();
+        },
+        .move_down => {
+            if (app.mode == .detail) {
+                if (app.detail_focus == .left) app.detailScrollDown() else app.detail_right_scroll += 1;
+            } else if (app.mode == .help) {
+                app.help_scroll += 1;
+            } else app.down();
+        },
+        .page_up => {
+            if (app.mode == .detail) {
+                if (app.detail_focus == .left) {
+                    for (0..10) |_| app.detailScrollUp();
+                } else {
+                    app.detail_right_scroll -|= 10;
+                }
+            } else if (app.mode == .help) {
+                app.help_scroll -|= 10;
+            } else {
+                for (0..5) |_| app.up();
+            }
+        },
+        .page_down => {
+            if (app.mode == .detail) {
+                if (app.detail_focus == .left) {
+                    for (0..10) |_| app.detailScrollDown();
+                } else {
+                    app.detail_right_scroll += 10;
+                }
+            } else if (app.mode == .help) {
+                app.help_scroll += 10;
+            } else {
+                for (0..5) |_| app.down();
+            }
+        },
+        .jump_top => {
+            if (app.mode == .detail) {
+                if (app.detail_focus == .left) app.detail_scroll = 0 else app.detail_right_scroll = 0;
+            } else if (app.mode == .help) {
+                app.help_scroll = 0;
+            } else app.jumpTop();
+        },
+        .jump_bottom => {
+            if (app.mode == .detail) {
+                if (app.detail_focus == .left) app.detailScrollToBottom() else app.detail_right_scroll = ~@as(usize, 0);
+            } else if (app.mode == .help) {
+                app.help_scroll = ~@as(usize, 0);
+            } else app.jumpBottom();
+        },
         .quit => app.running = false,
         .start_search => app.mode = .search_edit,
         .clear_search => {
@@ -73,6 +135,16 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
             app.refreshFilter();
             app.mode = .normal;
         },
+        .open_detail => {
+            const rows = app.procs.render_rows.items;
+            if (rows.len == 0) return;
+            const idx = @min(app.selected_item, rows.len - 1);
+            const pid = rows[idx].pid;
+            app.openDetail(pid);
+        },
+        .close_detail => app.closeDetail(),
+        .focus_left => app.detail_focus = .left,
+        .focus_right => app.detail_focus = .right,
     }
 }
 
@@ -91,7 +163,10 @@ fn killSelected(app: *state.AppState, force: bool) void {
     app.buildView();
 }
 
-fn handleSearchEditMode(app: *state.AppState, key: anytype) void {
+// This is special as we may have arbitruary keys that can not map
+// Thus creating a need for a special function that modifies state rather
+// than executes actions
+fn handleSearchEditMode(app: *state.AppState, key: tui.KeyEvent) void {
     switch (key.code) {
         .char => |c| {
             if (c < 128) {

@@ -33,6 +33,7 @@ pub const AppState = struct {
     scroll_offset: usize = 0,
     active_toast: ?Toast = null,
     mode: keymap.Mode = .normal,
+    previous_mode: keymap.Mode = .normal,
     search_buf: [256]u8 = [_]u8{0} ** 256,
     search_len: usize = 0,
     procs: procs.Store,

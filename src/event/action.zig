@@ -21,4 +21,9 @@ pub const Action = enum {
     jump_top,
     jump_bottom,
     exit_search_view,
+    show_help,
+    open_detail,
+    close_detail,
+    focus_left,
+    focus_right,
 };

@@ -106,6 +106,7 @@ pub fn build(b: *std.Build) void {
     state_mod.addImport("zigtui", zigtui_mod);
     state_mod.addImport("model", model_mod);
     state_mod.addImport("event_keymap", event_keymap_mod);
+    state_mod.addImport("platform", platform_mod);
 
     // thread wiring
     thread_channel_mod.addImport("spsc_queue", spsc_mod);
@@ -120,12 +121,14 @@ pub fn build(b: *std.Build) void {
     event_mod.addImport("event_keymap", event_keymap_mod);
     event_mod.addImport("state", state_mod);
     event_mod.addImport("platform", platform_mod);
+    event_mod.addImport("zigtui", zigtui_mod);
 
     // ui wiring
     ui_render_mod.addImport("state", state_mod);
     ui_render_mod.addImport("ui_layout", ui_layout_mod);
     ui_render_mod.addImport("event_keymap", event_keymap_mod);
     ui_render_mod.addImport("zigtui", zigtui_mod);
+    ui_render_mod.addImport("model", model_mod);
 
     // main wiring
     main_mod.addImport("event", event_mod);

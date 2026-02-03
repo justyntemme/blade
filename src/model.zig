@@ -29,10 +29,6 @@ pub const Proc = struct {
     mem_rss: u64 = 0,
     total_user: u64 = 0,
     total_system: u64 = 0,
-
-    pub fn identity(self: *const Proc) ProcIdentity {
-        return .{ .pid = self.pid, .start_time_ns = @intCast(self.start_time_ns) };
-    }
 };
 
 pub const ProcessSnapshot = struct {
@@ -44,10 +40,6 @@ pub const ProcessSnapshot = struct {
 
     name: []const u8,
     path: []const u8,
-
-    pub fn identity(self: *const ProcessSnapshot) ProcIdentity {
-        return .{ .pid = self.pid, .start_time_ns = self.start_time_ns };
-    }
 };
 
 pub const SystemSnapshot = struct {

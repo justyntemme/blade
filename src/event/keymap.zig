@@ -4,17 +4,14 @@ const actions = @import("event_action");
 
 pub const Action = actions.Action;
 
-pub const Mode = enum {
-    normal,
-    search_edit,
-    search_view,
-};
+pub const Mode = enum { normal, search_edit, search_view, help, detail };
 
 pub const KeyBinding = struct {
     key: Key,
     action: Action,
     modes: []const Mode,
     description: []const u8,
+    category: []const u8 = "",
 };
 
 pub const Key = union(enum) {
@@ -28,38 +25,56 @@ pub const SpecialKey = enum {
     esc,
     enter,
     backspace,
+    tab,
 };
 
 pub const keymap = [_]KeyBinding{
-    //expand
-    .{ .key = .{ .special = .enter }, .action = .toggle_expand, .modes = &.{ .normal, .search_view }, .description = "toggle expand" },
-    // Navigation (both modes)
-    .{ .key = .{ .char = 'g' }, .action = .jump_top, .modes = &.{ .normal, .search_view }, .description = "top" },
-    .{ .key = .{ .char = 'G' }, .action = .jump_bottom, .modes = &.{ .normal, .search_view }, .description = "bottom" },
-    .{ .key = .{ .char = '*' }, .action = .toggle_expand_all, .modes = &.{ .normal, .search_view }, .description = "Expand all" },
-    .{ .key = .{ .char = 'j' }, .action = .move_down, .modes = &.{ .normal, .search_view }, .description = "down" },
-    .{ .key = .{ .char = 'k' }, .action = .move_up, .modes = &.{ .normal, .search_view }, .description = "up" },
-    .{ .key = .{ .special = .up }, .action = .move_up, .modes = &.{ .normal, .search_view }, .description = "" },
-    .{ .key = .{ .special = .down }, .action = .move_down, .modes = &.{ .normal, .search_view }, .description = "" },
-    .{ .key = .{ .char = 'u' }, .action = .page_up, .modes = &.{ .normal, .search_view }, .description = "page up" },
-    .{ .key = .{ .char = 'd' }, .action = .page_down, .modes = &.{ .normal, .search_view }, .description = "page down" },
-    // Application
-    .{ .key = .{ .char = 'q' }, .action = .quit, .modes = &.{ .normal, .search_view }, .description = "quit" },
-    .{ .key = .{ .special = .esc }, .action = .quit, .modes = &.{.normal}, .description = "" },
-    // Search
-    .{ .key = .{ .special = .esc }, .action = .exit_search_view, .modes = &.{.search_view}, .description = "Exit search" },
-    .{ .key = .{ .char = '/' }, .action = .start_search, .modes = &.{ .normal, .search_view }, .description = "search" },
-    .{ .key = .{ .char = 'c' }, .action = .clear_search, .modes = &.{ .normal, .search_view }, .description = "clear" },
+    .{ .key = .{ .char = '?' }, .action = .show_help, .modes = &.{ .normal, .search_view, .help }, .description = "Show Help", .category = "General" },
 
-    // Process control
-    .{ .key = .{ .char = 'x' }, .action = .kill_term, .modes = &.{.normal}, .description = "kill" },
-    .{ .key = .{ .char = 'X' }, .action = .kill_force, .modes = &.{.normal}, .description = "kill -9" },
+    // Navigation (all scrollable modes)
+    .{ .key = .{ .char = 'j' }, .action = .move_down, .modes = &.{ .normal, .search_view, .help, .detail }, .description = "down", .category = "Navigation" },
+    .{ .key = .{ .char = 'k' }, .action = .move_up, .modes = &.{ .normal, .search_view, .help, .detail }, .description = "up", .category = "Navigation" },
+    .{ .key = .{ .special = .up }, .action = .move_up, .modes = &.{ .normal, .search_view, .help, .detail }, .description = "" },
+    .{ .key = .{ .special = .down }, .action = .move_down, .modes = &.{ .normal, .search_view, .help, .detail }, .description = "" },
+    .{ .key = .{ .char = 'u' }, .action = .page_up, .modes = &.{ .normal, .search_view, .help, .detail }, .description = "page up", .category = "Navigation" },
+    .{ .key = .{ .char = 'd' }, .action = .page_down, .modes = &.{ .normal, .search_view, .help, .detail }, .description = "page down", .category = "Navigation" },
+    .{ .key = .{ .char = 'g' }, .action = .jump_top, .modes = &.{ .normal, .search_view, .help, .detail }, .description = "top", .category = "Navigation" },
+    .{ .key = .{ .char = 'G' }, .action = .jump_bottom, .modes = &.{ .normal, .search_view, .help, .detail }, .description = "bottom", .category = "Navigation" },
+
+    // Tree expand/collapse
+    .{ .key = .{ .special = .tab }, .action = .toggle_expand, .modes = &.{ .normal, .search_view }, .description = "toggle expand", .category = "Tree" },
+    .{ .key = .{ .char = ' ' }, .action = .toggle_expand, .modes = &.{ .normal, .search_view }, .description = "" },
+    .{ .key = .{ .char = '*' }, .action = .toggle_expand_all, .modes = &.{ .normal, .search_view }, .description = "Expand all", .category = "Tree" },
+
+    // Process
+    .{ .key = .{ .special = .enter }, .action = .open_detail, .modes = &.{ .normal, .search_view }, .description = "details", .category = "Process" },
+    .{ .key = .{ .char = 'x' }, .action = .kill_term, .modes = &.{.normal}, .description = "kill", .category = "Process" },
+    .{ .key = .{ .char = 'X' }, .action = .kill_force, .modes = &.{.normal}, .description = "kill -9", .category = "Process" },
+
+    // Search
+    .{ .key = .{ .char = '/' }, .action = .start_search, .modes = &.{ .normal, .search_view }, .description = "search", .category = "Search" },
+    .{ .key = .{ .char = 'c' }, .action = .clear_search, .modes = &.{ .normal, .search_view }, .description = "clear", .category = "Search" },
+    .{ .key = .{ .special = .esc }, .action = .exit_search_view, .modes = &.{.search_view}, .description = "Exit search", .category = "Search" },
 
     // Sorting
-    .{ .key = .{ .char = 'P' }, .action = .sort_by_pid, .modes = &.{ .normal, .search_view }, .description = "sort PID" },
-    .{ .key = .{ .char = 'N' }, .action = .sort_by_name, .modes = &.{ .normal, .search_view }, .description = "sort Name" },
-    .{ .key = .{ .char = 'C' }, .action = .sort_by_cpu, .modes = &.{ .normal, .search_view }, .description = "sort CPU" },
-    .{ .key = .{ .char = 'M' }, .action = .sort_by_mem, .modes = &.{ .normal, .search_view }, .description = "sort mem" },
+    .{ .key = .{ .char = 'P' }, .action = .sort_by_pid, .modes = &.{ .normal, .search_view }, .description = "sort PID", .category = "Sorting" },
+    .{ .key = .{ .char = 'N' }, .action = .sort_by_name, .modes = &.{ .normal, .search_view }, .description = "sort Name", .category = "Sorting" },
+    .{ .key = .{ .char = 'C' }, .action = .sort_by_cpu, .modes = &.{ .normal, .search_view }, .description = "sort CPU", .category = "Sorting" },
+    .{ .key = .{ .char = 'M' }, .action = .sort_by_mem, .modes = &.{ .normal, .search_view }, .description = "sort mem", .category = "Sorting" },
+
+    // Application
+    .{ .key = .{ .char = 'q' }, .action = .quit, .modes = &.{ .normal, .search_view }, .description = "quit", .category = "General" },
+    .{ .key = .{ .special = .esc }, .action = .quit, .modes = &.{.normal}, .description = "" },
+
+    // Help mode (close)
+    .{ .key = .{ .special = .esc }, .action = .show_help, .modes = &.{.help}, .description = "" },
+    .{ .key = .{ .char = 'q' }, .action = .show_help, .modes = &.{.help}, .description = "" },
+
+    // Detail mode (close + pane focus)
+    .{ .key = .{ .special = .esc }, .action = .close_detail, .modes = &.{.detail}, .description = "" },
+    .{ .key = .{ .char = 'q' }, .action = .close_detail, .modes = &.{.detail}, .description = "" },
+    .{ .key = .{ .char = 'h' }, .action = .focus_left, .modes = &.{.detail}, .description = "" },
+    .{ .key = .{ .char = 'l' }, .action = .focus_right, .modes = &.{.detail}, .description = "" },
 };
 
 pub fn getAction(key: Key, mode: Mode) ?Action {
@@ -73,54 +88,3 @@ pub fn getAction(key: Key, mode: Mode) ?Action {
     return null;
 }
 
-pub fn getHelpText(mode: Mode, buf: []u8) []const u8 {
-    var pos: usize = 0;
-
-    for (keymap) |binding| {
-        if (binding.description.len == 0) continue;
-
-        var in_mode = false;
-        for (binding.modes) |m| {
-            if (m == mode) {
-                in_mode = true;
-                break;
-            }
-        }
-        if (!in_mode) continue;
-
-        const key_str = switch (binding.key) {
-            .char => |c| &[_]u8{c},
-            .special => |s| switch (s) {
-                .up => "↑",
-                .down => "↓",
-                .esc => "esc",
-                .enter => "enter",
-                .backspace => "bksp",
-            },
-        };
-
-        if (pos > 0 and pos + 2 < buf.len) {
-            buf[pos] = ' ';
-            buf[pos + 1] = ' ';
-            pos += 2;
-        }
-
-        //add key:description
-        for (key_str) |c| {
-            if (pos >= buf.len) break;
-            buf[pos] = c;
-            pos += 1;
-        }
-        if (pos < buf.len) {
-            buf[pos] = ':';
-            pos += 1;
-        }
-        for (binding.description) |c| {
-            if (pos >= buf.len) break;
-            buf[pos] = c;
-            pos += 1;
-        }
-    }
-
-    return buf[0..pos];
-}
