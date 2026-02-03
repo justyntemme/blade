@@ -16,7 +16,7 @@ pub const ThreadArgs = struct {
 //entrypoint
 pub fn run(args: ThreadArgs) void {
     while (args.running.load(.acquire)) {
-        fetchAndSend(args.queue) catch |err| {
+        fetchAndSend(args.queue, args.running) catch |err| {
             std.debug.print("Producer Error: {}\n", .{err});
         };
 
@@ -31,14 +31,14 @@ pub fn run(args: ThreadArgs) void {
     }
 }
 
-fn fetchAndSend(queue: *channel.BatchQueue) !void {
+fn fetchAndSend(queue: *channel.BatchQueue, running: *std.atomic.Value(bool)) !void {
     var batch_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     const arena_alloc = batch_arena.allocator();
     //create a new batch
     // Allocate BEFORE copying the arena into the batch
     const map = try platform.collectSnapshot(arena_alloc);
     const timestamp = std.time.nanoTimestamp();
-    const batch = channel.Batch{
+    var batch = channel.Batch{
         .arena = batch_arena,
         .map = map,
         .timestamp_ns = timestamp,
@@ -47,6 +47,10 @@ fn fetchAndSend(queue: *channel.BatchQueue) !void {
     const max_backoff_ns: u64 = 10 * std.time.ns_per_ms; // Cap at 10ms
 
     while (!queue.tryPush(batch)) {
+        if (!running.load(.acquire)) {
+            batch.deinit();
+            return;
+        }
         std.Thread.sleep(backoff_ns);
         backoff_ns = @min(backoff_ns * 2, max_backoff_ns);
     }
