@@ -1,39 +1,98 @@
 # Blade
 
-A terminal process viewer for macOS with vim-style navigation, tree display, live search, and per-process detail inspection. Built with Zig.
+A terminal-based process viewer for macOS, built with Zig. Blade displays running processes in a tree hierarchy with live CPU and memory stats, vim-style navigation, search filtering, and per-process detail inspection.
 
-## Dependencies
+## Requirements
 
-- [zigtui](https://github.com/justyntemme/zigtui) -- terminal UI rendering and input handling
-- [spsc-queue](https://github.com/freref/spsc-queue) -- lock-free queue for background process polling
+- macOS
+- Zig 0.15.2 or later
+- A terminal with kitty keyboard protocol support is recommended (Kitty, WezTerm, Ghostty, iTerm2) for full keybinding support including Shift+Enter
 
-Requires Zig 0.15.2+ and macOS.
+## Building
 
-## Build & Run
+```
+zig build
+```
+
+The binary is placed in `zig-out/bin/Blade`.
+
+## Running
 
 ```
 zig build run
 ```
 
+Or run the binary directly:
+
+```
+./zig-out/bin/Blade
+```
+
 ## Keybindings
 
-Press `?` in-app for the full help overlay.
+Press `?` at any time to open the in-app help overlay.
 
-| Key | Action |
-|-----|--------|
-| `j/k`, `Up/Down` | Navigate |
-| `u/d` | Page up/down |
-| `g/G` | Jump to top/bottom |
-| `Tab`, `Shift+Enter`, `Space` | Toggle expand |
-| `*` | Expand/collapse all |
+### Navigation
+
+| Key       | Action    |
+|-----------|-----------|
+| `j` / `Down` | Move down |
+| `k` / `Up`   | Move up   |
+| `u`       | Page up   |
+| `d`       | Page down |
+| `g`       | Jump to top |
+| `G`       | Jump to bottom |
+
+### Process Tree
+
+| Key              | Action              |
+|------------------|---------------------|
+| `Tab` / `Shift+Enter` / `Space` | Toggle expand/collapse |
+| `*`              | Expand/collapse all |
+
+### Process Actions
+
+| Key     | Action         |
+|---------|----------------|
 | `Enter` | Open detail view |
-| `h/l` | Focus left/right pane (detail view) |
-| `/` | Search |
-| `c` | Clear search |
-| `P/N/C/M` | Sort by PID/Name/CPU/Mem |
-| `x/X` | Kill / Force kill |
-| `q`, `Esc` | Quit / Back |
+| `x`     | Kill process (SIGTERM) |
+| `X`     | Force kill process (SIGKILL) |
 
-## Documentation
+### Search
 
-See [docs/](docs/) for architecture and design details.
+| Key   | Action        |
+|-------|---------------|
+| `/`   | Start search  |
+| `c`   | Clear search  |
+| `Esc` | Exit search   |
+
+Search is live -- results filter as you type. Press `Enter` to confirm the search and return to navigation mode.
+
+### Sorting
+
+| Key | Action       |
+|-----|--------------|
+| `P` | Sort by PID  |
+| `N` | Sort by name |
+| `C` | Sort by CPU  |
+| `M` | Sort by memory |
+
+### Detail View
+
+| Key   | Action            |
+|-------|-------------------|
+| `h`   | Focus left pane   |
+| `l`   | Focus right pane  |
+| `j/k` | Scroll focused pane |
+| `q` / `Esc` | Close detail view |
+
+### General
+
+| Key         | Action    |
+|-------------|-----------|
+| `?`         | Toggle help |
+| `q` / `Esc` | Quit      |
+
+## License
+
+See [LICENSE](LICENSE) for details.
