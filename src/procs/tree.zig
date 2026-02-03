@@ -74,7 +74,9 @@ pub fn buildAdjacency(
     return adj;
 }
 
-pub fn sortChildren(adj: *Adjacency, n: usize, sort_ctx: anytype, compareFn: anytype) void {
+pub const CompareFn = fn (model.SortContext, u32, u32) bool;
+
+pub fn sortChildren(adj: *Adjacency, n: usize, sort_ctx: model.SortContext, comptime compareFn: CompareFn) void {
     if (n == 0) return;
     if (adj.offsets.items.len != n + 1) return;
 
@@ -111,8 +113,8 @@ pub fn buildVisibleNodes(
     pid_to_index: std.AutoHashMap(std.posix.pid_t, u32),
     expanded_pids: *const std.AutoHashMap(model.ProcIdentity, void),
     search: []const u8,
-    sort_ctx: anytype,
-    compareFn: anytype,
+    sort_ctx: model.SortContext,
+    comptime compareFn: CompareFn,
     arena: std.mem.Allocator,
 ) !std.ArrayListUnmanaged(model.VisibleNode) {
     var visible_nodes = std.ArrayListUnmanaged(model.VisibleNode){};

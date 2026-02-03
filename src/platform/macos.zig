@@ -2,6 +2,8 @@ const std = @import("std");
 const c = @cImport({
     @cInclude("libproc.h");
     @cInclude("sys/proc_info.h");
+    @cInclude("sys/sysctl.h");
+    @cInclude("pwd.h");
 });
 
 const model = @import("model");
@@ -19,20 +21,6 @@ pub const PlatformError = error{
     ProcessNotFound,
     Unexpected,
 };
-
-pub fn toSnapshot(proc: *const Proc, arena: std.mem.Allocator) !model.ProcessSnapshot {
-    const name_slice = std.mem.sliceTo(&proc.s_name, 0);
-    const path_slice = std.mem.sliceTo(&proc.path, 0);
-    return .{
-        .pid = proc.pid,
-        .start_time_ns = @intCast(proc.start_time_ns),
-        .cpu_total_ns = proc.total_user + proc.total_system,
-        .mem_rss_bytes = proc.mem_rss,
-        .state = .unkown,
-        .name = try arena.dupe(u8, name_slice),
-        .path = try arena.dupe(u8, path_slice),
-    };
-}
 
 pub fn collectSnapshot(arena: std.mem.Allocator) PlatformError!std.AutoHashMap(pid_t, Proc) {
     var proc_map: std.AutoHashMap(pid_t, Proc) = .init(arena);
@@ -151,5 +139,193 @@ pub fn capabilities() platform.Capabilities {
         .has_memory_info = true,
         .has_io_stats = true,
         .has_start_time = true,
+    };
+}
+
+pub fn collectProcessDetail(pid: pid_t, arena: std.mem.Allocator) PlatformError!model.ProcessDetail {
+    // PROC_PIDTASKALLINFO = bsd + task in one syscall
+    // SAFETY: proc_pidinfo(PROC_PIDTASKALLINFO) fully initializes this struct;
+    var task_all: c.proc_taskallinfo = undefined;
+    const task_size = c.proc_pidinfo(
+        pid,
+        c.PROC_PIDTASKALLINFO,
+        0,
+        &task_all,
+        @sizeOf(c.proc_taskallinfo),
+    );
+    if (task_size <= 0) return error.ProcessNotFound;
+
+    const bsd = task_all.pbsd;
+    const task = task_all.ptinfo;
+
+    // Name
+    const c_name = std.mem.sliceTo(&bsd.pbi_name, 0);
+    const name = arena.dupe(u8, c_name) catch return error.OutOfMemory;
+
+    // Path
+    var path_buf: [4096]u8 = undefined;
+    const path_len = c.proc_pidpath(pid, &path_buf, path_buf.len);
+    const path = if (path_len > 0)
+        arena.dupe(u8, path_buf[0..@intCast(path_len)]) catch return error.OutOfMemory
+    else
+        arena.dupe(u8, "[path unavailable]") catch return error.OutOfMemory;
+
+    // Cmdline + environ via KERN_PROCARGS2
+    // Buffer format: [argc:u32][exec_path\0][padding\0s][arg0\0]...[argN\0][env0\0]...[envM\0]
+    const ArgsResult = struct { cmdline: []const u8, environ: []const []const u8 };
+    const unavail = "[unavailable]";
+    const parsed_args = blk: {
+        var mib = [4]c_int{ c.CTL_KERN, c.KERN_PROCARGS2, pid, 0 };
+        var arg_size: usize = 0;
+        if (std.c.sysctl(&mib, 3, null, &arg_size, null, 0) != 0) {
+            break :blk ArgsResult{
+                .cmdline = arena.dupe(u8, unavail) catch return error.OutOfMemory,
+                .environ = &.{},
+            };
+        }
+        const arg_buf = arena.alloc(u8, arg_size) catch break :blk ArgsResult{
+            .cmdline = arena.dupe(u8, unavail) catch return error.OutOfMemory,
+            .environ = &.{},
+        };
+        if (std.c.sysctl(&mib, 3, arg_buf.ptr, &arg_size, null, 0) != 0) {
+            break :blk ArgsResult{
+                .cmdline = arena.dupe(u8, unavail) catch return error.OutOfMemory,
+                .environ = &.{},
+            };
+        }
+        if (arg_size <= 4) break :blk ArgsResult{
+            .cmdline = arena.dupe(u8, unavail) catch return error.OutOfMemory,
+            .environ = &.{},
+        };
+
+        // Read argc from first 4 bytes
+        const argc: u32 = @bitCast(arg_buf[0..4].*);
+        var pos: usize = 4;
+
+        // Skip exec path (null-terminated)
+        while (pos < arg_size and arg_buf[pos] != 0) pos += 1;
+        // Skip padding nulls
+        while (pos < arg_size and arg_buf[pos] == 0) pos += 1;
+
+        // Parse argc arguments → cmdline (join with spaces)
+        const args_start = pos;
+        var args_count: u32 = 0;
+        while (pos < arg_size and args_count < argc) {
+            if (arg_buf[pos] == 0) args_count += 1;
+            pos += 1;
+        }
+        const args_data = arg_buf[args_start..pos];
+        const display = arena.alloc(u8, args_data.len) catch break :blk ArgsResult{
+            .cmdline = arena.dupe(u8, unavail) catch return error.OutOfMemory,
+            .environ = &.{},
+        };
+        for (args_data, 0..) |byte, i| {
+            display[i] = if (byte == 0) ' ' else byte;
+        }
+        var end: usize = display.len;
+        while (end > 0 and display[end - 1] == ' ') end -= 1;
+        const cmdline_str = display[0..end];
+
+        // Parse remaining null-terminated strings → environ
+        // Reserve-first: count env vars, allocate once, then fill
+        while (pos < arg_size and arg_buf[pos] == 0) pos += 1;
+
+        var env_count: usize = 0;
+        var scan = pos;
+        while (scan < arg_size) {
+            const start = scan;
+            while (scan < arg_size and arg_buf[scan] != 0) scan += 1;
+            if (scan > start) env_count += 1;
+            if (scan < arg_size) scan += 1;
+        }
+
+        const env_slices = arena.alloc([]const u8, env_count) catch break :blk ArgsResult{
+            .cmdline = cmdline_str, .environ = &.{},
+        };
+        var env_idx: usize = 0;
+        while (pos < arg_size and env_idx < env_count) {
+            const start = pos;
+            while (pos < arg_size and arg_buf[pos] != 0) pos += 1;
+            if (pos > start) {
+                env_slices[env_idx] = arena.dupe(u8, arg_buf[start..pos]) catch break;
+                env_idx += 1;
+            }
+            if (pos < arg_size) pos += 1;
+        }
+
+        break :blk ArgsResult{ .cmdline = cmdline_str, .environ = env_slices };
+    };
+    const cmdline = parsed_args.cmdline;
+    const environ = parsed_args.environ;
+
+    // CWD via PROC_PIDVNODEPATHINFO
+    const cwd = blk: {
+        // SAFETY: proc_pidinfo(PROC_PIDVNODEPATHINFO) fully initializes this struct;
+        var vnode_info: c.proc_vnodepathinfo = undefined;
+        const vn_size = c.proc_pidinfo(
+            pid,
+            c.PROC_PIDVNODEPATHINFO,
+            0,
+            &vnode_info,
+            @sizeOf(c.proc_vnodepathinfo),
+        );
+        if (vn_size > 0) {
+            const cwd_path = std.mem.sliceTo(&vnode_info.pvi_cdir.vip_path, 0);
+            break :blk arena.dupe(u8, cwd_path) catch return error.OutOfMemory;
+        }
+        break :blk arena.dupe(u8, "[unavailable]") catch return error.OutOfMemory;
+    };
+
+    // FD count via PROC_PIDLISTFDS
+    const fd_count: u32 = blk: {
+        const fd_bytes = c.proc_pidinfo(pid, c.PROC_PIDLISTFDS, 0, null, 0);
+        if (fd_bytes > 0) {
+            break :blk @intCast(@divExact(
+                @as(u32, @intCast(fd_bytes)),
+                @sizeOf(c.proc_fdinfo),
+            ));
+        }
+        break :blk 0;
+    };
+
+    // User name from UID
+    const uid: u32 = bsd.pbi_uid;
+    const user_name = blk: {
+        const pw = c.getpwuid(uid);
+        if (pw) |pwd| {
+            const name_slice = std.mem.sliceTo(pwd.*.pw_name, 0);
+            break :blk arena.dupe(u8, name_slice) catch return error.OutOfMemory;
+        }
+        break :blk arena.dupe(u8, "[unknown]") catch return error.OutOfMemory;
+    };
+
+    // Process state
+    const proc_state: model.ProcState = switch (bsd.pbi_status) {
+        2 => .running,
+        1 => .sleeping,
+        3 => .stopped,
+        4 => .zombie,
+        else => .unkown,
+    };
+
+    const start_sec: i128 = @intCast(bsd.pbi_start_tvsec);
+    const start_usec: i128 = @intCast(bsd.pbi_start_tvusec);
+
+    return .{
+        .pid = pid,
+        .ppid = @intCast(bsd.pbi_ppid),
+        .name = name,
+        .path = path,
+        .cmdline = cmdline,
+        .cwd = cwd,
+        .user_name = user_name,
+        .uid = uid,
+        .state = proc_state,
+        .thread_count = @intCast(task.pti_threadnum),
+        .nice = @intCast(bsd.pbi_nice),
+        .virtual_mem = task.pti_virtual_size,
+        .fd_count = fd_count,
+        .start_time_ns = start_sec * std.time.ns_per_s + start_usec * std.time.ns_per_us,
+        .environ = environ,
     };
 }

@@ -5,11 +5,6 @@ const zigtui = @import("zigtui");
 const model = @import("model");
 const keymap = @import("event_keymap");
 
-// Re-exports for backward compatibility (used by render.zig, etc.)
-pub const ProcHot = model.ProcHot;
-pub const ProcHotList = model.ProcHotList;
-pub const ProcCold = model.ProcCold;
-pub const VisibleNode = model.VisibleNode;
 pub const SortColumn = model.SortColumn;
 pub const SortDirection = model.SortDirection;
 
@@ -33,9 +28,21 @@ pub const AppState = struct {
     scroll_offset: usize = 0,
     active_toast: ?Toast = null,
     mode: keymap.Mode = .normal,
+    previous_mode: keymap.Mode = .normal,
     search_buf: [256]u8 = [_]u8{0} ** 256,
     search_len: usize = 0,
+    last_update_ns: i128 = 0,
+    detail_queue: *channel.DetailQueue = undefined,
+    detail_pid: ?model.pid_t = null,
+    detail_data: ?model.ProcessDetail = null,
+    detail_arena: ?std.heap.ArenaAllocator = null,
+    detail_scroll: usize = 0,
+    detail_right_scroll: usize = 0,
+    detail_focus: DetailFocus = .left,
+    help_scroll: usize = 0,
     procs: procs.Store,
+
+    pub const DetailFocus = enum { left, right };
 
     pub fn init(gpa: std.mem.Allocator) AppState {
         return .{
@@ -45,6 +52,7 @@ pub const AppState = struct {
     }
 
     pub fn deinit(self: *AppState) void {
+        self.closeDetail();
         self.procs.deinit();
     }
 
@@ -118,17 +126,18 @@ pub const AppState = struct {
     }
 
     pub fn toggleSelectedExpansion(self: *AppState) void {
-        if (self.procs.visible_nodes.items.len == 0) return;
+        const rows = self.procs.render_rows.items;
+        if (rows.len == 0) return;
 
         const prev = self.getSelectedIdentity();
-        const idx = @min(self.selected_item, self.procs.visible_nodes.items.len - 1);
-        const node = self.procs.visible_nodes.items[idx];
-        if (!node.has_children) return;
+        const idx = @min(self.selected_item, rows.len - 1);
+        const row = rows[idx];
+        if (!row.has_children) return;
 
-        const data_idx: usize = @intCast(node.data_idx);
+        const data_idx: usize = @intCast(row.data_idx);
         const expand = !self.procs.isExpanded(data_idx);
 
-        self.procs.setExpandedSubtree(node.data_idx, expand) catch |err| {
+        self.procs.setExpandedSubtree(row.data_idx, expand) catch |err| {
             self.showToastFmt("Expand failed: {}", .{err}, .err);
             return;
         };
@@ -140,17 +149,27 @@ pub const AppState = struct {
         self.restoreAndClamp(prev);
     }
 
-    pub fn receive_batch(self: *AppState, new_batch: channel.Batch) void {
+    pub fn receiveBatch(self: *AppState, new_batch: channel.Batch) void {
+        self.last_update_ns = new_batch.timestamp_ns;
         self.procs.receiveBatch(new_batch);
         self.buildView();
+
+        //close detail view if the inspected process exits
+        if (self.detail_pid) |dpid| {
+            const exists = self.procs.pid_to_index.get(dpid) != null;
+            if (!exists) {
+                self.showToast("Process exited", .warning);
+                self.closeDetail();
+            }
+        }
     }
 
     fn getSelectedIdentity(self: *const AppState) ?model.ProcIdentity {
-        if (self.procs.visible_nodes.items.len == 0) return null;
+        const rows = self.procs.render_rows.items;
+        if (rows.len == 0) return null;
         if (self.selected_item == 0) return null;
-        const idx = @min(self.selected_item, self.procs.visible_nodes.items.len - 1);
-        const node = self.procs.visible_nodes.items[idx];
-        const data_idx: usize = @intCast(node.data_idx);
+        const idx = @min(self.selected_item, rows.len - 1);
+        const data_idx: usize = @intCast(rows[idx].data_idx);
         return self.procs.identityAt(data_idx);
     }
 
@@ -164,16 +183,17 @@ pub const AppState = struct {
 
     fn restoreAndClamp(self: *AppState, prev_identity: ?model.ProcIdentity) void {
         self.restoreSelection(prev_identity);
-        if (self.procs.visible_nodes.items.len == 0) {
+        const len = self.procs.render_rows.items.len;
+        if (len == 0) {
             self.selected_item = 0;
             self.scroll_offset = 0;
         } else {
-            self.selected_item = @min(self.selected_item, self.procs.visible_nodes.items.len - 1);
+            self.selected_item = @min(self.selected_item, len - 1);
         }
     }
 
     pub fn down(self: *AppState) void {
-        if (self.selected_item < self.procs.visible_nodes.items.len -| 1) {
+        if (self.selected_item < self.procs.render_rows.items.len -| 1) {
             self.selected_item += 1;
         }
     }
@@ -184,12 +204,13 @@ pub const AppState = struct {
     }
 
     pub fn jumpBottom(self: *AppState) void {
-        if (self.procs.visible_nodes.items.len == 0) {
+        const len = self.procs.render_rows.items.len;
+        if (len == 0) {
             self.selected_item = 0;
             self.scroll_offset = 0;
             return;
         }
-        self.selected_item = self.procs.visible_nodes.items.len - 1;
+        self.selected_item = len - 1;
     }
 
     pub fn up(self: *AppState) void {
@@ -213,6 +234,75 @@ pub const AppState = struct {
         if (self.search_len > 0) {
             self.search_len -= 1;
         }
+    }
+
+    pub fn openDetail(self: *AppState, pid: model.pid_t) void {
+        self.closeDetail();
+        self.detail_pid = pid;
+        self.detail_data = null;
+        self.detail_scroll = 0;
+        self.detail_right_scroll = 0;
+        self.detail_focus = .left;
+        self.previous_mode = self.mode;
+        self.mode = .detail;
+
+        const thread = std.Thread.spawn(.{}, collectDetailWorker, .{ self.detail_queue, pid, self.gpa }) catch {
+            self.showToast("Detail collection failed", .err);
+            self.mode = self.previous_mode;
+            return;
+        };
+        thread.detach();
+    }
+
+    fn collectDetailWorker(queue: *channel.DetailQueue, pid: model.pid_t, gpa: std.mem.Allocator) void {
+        const platform = @import("platform");
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        const alloc = arena.allocator();
+
+        const data = platform.collectProcessDetail(pid, alloc) catch {
+            arena.deinit();
+            return;
+        };
+
+        if (!queue.tryPush(.{ .arena = arena, .data = data, .pid = pid })) {
+            arena.deinit();
+        }
+    }
+
+    pub fn receiveDetail(self: *AppState, result: channel.DetailResult) void {
+        if (self.detail_pid) |current_pid| {
+            if (current_pid == result.pid and self.mode == .detail) {
+                if (self.detail_arena) |*old| old.deinit();
+                self.detail_arena = result.arena;
+                self.detail_data = result.data;
+                return;
+            }
+        }
+        var r = result;
+        r.deinit();
+    }
+
+    pub fn closeDetail(self: *AppState) void {
+        if (self.detail_arena) |*arena| {
+            arena.deinit();
+        }
+        self.detail_arena = null;
+        self.detail_data = null;
+        self.detail_pid = null;
+        if (self.mode == .detail) {
+            self.mode = self.previous_mode;
+        }
+    }
+    pub fn detailScrollUp(self: *AppState) void {
+        if (self.detail_scroll > 0) self.detail_scroll -= 1;
+    }
+
+    pub fn detailScrollDown(self: *AppState) void {
+        self.detail_scroll += 1;
+    }
+
+    pub fn detailScrollToBottom(self: *AppState) void {
+        self.detail_scroll = std.math.maxInt(usize);
     }
 
     pub fn searchClear(self: *AppState) void {

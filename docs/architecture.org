@@ -1,0 +1,2039 @@
+#+TITLE: Blade Architecture
+#+AUTHOR: Generated from source analysis
+#+STARTUP: showall
+#+OPTIONS: toc:3 num:t
+
+* Overview
+
+Blade is a macOS terminal process viewer written in Zig. It displays running
+processes in a hierarchical tree with live CPU and memory metrics, supporting
+search, sorting, expansion/collapse, and process signaling (kill).
+
+The application follows a *producer-consumer* architecture with two threads:
+
+- *Producer thread* — collects process snapshots from the OS every 3 seconds
+- *Main thread* — processes batches, handles keyboard input, and renders the TUI
+
+Communication between threads uses a lock-free single-producer single-consumer
+(SPSC) queue with a capacity of 4 batches.
+
+* Module Map
+
+#+BEGIN_SRC
+main.zig                  Entry point, event loop, thread lifecycle
+state.zig                 Application state (selection, scroll, mode, toast)
+model.zig                 All shared data structures (Proc, ProcHot, ProcCold, RenderRow, etc.)
+procs/
+  store.zig               Process data store (hot/cold arrays, view pipeline)
+  tree.zig                Adjacency graph, tree traversal, visible node generation
+  sort.zig                Comparison functions for sorting
+thread/
+  channel.zig             Batch struct, SPSC queue initialization
+  producer.zig            Background thread: collect snapshots and push batches
+platform/
+  platform.zig            Platform abstraction layer (compile-time dispatch)
+  macos.zig               macOS implementation via libproc
+  linux.zig               Linux stub (unimplemented)
+  windows.zig             Windows stub (unimplemented)
+event/
+  event.zig               Input dispatch (key mapping, action execution)
+  keymap.zig              Key-to-action bindings per mode
+  action.zig              Action enum definition
+ui/
+  render.zig              TUI rendering (header, process rows, footer, toast)
+  layout.zig              Flexible layout engine (fixed/grow/percent sizing)
+#+END_SRC
+
+* Module Dependency Graph
+
+#+BEGIN_SRC
+main
+ ├── event/event.zig
+ │    ├── event/keymap.zig
+ │    │    └── event/action.zig
+ │    ├── state.zig
+ │    └── platform/platform.zig
+ │
+ ├── ui/render.zig
+ │    ├── state.zig
+ │    ├── model.zig
+ │    ├── ui/layout.zig
+ │    ├── event/keymap.zig
+ │    └── zigtui (external)
+ │
+ ├── state.zig
+ │    ├── thread/channel.zig
+ │    ├── procs/store.zig
+ │    │    ├── model.zig
+ │    │    ├── procs/tree.zig
+ │    │    │    └── model.zig
+ │    │    ├── procs/sort.zig
+ │    │    │    └── model.zig
+ │    │    └── thread/channel.zig
+ │    ├── zigtui (external)
+ │    ├── model.zig
+ │    └── event/keymap.zig
+ │
+ ├── thread/channel.zig
+ │    ├── spsc_queue (external)
+ │    ├── platform/platform.zig
+ │    └── model.zig
+ │
+ ├── thread/producer.zig
+ │    ├── thread/channel.zig
+ │    └── platform/platform.zig
+ │
+ └── platform/platform.zig
+      └── model.zig
+
+Note: main.zig does NOT import platform directly — it is used
+indirectly via event/event.zig. main.zig also imports zigtui.
+#+END_SRC
+
+External dependencies:
+
+| Dependency   | Purpose                                 |
+|--------------+-----------------------------------------|
+| =zigtui=     | TUI framework for terminal rendering    |
+| =spsc_queue= | Lock-free single-producer/consumer queue |
+| =libproc=    | macOS C library for process enumeration |
+
+* Data Structures
+
+** model.zig — Core Types
+
+*** ProcState
+
+#+BEGIN_SRC zig
+pub const ProcState = enum {
+    running,
+    sleeping,
+    disk_wait,
+    stopped,
+    zombie,
+    unkown,
+};
+#+END_SRC
+
+Represents the scheduling state of a process as reported by the OS.
+
+*** ProcIdentity
+
+#+BEGIN_SRC zig
+pub const ProcIdentity = struct {
+    pid: std.posix.pid_t,
+    start_time_ns: i128,
+
+    pub fn eql(self: ProcIdentity, other: ProcIdentity) bool {
+        return self.pid == other.pid and self.start_time_ns == other.start_time_ns;
+    }
+};
+#+END_SRC
+
+A =(pid, start_time_ns)= pair that *uniquely identifies a process* even across
+PID reuse. Two processes that share the same PID but started at different times
+are considered distinct. This is used as the key in the =expanded_pids= hash map
+so that expansion state survives view rebuilds.
+
+*** Proc (Raw OS Data)
+
+#+BEGIN_SRC zig
+pub const Proc = struct {
+    pid: pid_t = 0,
+    ppid: pid_t = 0,
+    start_time_ns: i128 = 0,
+    s_name: [256:0]u8,       // null-terminated process name
+    path: [4096]u8,          // binary path on disk
+    mem_rss: u64 = 0,        // resident set size in bytes
+    total_user: u64 = 0,     // cumulative user CPU time (nanoseconds)
+    total_system: u64 = 0,   // cumulative system CPU time (nanoseconds)
+};
+#+END_SRC
+
+Raw data collected from macOS =libproc= calls. Uses *fixed-size inline arrays*
+to avoid heap allocation in the platform layer. The producer packs one =Proc= per
+PID into a hash map that becomes part of a =Batch=.
+
+*** Hot/Cold Data Split
+
+The store separates process data into two categories optimized for different
+access patterns.
+
+*ProcHot* — fields that change every collection cycle:
+
+#+BEGIN_SRC zig
+pub const ProcHot = struct {
+    pid: std.posix.pid_t,
+    start_time_ns: i128,
+    cpu_percent: f32,
+    mem_rss: u64,
+};
+pub const ProcHotList = std.MultiArrayList(ProcHot);
+#+END_SRC
+
+=ProcHotList= is a *struct-of-arrays* (SoA) layout. When sorting by CPU, only the
+=cpu_percent= slice is touched, keeping the working set small and cache-friendly.
+
+*ProcCold* — fields that are static for the lifetime of a process:
+
+#+BEGIN_SRC zig
+pub const ProcCold = struct {
+    name: []const u8,         // display name
+    path: []const u8,         // binary path
+    ppid: std.posix.pid_t,    // parent PID
+    name_lower: []const u8,   // lowercase for case-insensitive search
+    path_lower: []const u8,   // lowercase for case-insensitive search
+};
+#+END_SRC
+
+Cold data is read during rendering and searching but never mutated after initial
+population.
+
+*** VisibleNode (Tree Rendering)
+
+#+BEGIN_SRC zig
+pub const VisibleNode = struct {
+    data_idx: u32,        // index into hot[] and cold[]
+    depth: u16,           // nesting level (0 = root)
+    has_children: bool,
+    is_last: bool,        // last sibling at this depth
+    is_expanded: bool,    // whether children are visible
+};
+#+END_SRC
+
+Each visible row in the terminal maps to one =VisibleNode=. The =data_idx= field
+is an indirection into the parallel hot/cold arrays. The =depth= field drives
+indentation during rendering (2 spaces per level).
+
+=VisibleNode= is an *internal* type used within the Store pipeline. External
+consumers (render.zig, event.zig, state.zig) access the materialized
+=RenderRow= buffer instead.
+
+*** RenderRow (Render-Ready AoS Buffer)
+
+#+BEGIN_SRC zig
+pub const RenderRow = struct {
+    pid: pid_t,
+    cpu_percent: f32,
+    mem_rss: u64,
+    name: []const u8,
+    path: []const u8,
+    depth: u16,
+    has_children: bool,
+    is_expanded: bool,
+    data_idx: u32,
+};
+#+END_SRC
+
+=RenderRow= is a *materialized, layout-agnostic view* of one visible process
+row. It is the output of the SHAPES-inspired layout boundary: the pipeline
+operates in SoA (hot/cold MultiArrayList) for computation, then materializes
+into AoS (=RenderRow[]=) for consumption.
+
+*Design rationale (SHAPES paper):*
+- SoA is optimal for bulk operations (sort by CPU touches only the =cpu_percent=
+  slice, tree-building touches only =ppid=)
+- AoS is optimal for per-item access (rendering reads all fields of each
+  visible row sequentially)
+- The =materializeRenderRows()= function is the layout boundary between these
+  two worlds
+
+*Ownership:* The =render_rows= backing array is allocated from GPA via
+=ArrayListUnmanaged=. The =name= and =path= slices within each =RenderRow=
+point into the batch arena (same cross-allocator pattern as =ProcCold=).
+
+*Consumers:*
+| Module      | Fields Used                              | Purpose                |
+|-------------+------------------------------------------+------------------------|
+| render.zig  | All display fields (pid, cpu, mem, name, path, depth, has_children, is_expanded) | Drawing rows |
+| event.zig   | pid                                      | Kill signal target     |
+| state.zig   | len, has_children, data_idx, pid         | Bounds, expansion, identity |
+
+The =data_idx= field preserves the internal array index so that mutation
+operations (expand/collapse) can still map back to the Store's internal
+structures without requiring render.zig to know about SoA layout.
+
+*** SortContext
+
+#+BEGIN_SRC zig
+pub const SortContext = struct {
+    pids: []const pid_t,
+    cpu_percents: []const f32,
+    mem_rsss: []const u64,
+    cold_items: []const ProcCold,
+    sort_column: SortColumn,
+    sort_direction: SortDirection,
+};
+#+END_SRC
+
+Passed to comparison functions. Holds *slices into the SoA arrays* so the sorter
+can access any field without owning the store.
+
+** procs/tree.zig — Adjacency (Compressed Sparse Row)
+
+#+BEGIN_SRC zig
+pub const Adjacency = struct {
+    offsets: std.ArrayListUnmanaged(u32) = .empty,  // length = N + 1
+    flat: std.ArrayListUnmanaged(u32) = .empty,     // concatenated child indices
+
+    pub fn childrenOf(self: *const Adjacency, idx: usize) []const u32 {
+        const start: usize = @intCast(self.offsets.items[idx]);
+        const end: usize   = @intCast(self.offsets.items[idx + 1]);
+        return self.flat.items[start..end];
+    }
+};
+#+END_SRC
+
+The parent→child relationship is stored in *Compressed Sparse Row (CSR)* format.
+For N processes, =offsets= has N+1 entries and =flat= contains all child indices
+concatenated.
+
+Example with 5 processes:
+
+#+BEGIN_SRC
+Process indices:  [0, 1, 2, 3, 4]
+Children:
+  0 → [1, 2]
+  1 → [3]
+  2 → []
+  3 → [4]
+  4 → []
+
+offsets: [0, 2, 3, 3, 4, 4]
+flat:    [1, 2, 3, 4]
+
+childrenOf(0) → flat[0..2] → [1, 2]
+childrenOf(1) → flat[2..3] → [3]
+childrenOf(2) → flat[3..3] → []
+childrenOf(3) → flat[3..4] → [4]
+childrenOf(4) → flat[4..4] → []
+#+END_SRC
+
+This representation uses O(N) memory and provides O(1) child lookup, far more
+efficient than a hash map of ArrayLists for tree traversal.
+
+** thread/channel.zig — Batch
+
+#+BEGIN_SRC zig
+pub const Batch = struct {
+    arena: std.heap.ArenaAllocator,
+    map: std.AutoHashMap(platform.pid_t, platform.Proc),
+    timestamp_ns: i128 = 0,
+
+    pub fn deinit(self: *Batch) void {
+        self.arena.deinit();
+    }
+};
+
+pub const BatchQueue = spsc.SpscQueue(Batch, false);
+#+END_SRC
+
+A =Batch= is a self-contained snapshot of all running processes at a point in
+time. The =arena= owns all memory used by the =map= (including its internal hash
+table storage). On =deinit=, only =arena.deinit()= is called — =map.deinit()= is
+intentionally *not called* because the map's backing storage lives inside the
+arena. Calling it would attempt to free through a stale allocator pointer.
+
+** state.zig — AppState
+
+#+BEGIN_SRC zig
+pub const AppState = struct {
+    running: bool = true,
+    terminal: ?*zigtui.Terminal = null,
+    gpa: std.mem.Allocator,
+
+    // UI state
+    selected_item: usize = 0,
+    scroll_offset: usize = 0,
+    active_toast: ?Toast = null,
+    mode: keymap.Mode = .normal,
+
+    // Search
+    search_buf: [256]u8 = [_]u8{0} ** 256,
+    search_len: usize = 0,
+
+    // Process data
+    procs: procs.Store,
+};
+#+END_SRC
+
+The central application state. Owns the =Store= and manages all UI-level
+concerns (selection, scroll, mode, search buffer, toast notifications). The
+search buffer is a fixed 256-byte array — no allocation needed for search input.
+
+** state.zig — Toast
+
+#+BEGIN_SRC zig
+pub const Toast = struct {
+    message_buf: [128]u8 = [_]u8{0} ** 128,
+    message_len: usize = 0,
+    level: ToastLevel = .info,
+    expired_at: i64 = 0,
+};
+#+END_SRC
+
+Overlay notification shown for errors (e.g., kill failed) or info messages.
+Displayed centered on screen and dismissed by any keypress or timeout.
+
+* Program Flow
+
+** Startup Sequence (main.zig)
+
+#+BEGIN_SRC zig
+pub fn main() !void {
+    // 1. Create allocator
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const gpa_alloc = gpa.allocator();
+
+    // 2. Initialize terminal backend
+    var backend = try tui.backend.AnsiBackend.init(gpa_alloc);
+    var terminal = try tui.terminal.Terminal.init(gpa_alloc, backend.interface());
+    try terminal.hideCursor();
+
+    // 3. Create application state and batch queue
+    var app = state.AppState.init(gpa_alloc);
+    var queue = try channel.initQueue(gpa_alloc);
+
+    // 4. Thread synchronization
+    var mutex: std.Thread.Mutex = .{};
+    var condition: std.Thread.Condition = .{};
+    var thread_running = std.atomic.Value(bool).init(true);
+
+    // 5. Spawn producer thread
+    const handle = try std.Thread.spawn(.{}, producer.run, .{thread_args});
+
+    // 6. Enter main event loop
+    while (app.running) { ... }
+
+    // 7. Signal producer to stop, join thread
+    thread_running.store(false, .release);
+    condition.signal();
+    handle.join();
+}
+#+END_SRC
+
+** Main Event Loop
+
+Each iteration of the main loop performs three steps:
+
+#+BEGIN_SRC
+┌──────────────────────────────────────┐
+│          Main Event Loop             │
+│                                      │
+│  1. Check queue for new batch        │
+│     ├─ queue.front() → batch_ptr     │
+│     ├─ queue.pop()                   │
+│     └─ app.receive_batch(batch)      │
+│         └─ Store.buildPipeline()     │
+│             ├─ populateView()        │
+│             ├─ buildAdjacency()      │
+│             ├─ sortChildren()        │
+│             └─ rebuildVisible()      │
+│                                      │
+│  2. Poll keyboard input (100ms)      │
+│     └─ event.handleEvent(app, e)     │
+│         └─ executeAction(app, act)   │
+│                                      │
+│  3. Render frame                     │
+│     └─ terminal.draw(ctx, render)    │
+│         ├─ Header row                │
+│         ├─ Process tree rows         │
+│         ├─ Footer / help bar         │
+│         └─ Toast overlay (if any)    │
+└──────────────────────────────────────┘
+#+END_SRC
+
+** Producer Thread (thread/producer.zig)
+
+#+BEGIN_SRC zig
+pub fn run(args: ThreadArgs) void {
+    while (args.running.load(.acquire)) {
+        fetchAndSend(args.queue, args.running) catch |err| {
+            std.debug.print("Producer Error: {}\n", .{err});
+        };
+        // Sleep 3 seconds (interruptible via condition variable)
+        args.condition.timedWait(args.mutex, poll_interval_ns);
+    }
+}
+
+fn fetchAndSend(queue: *channel.BatchQueue, running: ...) !void {
+    var batch_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    const arena_alloc = batch_arena.allocator();
+    const map = try platform.collectSnapshot(arena_alloc);
+    const timestamp = std.time.nanoTimestamp();
+
+    var batch = channel.Batch{
+        .arena = batch_arena,  // ownership moves into batch
+        .map = map,
+        .timestamp_ns = timestamp,
+    };
+
+    // Push with exponential backoff
+    var backoff_ns: u64 = 100_000;
+    while (!queue.tryPush(batch)) {
+        if (!running.load(.acquire)) { batch.deinit(); return; }
+        std.Thread.sleep(backoff_ns);
+        backoff_ns = @min(backoff_ns * 2, 10 * std.time.ns_per_ms);
+    }
+}
+#+END_SRC
+
+The producer:
+1. Allocates a fresh =ArenaAllocator= backed by =page_allocator=
+2. Calls =platform.collectSnapshot()= to enumerate all processes
+3. Wraps the result in a =Batch= (arena ownership transfers to the batch)
+4. Pushes the batch onto the SPSC queue with exponential backoff
+5. Sleeps for 3 seconds (interruptible for clean shutdown)
+
+** Data Pipeline (procs/store.zig)
+
+When a new batch arrives, =buildPipeline= runs:
+
+#+BEGIN_SRC
+buildPipeline(search)
+  │
+  ├─ populateView()
+  │   ├─ Clear hot[] and cold[]
+  │   ├─ For each process in current_batch.map:
+  │   │   ├─ Calculate CPU delta:
+  │   │   │   cpu% = (new_total - old_total) / time_delta × 100
+  │   │   ├─ Append to hot[]: { pid, start_time, cpu%, mem_rss }
+  │   │   └─ Append to cold[]: { name, path, ppid, name_lower, path_lower }
+  │   └─ Free previous_batch arena
+  │
+  ├─ buildPidIndexMap(hot.items(.pid))
+  │   └─ HashMap: pid → array index
+  │
+  ├─ buildAdjacency(cold, pid_to_index, N)
+  │   ├─ Count children per parent
+  │   ├─ Compute cumulative offsets
+  │   └─ Fill flat[] with child indices
+  │
+  ├─ sortChildren(adjacency, sort_context)
+  │   └─ Sort each parent's children slice in flat[]
+  │
+  ├─ rebuildVisible(search)
+  │   └─ buildVisibleNodes(hot, cold, adj, expanded_pids, search)
+  │       ├─ Find roots (processes with no parent in the set)
+  │       ├─ If searching: mark matching nodes + ancestors
+  │       └─ DFS traversal → VisibleNode[]
+  │
+  └─ materializeRenderRows()                    ← SHAPES layout boundary
+      ├─ Clear render_rows, ensureTotalCapacity
+      ├─ For each VisibleNode:
+      │   └─ Flatten hot[data_idx] + cold[data_idx] + tree info → RenderRow
+      └─ Output: render_rows[] (AoS, contiguous, render-ready)
+#+END_SRC
+
+The =materializeRenderRows()= step is the *SHAPES layout boundary*. Everything
+above operates in SoA layout (MultiArrayList, separate cold ArrayList).
+Everything below (render, event, state UI logic) operates in AoS layout
+(=RenderRow[]=). This decouples the renderer from the internal data layout —
+changing the hot/cold split requires updating only =materializeRenderRows()=,
+not =render.zig=.
+
+** CPU Percentage Calculation
+
+CPU usage is computed as a delta between consecutive snapshots:
+
+#+BEGIN_SRC zig
+// In populateView():
+const prev_cpu = previous_batch.map.get(pid).total_user + total_system;
+const curr_cpu = current_batch.map.get(pid).total_user + total_system;
+const cpu_delta = curr_cpu - prev_cpu;
+const time_delta = current_batch.timestamp_ns - previous_batch.timestamp_ns;
+const cpu_percent = @as(f32, @floatFromInt(cpu_delta)) /
+                    @as(f32, @floatFromInt(time_delta)) * 100.0;
+#+END_SRC
+
+This gives per-process CPU usage as a percentage of *one core*. A process using
+two cores fully would show 200%.
+
+* Event Handling
+
+=handleEvent= dispatches on the event type: key events are routed to
+mode-specific handlers, and =.resize= events trigger a terminal resize via
+=terminal.resize()=. All other event types are ignored.
+
+** Input Modes
+
+The application has three input modes:
+
+| Mode          | Description                                    |
+|---------------+------------------------------------------------|
+| =.normal=     | Full navigation, sorting, kill, search start   |
+| =.search_edit= | Characters typed into search buffer, live filter |
+| =.search_view= | Navigation with frozen search results          |
+
+** Key Bindings (Normal Mode)
+
+| Key       | Action              | Description                     |
+|-----------+---------------------+---------------------------------|
+| =?=       | =show_help=         | Show help overlay               |
+| =j= / ↓  | =move_down=         | Move selection down             |
+| =k= / ↑  | =move_up=           | Move selection up               |
+| =d=       | =page_down=         | Move down 5 rows               |
+| =u=       | =page_up=           | Move up 5 rows                 |
+| =g=       | =jump_top=          | Jump to first row              |
+| =G=       | =jump_bottom=       | Jump to last row               |
+| =q= / Esc | =quit=             | Exit application               |
+| =/=       | =start_search=      | Enter search edit mode         |
+| =c=       | =clear_search=      | Clear search and return to normal |
+| =x=       | =kill_term=         | Send SIGTERM to selected process |
+| =X=       | =kill_force=        | Send SIGKILL to selected process |
+| =P=       | =sort_by_pid=       | Sort by PID                    |
+| =N=       | =sort_by_name=      | Sort by name                   |
+| =C=       | =sort_by_cpu=       | Sort by CPU usage              |
+| =M=       | =sort_by_mem=       | Sort by memory usage           |
+| =Enter=   | =toggle_expand=     | Expand/collapse selected node  |
+| =*=       | =toggle_expand_all= | Expand/collapse all nodes      |
+
+** Key Bindings (Search Edit Mode)
+
+| Key        | Action                             |
+|------------+------------------------------------|
+| Printable  | Append character to search buffer  |
+| Backspace  | Delete last character              |
+| Esc        | Cancel search, return to normal    |
+| Enter      | Confirm search, enter search_view  |
+
+** Action Execution
+
+#+BEGIN_SRC zig
+fn executeAction(app: *state.AppState, action: keymap.Action) void {
+    switch (action) {
+        .show_help    => showHelp(app),
+        .move_up      => app.up(),
+        .move_down    => app.down(),
+        .page_up      => for (0..5) |_| app.up(),
+        .page_down    => for (0..5) |_| app.down(),
+        .jump_top     => app.jumpTop(),
+        .jump_bottom  => app.jumpBottom(),
+        .quit         => app.running = false,
+        .start_search => app.mode = .search_edit,
+        .clear_search => { app.search_len = 0; app.refreshFilter(); ... },
+        .kill_term    => killSelected(app, false),   // SIGTERM
+        .kill_force   => killSelected(app, true),    // SIGKILL
+        .sort_by_pid  => app.setSort(.pid),
+        .sort_by_name => app.setSort(.name),
+        .sort_by_cpu  => app.setSort(.cpu),
+        .sort_by_mem  => app.setSort(.mem),
+        .toggle_expand     => app.toggleSelectedExpansion(),
+        .toggle_expand_all => app.toggleExpandAll(),
+        .exit_search_view  => { app.search_len = 0; app.refreshFilter(); app.mode = .normal; },
+    }
+}
+#+END_SRC
+
+** Kill Flow
+
+#+BEGIN_SRC
+killSelected(app, force=false)
+  │
+  ├─ Bounds check: render_rows empty?
+  │   └─ Yes → showToast("No Process Selected", .err) → return
+  │
+  ├─ idx = min(selected_item, render_rows.len - 1)
+  ├─ pid = render_rows[idx].pid          ← direct AoS field access
+  │
+  ├─ platform.signal(pid, force)
+  │   └─ macOS: std.c.kill(pid, SIGTERM or SIGKILL)
+  │       ├─ EPERM  → PlatformError.PermissionDenied
+  │       ├─ ESRCH  → PlatformError.ProcessNotFound
+  │       └─ other  → PlatformError.Unexpected
+  │
+  ├─ On error → showToastFmt("Kill failed: {}", err, .err)
+  └─ On success → app.buildView() (rebuild to reflect changes)
+#+END_SRC
+
+* Rendering
+
+The render function wraps the entire terminal area in a =tui.widgets.Block=
+with a ="Processes"= title and cyan borders on all sides. The layout is computed
+within the inner area (inset by 1 cell on each side to account for the border).
+
+** Layout System (ui/layout.zig)
+
+The layout engine computes rectangles for UI regions using a flex-like model.
+
+Three sizing modes:
+
+| Mode      | Description                                        |
+|-----------+----------------------------------------------------|
+| =.fixed=  | Exact number of columns/rows                       |
+| =.grow=   | Proportional share of remaining space (by weight)  |
+| =.percent= | Percentage of container size                      |
+
+Top-level layout:
+
+#+BEGIN_SRC
+Column layout (full terminal height)
+┌──────────────────────────────────────┐
+│  Header row            [fixed: 1]    │
+├──────────────────────────────────────┤
+│                                      │
+│  Process list          [grow: 1]     │
+│  (fills remaining)                   │
+│                                      │
+├──────────────────────────────────────┤
+│  Footer bar            [fixed: 1]    │
+└──────────────────────────────────────┘
+#+END_SRC
+
+Process list columns:
+
+#+BEGIN_SRC
+Row layout (full terminal width)
+┌────────┬──────────────┬───────┬──────────┬─────────────────────┐
+│  PID   │  Name        │  CPU  │  MEM     │  Path               │
+│ fix: 8 │  grow: 1     │ fix:7 │  fix: 10 │  grow: 2            │
+└────────┴──────────────┴───────┴──────────┴─────────────────────┘
+#+END_SRC
+
+The =grow= weight determines how remaining space is distributed. Path gets twice
+as much space as Name because its weight is 2 vs 1.
+
+** Tree Prefix Rendering
+
+Each row in the process list is indented according to its =depth= and annotated
+with an expansion glyph:
+
+#+BEGIN_SRC
+Process list output:
+
+1234    launchd           0.0%    12.3 MB  /sbin/launchd
+  v     logd              0.1%     8.1 MB  /usr/libexec/logd
+    >   sub_process       0.0%     2.0 MB  /usr/libexec/sub
+  v     configd           0.0%     4.5 MB  /usr/libexec/configd
+
+Legend:
+  v  = expanded (has children, showing them)
+  >  = collapsed (has children, hiding them)
+     = leaf node (no children)
+  Indentation = 2 spaces per depth level
+#+END_SRC
+
+#+BEGIN_SRC zig
+fn renderTreePrefix(buf, x, y, row: model.RenderRow, style, max_width) u16 {
+    var prefix_buf: [64]u8 = undefined;
+    var pos: usize = 0;
+
+    // Indent: 2 spaces per depth level
+    var d: u16 = 0;
+    while (d < row.depth and pos + 2 < prefix_buf.len) : (d += 1) {
+        prefix_buf[pos]     = ' ';
+        prefix_buf[pos + 1] = ' ';
+        pos += 2;
+    }
+
+    // Expansion glyph
+    const glyph: u8 = if (row.has_children)
+        (if (row.is_expanded) 'v' else '>')
+    else ' ';
+    if (pos + 2 <= prefix_buf.len) {
+        prefix_buf[pos]     = glyph;
+        prefix_buf[pos + 1] = ' ';
+        pos += 2;
+    }
+
+    const width: u16 = @min(max_width, @as(u16, @intCast(pos)));
+    if (width > 0) {
+        buf.setString(x, y, prefix_buf[0..width], style);
+    }
+    return width;
+}
+#+END_SRC
+
+** Scroll Management
+
+The viewport follows the selection cursor:
+
+#+BEGIN_SRC zig
+const visible_rows = list_rect.height -| 1;  // subtract header
+if (app.selected_item >= app.scroll_offset + visible_rows) {
+    app.scroll_offset = app.selected_item - visible_rows + 1;
+}
+if (app.selected_item < app.scroll_offset) {
+    app.scroll_offset = app.selected_item;
+}
+#+END_SRC
+
+The =-|= operator is Zig's saturating subtraction (clamps to 0 instead of wrapping).
+
+* Platform Layer
+
+** Compile-Time Dispatch
+
+#+BEGIN_SRC zig
+// platform/platform.zig
+pub const backend = switch (builtin.os.tag) {
+    .macos   => @import("macos.zig"),
+    .linux   => @import("linux.zig"),
+    .windows => @import("windows.zig"),
+    else     => @compileError("Unsupported platform"),
+};
+
+pub fn collectSnapshot(arena: std.mem.Allocator) PlatformError!... {
+    return backend.collectSnapshot(arena);
+}
+#+END_SRC
+
+The =backend= is resolved at compile time. Only the selected platform's code is
+included in the binary. Linux and Windows are stubs that return =.Unsupported=.
+
+** macOS Implementation (platform/macos.zig)
+
+Process enumeration uses three =libproc= C API calls:
+
+#+BEGIN_SRC
+collectSnapshot(arena_allocator)
+  │
+  ├─ proc_listpids(PROC_ALL_PIDS)
+  │   ├─ First call: get required buffer size (bytes)
+  │   └─ Second call: fill PID array
+  │
+  ├─ For each PID (skip PID 0):
+  │   ├─ proc_pidinfo(PROC_PIDTBSDINFO) → proc_bsdinfo
+  │   │   ├─ pbi_name     → process name
+  │   │   ├─ pbi_ppid     → parent PID
+  │   │   └─ pbi_start_*  → start timestamp
+  │   │
+  │   ├─ proc_pidinfo(PROC_PIDTASKINFO) → proc_taskinfo
+  │   │   ├─ pti_total_user   → user CPU time (ns)
+  │   │   ├─ pti_total_system → system CPU time (ns)
+  │   │   └─ pti_resident_size → RSS memory (bytes)
+  │   │
+  │   └─ proc_pidpath() → binary path string
+  │
+  └─ Return HashMap(pid → Proc)
+#+END_SRC
+
+Error handling is per-process: if any =proc_pidinfo= call fails (process died
+mid-enumeration, permission denied), that process is silently skipped.
+
+** Capabilities
+
+#+BEGIN_SRC zig
+pub const Capabilities = packed struct {
+    can_signal: bool = false,
+    has_cpu_time: bool = false,
+    has_memory_info: bool = false,
+    has_io_stats: bool = false,
+    has_start_time: bool = false,
+};
+#+END_SRC
+
+macOS reports all capabilities as =true=. This struct exists for future
+cross-platform feature gating.
+
+* Allocations and Object Ownership
+
+This section is the definitive guide to every allocation in the system: who
+creates it, who owns it, who is responsible for freeing it, and the exact
+lifecycle of every object.
+
+** Allocator Inventory
+
+| Allocator             | Backing             | Lifetime         | Created In        | Freed In                     |
+|-----------------------+---------------------+------------------+-------------------+------------------------------|
+| =gpa= (GPA)          | System default      | Process lifetime | =main.zig:14=     | =main.zig:15= (deferred)    |
+| =batch.arena=        | =page_allocator=    | Batch lifetime   | =producer.zig:35= | =Store.receiveBatch()=       |
+| =scratch= (gpa ref)  | Same as GPA         | Per-frame        | =main.zig:66=     | =CalculatedLayout.deinit()=  |
+
+** Full Ownership Graph
+
+#+BEGIN_SRC
+ ┌─────────────────────────────────────────────────────────────────────┐
+ │                    GPA (GeneralPurposeAllocator)                    │
+ │                       Lifetime: entire process                     │
+ │                       Created: main.zig:14                         │
+ │                       Freed: main.zig:15 (deferred)                │
+ │                                                                     │
+ │  Owns:                                                              │
+ │  ├── AppState (main.zig:27, freed via app.deinit at main.zig:29)   │
+ │  │    ├── search_buf [256]u8 (INLINE, no heap alloc)               │
+ │  │    ├── Toast message_buf [128]u8 (INLINE, no heap alloc)        │
+ │  │    │                                                             │
+ │  │    └── Store (procs/store.zig)                                  │
+ │  │         ├── hot: ProcHotList (MultiArrayList — SoA)             │
+ │  │         │    ├── .pid array        [GPA]                        │
+ │  │         │    ├── .start_time_ns array [GPA]                     │
+ │  │         │    ├── .cpu_percent array [GPA]                       │
+ │  │         │    └── .mem_rss array    [GPA]                        │
+ │  │         │    Freed: hot.deinit(gpa) in Store.deinit()           │
+ │  │         │                                                       │
+ │  │         ├── cold: ArrayList(ProcCold)                           │
+ │  │         │    ├── Backing array of ProcCold structs [GPA]        │
+ │  │         │    │                                                   │
+ │  │         │    └── ⚠ CROSS-ALLOCATOR REFERENCES:                  │
+ │  │         │        ProcCold.name ──────► batch.arena              │
+ │  │         │        ProcCold.path ──────► batch.arena              │
+ │  │         │        ProcCold.name_lower ► batch.arena              │
+ │  │         │        ProcCold.path_lower ► batch.arena              │
+ │  │         │    Freed: cold.deinit(gpa) in Store.deinit()          │
+ │  │         │                                                       │
+ │  │         ├── visible_nodes: ArrayListUnmanaged(VisibleNode)      │
+ │  │         │    Backing array [batch.arena — rebuilt each cycle]    │
+ │  │         │    NOT freed by Store.deinit() (arena owns it)        │
+ │  │         │                                                       │
+ │  │         ├── adjacency: Adjacency                                │
+ │  │         │    ├── offsets array [batch.arena]                    │
+ │  │         │    └── flat array   [batch.arena]                     │
+ │  │         │    NOT freed by Store.deinit() (arena owns it)        │
+ │  │         │                                                       │
+ │  │         ├── pid_to_index: AutoHashMap(pid_t, u32)               │
+ │  │         │    Hash table internals [batch.arena]                 │
+ │  │         │    NOT freed by Store.deinit() (arena owns it)        │
+ │  │         │                                                       │
+ │  │         ├── render_rows: ArrayListUnmanaged(RenderRow)           │
+ │  │         │    Backing array [GPA]                                │
+ │  │         │    Rebuilt every pipeline pass (materializeRenderRows) │
+ │  │         │    ⚠ CROSS-ALLOCATOR REFERENCES:                      │
+ │  │         │        RenderRow.name ──────► batch.arena              │
+ │  │         │        RenderRow.path ──────► batch.arena              │
+ │  │         │    Freed: render_rows.deinit(gpa) in Store.deinit()   │
+ │  │         │                                                       │
+ │  │         ├── expanded_pids: AutoHashMap(ProcIdentity, void)      │
+ │  │         │    Hash table internals [GPA]                         │
+ │  │         │    PERSISTS across view rebuilds                      │
+ │  │         │    Freed: expanded_pids.deinit() in Store.deinit()    │
+ │  │         │                                                       │
+ │  │         ├── current_batch: ?Batch                               │
+ │  │         │    Owns its own ArenaAllocator (see below)            │
+ │  │         │    Freed: batch.deinit() in Store.deinit()            │
+ │  │         │                                                       │
+ │  │         └── previous_batch: ?Batch                              │
+ │  │              Freed: batch.deinit() in Store.receiveBatch()      │
+ │  │              or Store.deinit()                                   │
+ │  │                                                                  │
+ │  ├── BatchQueue (channel.zig, SPSC ring buffer, capacity 4)        │
+ │  │    Ring buffer backing array [GPA]                              │
+ │  │    Freed: queue.deinit() at main.zig:31 (deferred)              │
+ │  │                                                                  │
+ │  ├── Terminal (zigtui internals)                                   │
+ │  │    Double-buffered render buffers [GPA]                         │
+ │  │    Freed: terminal.deinit() at main.zig:23 (deferred)           │
+ │  │                                                                  │
+ │  └── AnsiBackend (zigtui internals)                                │
+ │       Freed: backend.deinit() at main.zig:19 (deferred)            │
+ └─────────────────────────────────────────────────────────────────────┘
+#+END_SRC
+
+** Batch Arena — Internal Structure
+
+Each batch is self-contained with its own arena:
+
+#+BEGIN_SRC
+ ┌─────────────────────────────────────────────────────────────────────┐
+ │              Batch Arena (ArenaAllocator)                           │
+ │              Backing: page_allocator                               │
+ │              Created: producer.zig:35 (one per 3-second cycle)     │
+ │              Freed: Store.receiveBatch() or Store.deinit()         │
+ │                                                                     │
+ │  Direct allocations (made by producer):                             │
+ │  ├── AutoHashMap(pid_t, Proc) internals                            │
+ │  │    ├── keys array: pid_t[]                                      │
+ │  │    ├── values array: Proc[]                                     │
+ │  │    │    Each Proc contains:                                     │
+ │  │    │    ├── s_name: [256:0]u8 (INLINE in Proc struct)           │
+ │  │    │    └── path: [4096]u8   (INLINE in Proc struct)            │
+ │  │    └── metadata array: []u8                                     │
+ │  │                                                                  │
+ │  ├── PID enumeration buffer: pid_t[] (allocated then freed inline) │
+ │  │    ⮑ arena.free(pids) at macos.zig:28 — reusable by arena      │
+ │  │                                                                  │
+ │  Derived allocations (made by main thread during buildPipeline):   │
+ │  ├── pid_to_index HashMap internals                                │
+ │  │    ├── keys: pid_t[]                                            │
+ │  │    ├── values: u32[]                                            │
+ │  │    └── metadata: []u8                                           │
+ │  │                                                                  │
+ │  ├── Adjacency CSR arrays                                          │
+ │  │    ├── offsets: u32[N+1]                                        │
+ │  │    ├── flat: u32[total_children]                                │
+ │  │    ├── child_counts: u32[N] (temporary)                        │
+ │  │    └── write_cursor: u32[N] (temporary)                        │
+ │  │                                                                  │
+ │  ├── visible_nodes: VisibleNode[] backing array                    │
+ │  │                                                                  │
+ │  ├── Lowercase string copies (for search):                         │
+ │  │    ├── name_lower: u8[] per process                             │
+ │  │    └── path_lower: u8[] per process                             │
+ │  │                                                                  │
+ │  └── Search working memory (when searching):                       │
+ │       ├── matches_arr: bool[N]                                     │
+ │       ├── subtree_flags: bool[N]                                   │
+ │       ├── walk stack: WalkItem[]                                   │
+ │       ├── roots: u32[]                                             │
+ │       └── DFS stack: StackItem[]                                   │
+ │                                                                     │
+ │  ⚠  CRITICAL: map.deinit() is NOT called.                         │
+ │  The map's internal storage lives in the arena. The Allocator      │
+ │  interface captured a pointer to batch_arena on the producer's     │
+ │  stack. After the batch is pushed to the queue, that stack frame   │
+ │  is gone. Calling map.deinit() would dereference a dangling        │
+ │  pointer. Only arena.deinit() is safe — it frees all pages at once.│
+ └─────────────────────────────────────────────────────────────────────┘
+#+END_SRC
+
+** Object Lifecycle Timeline
+
+This timeline shows the lifecycle of every major object across the two threads:
+
+#+BEGIN_SRC
+Time ──────────────────────────────────────────────────────────────────────────►
+
+PRODUCER THREAD
+═══════════════
+
+Cycle 1                      Cycle 2                      Cycle 3
+┌─────────┐                  ┌─────────┐                  ┌─────────┐
+│ arena_1  │                  │ arena_2  │                  │ arena_3  │
+│ BORN     │                  │ BORN     │                  │ BORN     │
+│ map_1    │                  │ map_2    │                  │ map_3    │
+│ ▼ push   │                  │ ▼ push   │                  │ ▼ push   │
+└────┬─────┘                  └────┬─────┘                  └────┬─────┘
+     │                             │                             │
+─────┼── SPSC Queue ──────────────┼─────────────────────────────┼────────
+     │                             │                             │
+MAIN THREAD                        │                             │
+═══════════                        │                             │
+     │                             │                             │
+     ▼                             │                             │
+┌─ pop batch_1 ─┐                  │                             │
+│                │                  │                             │
+│ receiveBatch:  │                  ▼                             │
+│  prev = null   │          ┌─ pop batch_2 ─┐                    │
+│  curr = batch_1│          │                │                    │
+│                │          │ receiveBatch:  │                    │
+│ buildPipeline: │          │  prev.deinit() │ ← arena_1 FREED   │
+│  populate hot  │          │    = batch_1   │                    │
+│  populate cold │          │  prev = curr   │                    │
+│  build adj     │          │  curr = batch_2│                    ▼
+│  sort children │          │                │          ┌─ pop batch_3 ─┐
+│  build visible │          │ buildPipeline: │          │                │
+│                │          │  populate hot  │          │ receiveBatch:  │
+│ render frame   │          │  populate cold │          │  prev.deinit() │ ← arena_2 FREED
+│  (reads        │          │  build adj     │          │    = batch_2   │
+│   render_rows) │          │  sort children │          │  prev = curr   │
+└────────────────┘          │  build visible │          │  curr = batch_3│
+                            │                │          │                │
+                            │ render frame   │          │ ...            │
+                            └────────────────┘          └────────────────┘
+#+END_SRC
+
+** Batch Ownership Transfer (Detailed)
+
+#+BEGIN_SRC
+PRODUCER THREAD                            MAIN THREAD
+──────────────                             ───────────
+
+1. var batch_arena = ArenaAllocator
+     .init(page_allocator)
+   ↳ Arena lives on producer's stack frame
+
+2. const arena_alloc = batch_arena
+     .allocator()
+   ↳ Allocator captures &batch_arena pointer
+
+3. const map = platform.collectSnapshot
+     (arena_alloc)
+   ↳ HashMap allocated FROM arena
+   ↳ Each Proc struct lives INSIDE HashMap
+
+4. var batch = Batch{
+     .arena = batch_arena,  ← VALUE COPY
+     .map = map,            ← VALUE COPY
+     .timestamp_ns = ...,
+   };
+   ↳ Arena's internal state is now inside batch
+   ↳ Producer's stack variable is consumed
+
+5. queue.tryPush(batch)
+   ↳ Batch VALUE COPIED into queue slot
+   ↳ Arena state now lives in queue memory
+   ╔══════════════════════════════════════╗
+   ║  OWNERSHIP TRANSFERRED TO QUEUE     ║
+   ║  Producer must NOT touch batch      ║
+   ╚══════════════════════════════════════╝
+
+                                          6. queue.front() → batch_ptr
+                                             ↳ Peek at front of queue
+
+                                          7. const batch = batch_ptr.*
+                                             ↳ VALUE COPY out of queue
+
+                                          8. queue.pop()
+                                             ↳ Slot freed in ring buffer
+
+                                          9. Store.receiveBatch(batch)
+                                             ├─ previous_batch.deinit()
+                                             │   └─ arena.deinit()
+                                             │       ↳ Returns ALL pages
+                                             │         to page_allocator
+                                             ├─ previous = current
+                                             └─ current = new batch
+                                             ╔══════════════════════════╗
+                                             ║  MAIN THREAD NOW OWNS   ║
+                                             ║  batch.arena             ║
+                                             ╚══════════════════════════╝
+#+END_SRC
+
+** Cross-Allocator Reference Map
+
+The most subtle aspect of ownership is that =ProcCold= structs (owned by GPA
+via =ArrayList=) and =RenderRow= structs (owned by GPA via
+=ArrayListUnmanaged=) contain string slices pointing into batch arena memory:
+
+#+BEGIN_SRC
+GPA-owned memory                          Batch Arena memory
+──────────────                            ──────────────────
+
+cold ArrayList backing:                   batch.map values:
+┌─────────────────────┐                   ┌──────────────────────────┐
+│ ProcCold[0]         │                   │ Proc { pid=1            │
+│  .name ─────────────┼──────────────────►│   s_name = "launchd\0..." │
+│  .path ─────────────┼──────────────────►│   path = "/sbin/launch.."│
+│  .ppid = 0          │                   │   ... }                  │
+│  .name_lower ───────┼──────►            └──────────────────────────┘
+│  .path_lower ───────┼──────►            ┌──────────────────────────┐
+└─────────────────────┘       └──────────►│ lowercase copies         │
+┌─────────────────────┐                   │ "launchd"                │
+│ ProcCold[1]         │                   │ "/sbin/launchd"          │
+│  .name ─────────────┼───────────►       └──────────────────────────┘
+│  ...                │                   ┌──────────────────────────┐
+└─────────────────────┘                   │ Proc { pid=123 ...}     │
+                                          └──────────────────────────┘
+
+render_rows ArrayList backing:            Same batch arena memory:
+┌─────────────────────┐                   ┌──────────────────────────┐
+│ RenderRow[0]        │                   │ (same Proc values above) │
+│  .name ─────────────┼──────────────────►│   s_name = "launchd\0..." │
+│  .path ─────────────┼──────────────────►│   path = "/sbin/launch.."│
+│  .pid = 1           │                   └──────────────────────────┘
+│  .cpu_percent = 0.0 │
+│  .depth = 0         │  ← AoS: all fields inline
+│  .data_idx = 0      │  ← back-pointer to SoA index
+└─────────────────────┘
+
+SAFETY INVARIANT:
+  populateView() ALWAYS rebuilds cold[] from the NEW batch
+  BEFORE the old batch's arena is freed.
+  materializeRenderRows() ALWAYS rebuilds render_rows[] from
+  the current hot/cold/visible_nodes WITHIN the same pipeline pass.
+
+  Order of operations in buildPipeline():
+    1. hot.shrinkRetainingCapacity(0)    ← clear hot (GPA)
+    2. cold.clearRetainingCapacity()     ← clear cold (GPA)
+    3. iterate current_batch.map         ← read from NEW arena
+    4. cold.append(ProcCold{             ← write new slices
+         .name = sliceTo(proc.s_name)   ← points into NEW arena
+       })
+    5. rebuildVisible() → materializeRenderRows()
+       render_rows[i].name = cold[data_idx].name ← still NEW arena
+
+  The PREVIOUS arena is freed in receiveBatch() which runs
+  BEFORE buildPipeline(). At that point, cold[] and render_rows[]
+  are populated with pointers into current_batch (which was the
+  previous one). But buildPipeline() clears cold[] and rebuilds
+  render_rows[] before reading any of those stale pointers.
+#+END_SRC
+
+** Hot Data (MultiArrayList) Memory Layout
+
+=ProcHotList= uses =std.MultiArrayList= which stores fields in separate arrays
+(struct-of-arrays layout):
+
+#+BEGIN_SRC
+Traditional Array of Structs (AoS):
+┌───────────────────────────────────────┐
+│ pid₀ time₀ cpu₀ mem₀ │ pid₁ time₁ cpu₁ mem₁ │ ...
+└───────────────────────────────────────┘
+  Cache line touches ALL fields even when sorting by CPU only
+
+MultiArrayList Struct of Arrays (SoA):
+┌──────────────────┐
+│ pid₀ pid₁ pid₂ pid₃ ... │  ← pid slice
+├──────────────────┤
+│ time₀ time₁ time₂ ...   │  ← start_time_ns slice
+├──────────────────┤
+│ cpu₀ cpu₁ cpu₂ cpu₃ ... │  ← cpu_percent slice (4 bytes each)
+├──────────────────┤
+│ mem₀ mem₁ mem₂ mem₃ ... │  ← mem_rss slice
+└──────────────────┘
+
+Access patterns:
+  hot.items(.cpu_percent)  → returns []f32 (contiguous in memory)
+  hot.items(.pid)          → returns []pid_t (contiguous in memory)
+
+When sorting by CPU: only the cpu_percent slice and pid slice are
+touched. The start_time_ns and mem_rss slices stay cold in cache.
+#+END_SRC
+
+All four backing arrays are allocated from GPA in a single allocation managed by
+=MultiArrayList=. They grow together via =ensureTotalCapacity=.
+
+** Allocation-Free Paths
+
+Several components avoid heap allocation entirely using fixed-size inline buffers:
+
+| Component          | Strategy                                | Buffer          | Location         |
+|--------------------+-----------------------------------------+-----------------+------------------|
+| Search buffer      | Fixed inline array in AppState          | =[256]u8=       | state.zig:31     |
+| Toast message      | Fixed inline array in Toast             | =[128]u8=       | state.zig:13     |
+| Proc name (raw)    | Fixed inline array in Proc              | =[256:0]u8=     | model.zig:27     |
+| Proc path (raw)    | Fixed inline array in Proc              | =[4096]u8=      | model.zig:28     |
+| Render PID string  | Stack buffer in render function         | =[8]u8=         | render.zig:123   |
+| Render CPU string  | Stack buffer in render function         | =[7]u8=         | render.zig:125   |
+| Render MEM string  | Stack buffer in render function         | =[10]u8=        | render.zig:128   |
+| Tree prefix        | Stack buffer in renderTreePrefix        | =[64]u8=        | render.zig:170   |
+| Help bar           | Stack buffer in renderHelpBar           | =[512]u8=       | render.zig:195   |
+| Search input line  | Stack buffer in renderSearchInput       | =[512]u8=       | render.zig:216   |
+| Toast message line | Stack buffer in renderToast             | =[136]u8=       | render.zig:272   |
+| Toast dismiss line | Stack buffer in renderToast             | =[136]u8=       | render.zig:277   |
+| Search lowercase   | Stack buffer in buildVisibleNodes       | =[256]u8=       | tree.zig:126     |
+
+** Per-Frame Allocation
+
+Each frame, the render function allocates a =CalculatedLayout= for the UI:
+
+#+BEGIN_SRC
+Per-frame allocation flow (every ~100ms):
+
+  render(draw_ctx, buf)
+    │
+    ├─ layout.calculate(scratch, app_layout, area)
+    │   └─ CalculatedLayout {
+    │        rects: StringHashMap(Rect)  ← allocated from scratch (GPA)
+    │        3 entries: "header", "process_list", "footer_bar"
+    │      }
+    │   deferred → calculated.deinit()
+    │
+    ├─ layout.calculate(scratch, column_layout, list_rect)
+    │   └─ CalculatedLayout {
+    │        rects: StringHashMap(Rect)  ← allocated from scratch (GPA)
+    │        5 entries: "pid", "name", "cpu", "mem", "path"
+    │      }
+    │   deferred → columns.deinit()
+    │
+    ├─ (rendering: reads render_rows, writes to buf)
+    │   NO allocations during row rendering (all stack buffers)
+    │
+    └─ defers run: columns.deinit(), calculated.deinit()
+       └─ StringHashMap freed back to GPA
+#+END_SRC
+
+** Batch Arena Size Estimation
+
+For a system with N processes, each batch arena allocates approximately:
+
+#+BEGIN_SRC
+HashMap overhead:
+  keys:     N × sizeof(pid_t)           = N × 4 bytes
+  values:   N × sizeof(Proc)            = N × 4,600 bytes  (256 + 4096 + fields)
+  metadata: N × 1 byte                  = N bytes
+  ≈ N × 4,605 bytes
+
+PID enumeration buffer:
+  N × sizeof(pid_t)                     = N × 4 bytes
+  (freed inline, memory reused by arena)
+
+Derived structures (main thread):
+  pid_to_index HashMap: ~N × 12 bytes
+  Adjacency offsets:    (N+1) × 4 bytes
+  Adjacency flat:       (N-roots) × 4 bytes
+  child_counts:         N × 4 bytes
+  write_cursor:         N × 4 bytes
+  visible_nodes:        N × sizeof(VisibleNode) = N × 12 bytes
+  lowercase copies:     ~N × (avg_name + avg_path) bytes
+
+For 500 processes: ~2.5 MB per batch arena
+For 1000 processes: ~5 MB per batch arena
+
+At most 2 batches exist simultaneously (current + previous),
+so peak batch memory ≈ 10 MB for 1000 processes.
+#+END_SRC
+
+** Deallocation Sequence at Shutdown
+
+The deferred cleanup in =main()= runs in reverse declaration order:
+
+#+BEGIN_SRC
+main() exit path (Zig defers execute LIFO):
+
+  ┌─ defer #1: gpa.deinit()                [main.zig:15]
+  │    └─ Checks for leaks in debug mode
+  │       If all other defers ran: zero leaks expected
+  │
+  ├─ defer #2: backend.deinit()             [main.zig:19]
+  │    └─ Closes terminal file descriptors
+  │
+  ├─ defer #3: terminal.deinit()            [main.zig:23]
+  │    └─ Frees render buffers, restores terminal state
+  │
+  ├─ defer #4: app.deinit()                 [main.zig:29]
+  │    └─ Store.deinit()
+  │        ├─ expanded_pids.deinit()  [GPA freed]
+  │        ├─ hot.deinit(gpa)         [GPA freed]
+  │        ├─ cold.deinit(gpa)        [GPA freed]
+  │        ├─ current_batch.deinit()  [pages freed]
+  │        └─ previous_batch.deinit() [pages freed]
+  │
+  ├─ defer #5: queue.deinit()               [main.zig:31]
+  │    └─ Ring buffer freed [GPA freed]
+  │       Any un-popped batches: their arenas are NOT freed here!
+  │       (The queue stores Batch by value, but arena.deinit() is
+  │        not called on remaining items. This is a minor leak at
+  │        shutdown — acceptable since the process is exiting.)
+  │
+  ├─ defer #6: thread join block             [main.zig:46-50]
+  │    ├─ thread_running.store(false, .release)
+  │    ├─ condition.signal()  ← wakes producer from timedWait
+  │    └─ handle.join()       ← blocks until producer exits
+  │
+  └─ defer #7: terminal.showCursor()         [main.zig:51]
+       └─ Restores cursor visibility
+
+  Actual execution order (LIFO):
+    7 → 6 → 5 → 4 → 3 → 2 → 1
+    showCursor → join thread → free queue → free app →
+    free terminal → free backend → check leaks
+#+END_SRC
+
+** Summary: Who Frees What
+
+| Object                          | Allocated By       | Allocator      | Freed By                         |
+|---------------------------------+--------------------+----------------+----------------------------------|
+| GPA itself                      | main.zig:14        | system         | main.zig:15 (deferred)           |
+| AnsiBackend                     | main.zig:18        | GPA            | main.zig:19 (deferred)           |
+| Terminal                        | main.zig:22        | GPA            | main.zig:23 (deferred)           |
+| AppState.procs (Store)          | state.zig:38       | GPA            | state.zig:42 (app.deinit)        |
+| Store.hot backing arrays        | store.zig:101      | GPA            | store.zig:31 (hot.deinit)        |
+| Store.cold backing array        | store.zig:102      | GPA            | store.zig:32 (cold.deinit)       |
+| Store.render_rows backing       | store.zig:235      | GPA            | store.zig:33 (render_rows.deinit)|
+| Store.expanded_pids             | store.zig:25       | GPA            | store.zig:30 (expanded.deinit)   |
+| Store.current_batch arena       | producer.zig:35    | page_allocator | store.zig:34-36 (batch.deinit)   |
+| Store.previous_batch arena      | producer.zig:35    | page_allocator | store.zig:73-75 (receiveBatch)   |
+| BatchQueue ring buffer          | channel.zig:35     | GPA            | main.zig:31 (deferred)           |
+| pid_to_index HashMap            | tree.zig:21        | batch arena    | batch.arena.deinit()             |
+| Adjacency offsets/flat          | tree.zig:48,59     | batch arena    | batch.arena.deinit()             |
+| visible_nodes backing           | tree.zig:200       | batch arena    | batch.arena.deinit()             |
+| name_lower/path_lower copies    | store.zig:121,123  | batch arena    | batch.arena.deinit()             |
+| CalculatedLayout (per-frame)    | layout.zig:107     | GPA            | layout.zig:51 (deferred in render) |
+| setExpandedSubtree stack        | store.zig:202      | GPA            | store.zig:203 (deferred)         |
+| PID enum buffer (macos)         | macos.zig:27       | batch arena    | macos.zig:28 (freed immediately) |
+
+* Tree Building Algorithm
+
+The tree is built from a flat list of processes with parent pointers (=ppid=)
+into a visible tree of =VisibleNode= entries. This is the most complex algorithm
+in the codebase.
+
+** Step 1: Build PID Index Map
+
+#+BEGIN_SRC zig
+// tree.zig: buildPidIndexMap
+// Input: hot.items(.pid) → slice of all PIDs
+// Output: HashMap(pid → index into hot/cold arrays)
+fn buildPidIndexMap(pids: []const pid_t, arena: Allocator) !AutoHashMap {
+    for (pids, 0..) |pid, i| {
+        map.put(pid, @intCast(i));
+    }
+}
+#+END_SRC
+
+** Step 2: Build Adjacency (CSR)
+
+#+BEGIN_SRC zig
+// tree.zig: buildAdjacency
+// Input: cold items (for ppid), pid_to_index map, N processes
+// Output: Adjacency (offsets + flat arrays)
+
+// Phase 1: Count children per parent
+for (cold_items) |item| {
+    if (pid_to_index.get(item.ppid)) |parent_idx| {
+        count[parent_idx] += 1;
+    }
+}
+
+// Phase 2: Prefix sum → offsets
+offsets[0] = 0;
+for (0..n) |i| {
+    offsets[i+1] = offsets[i] + count[i];
+}
+
+// Phase 3: Fill flat array
+for (cold_items, 0..) |item, child_idx| {
+    if (pid_to_index.get(item.ppid)) |parent_idx| {
+        flat[cursor[parent_idx]] = child_idx;
+        cursor[parent_idx] += 1;
+    }
+}
+#+END_SRC
+
+** Step 3: Sort Children
+
+Each parent's children slice in =flat[]= is sorted using the active sort column
+and direction. This ensures the tree displays children in the user's preferred
+order.
+
+** Step 4: Build Visible Nodes (DFS)
+
+#+BEGIN_SRC
+buildVisibleNodes(hot, cold, adj, expanded_pids, search)
+  │
+  ├─ Find roots: processes whose ppid is not in pid_to_index
+  │   (i.e., their parent is not in the current snapshot)
+  │
+  ├─ If search is active:
+  │   ├─ For each process, check if name_lower or path_lower
+  │   │   contains the search string (case-insensitive)
+  │   ├─ Mark matching processes
+  │   ├─ Walk ancestors up to root, marking them as "has match in subtree"
+  │   └─ These flags determine visibility during DFS
+  │
+  └─ DFS traversal from each root:
+      ├─ Push root onto stack with depth=0
+      └─ While stack is not empty:
+          ├─ Pop node
+          ├─ If searching and node has no matches in subtree → skip
+          ├─ Append VisibleNode { data_idx, depth, has_children, is_last, is_expanded }
+          ├─ If expanded (or searching with matches in children):
+          │   └─ Push children in reverse order (so first child is processed first)
+          └─ Continue
+#+END_SRC
+
+* Sorting
+
+** Comparison Function
+
+#+BEGIN_SRC zig
+// sort.zig
+pub fn compareByIndex(ctx: SortContext, a: usize, b: usize) bool {
+    const order = switch (ctx.sort_column) {
+        .pid  => std.math.order(ctx.pids[a], ctx.pids[b]),
+        .cpu  => {
+            const cmp = std.math.order(ctx.cpu_percents[a], ctx.cpu_percents[b]);
+            if (cmp != .eq) return cmp;
+            return std.math.order(ctx.pids[a], ctx.pids[b]);  // tiebreaker
+        },
+        .mem  => { /* similar with tiebreaker */ },
+        .name => { /* string comparison with tiebreaker */ },
+        .path => { /* string comparison with tiebreaker */ },
+    };
+    return if (ctx.sort_direction == .asc) order == .lt else order == .gt;
+}
+#+END_SRC
+
+Sorting is *stable within siblings*: children of the same parent are sorted
+independently, preserving the tree hierarchy. The PID tiebreaker ensures
+deterministic ordering when primary sort values are equal.
+
+** Sort Triggers
+
+| Trigger                  | Rebuilds From |
+|--------------------------+---------------|
+| New batch received       | Full pipeline |
+| User changes sort column | sortAndRebuild (re-sort + rebuild visible) |
+| User changes search      | rebuildVisible only |
+
+* Search
+
+Search performs case-insensitive substring matching on process names and paths.
+
+#+BEGIN_SRC
+User types "/" → mode = .search_edit
+User types characters → appended to search_buf[0..search_len]
+  └─ Each keystroke calls refreshFilter()
+      └─ rebuildVisible(searchSlice())
+          └─ Filters tree: shows matching nodes + ancestors
+
+User presses Enter → mode = .search_view (frozen results, navigation only)
+User presses Esc → mode = .normal (search cleared or preserved)
+User presses "c" → search_len = 0, refreshFilter(), mode = .normal
+#+END_SRC
+
+The search is *live*: each character immediately rebuilds the visible tree. The
+lowercase copies (=name_lower=, =path_lower=) in =ProcCold= are pre-computed
+during =populateView()= so no allocation occurs during search filtering.
+
+* Threading Model
+
+#+BEGIN_SRC
+┌──────────────────┐         SPSC Queue          ┌──────────────────┐
+│  Producer Thread │  ═══════(capacity 4)═══════► │   Main Thread    │
+│                  │         Lock-free             │                  │
+│  Collects process│                               │  Processes batch │
+│  snapshots every │                               │  Handles input   │
+│  3 seconds       │                               │  Renders UI      │
+└──────────────────┘                               └──────────────────┘
+     │                                                  │
+     │  Shared:                                         │
+     ├─ thread_running: atomic bool                     │
+     ├─ mutex + condition: for clean shutdown           │
+     └─ queue: SpscQueue(Batch)                         │
+                                                        │
+     No shared mutable state beyond these primitives.
+     Batch ownership is transferred, never shared.
+#+END_SRC
+
+** Safety Properties
+
+- *No data races:* The SPSC queue is lock-free and designed for exactly one
+  producer and one consumer. The =thread_running= flag uses atomic operations
+  with acquire/release ordering.
+
+- *No dangling pointers:* Arena-based allocation means all batch data is freed
+  in one operation. Cold string slices are only valid while =current_batch= is
+  alive, and =populateView()= rebuilds them from the new batch before freeing
+  the old one.
+
+- *Clean shutdown:* The main thread sets =thread_running= to false, signals the
+  condition variable (waking the producer from sleep), and joins the thread.
+  Any batch the producer was building is freed via its arena if the push fails.
+
+- *Backpressure:* If the queue is full (main thread is slow), the producer
+  retries with exponential backoff (100μs → 10ms cap). It checks
+  =thread_running= between retries to support clean shutdown.
+
+* Key Invariants
+
+1. =hot.len == cold.items.len= — always in sync
+2. =visible_nodes[i].data_idx < hot.len= — valid index
+3. =render_rows.len == visible_nodes.items.len= — materialized 1:1
+4. =render_rows[i]= fields correspond to =hot/cold[render_rows[i].data_idx]=
+5. =selected_item < render_rows.items.len= — clamped after every rebuild
+6. =adjacency.offsets.len == hot.len + 1= — CSR format requirement
+7. Expansion state keyed by =ProcIdentity= (survives PID reuse)
+8. Previous batch freed only after new batch is fully processed
+9. =map.deinit()= never called on batch — arena owns the backing storage
+
+* Build System (build.zig)
+
+The build script wires together all modules with explicit dependency declarations:
+
+#+BEGIN_SRC zig
+const exe = b.addExecutable(.{
+    .name = "blade",
+    .root_source_file = b.path("src/main.zig"),
+    .target = graph.host,
+    .optimize = optimize,
+});
+
+// Module graph (each addImport creates a compile-time @import path)
+main_mod.addImport("event", event_mod);
+main_mod.addImport("ui_render", ui_render_mod);
+main_mod.addImport("state", state_mod);
+main_mod.addImport("thread_channel", thread_channel_mod);
+main_mod.addImport("thread_producer", thread_producer_mod);
+main_mod.addImport("zigtui", zigtui_mod);
+main_mod.addImport("spsc_queue", spsc_mod);
+
+// macOS-specific: link proc system library
+if (target.result.os.tag == .macos) {
+    exe.linkSystemLibrary("proc");
+}
+#+END_SRC
+
+To build: =zig build=
+
+To run: =zig build run=
+
+Note: the executable is named ="Blade"= (capital B) and on macOS links the system
+=proc= library (not =libproc= — the Zig build system resolves it).
+
+* Complete Function Reference
+
+Every public and private function across all source files.
+
+** model.zig
+
+| Function                    | Signature                                         | Description                            |
+|-----------------------------+---------------------------------------------------+----------------------------------------|
+| =ProcIdentity.eql=         | =(self, other) → bool=                            | Compare two identities by pid + start time |
+
+** state.zig
+
+| Function                       | Signature                                      | Visibility | Description                                  |
+|--------------------------------+------------------------------------------------+------------+----------------------------------------------|
+| =AppState.init=                | =(gpa) → AppState=                             | pub        | Create initial state, init Store             |
+| =AppState.deinit=              | =(self) → void=                                | pub        | Free Store and all owned memory              |
+| =AppState.showToast=           | =(self, msg, level) → void=                    | pub        | Show toast with literal message              |
+| =AppState.showToastFmt=        | =(self, fmt, args, level) → void=              | pub        | Show toast with formatted message            |
+| =AppState.setSort=             | =(self, column) → void=                        | pub        | Change sort column, trigger re-sort          |
+| =AppState.buildView=           | =(self) → void=                                | pub        | Full pipeline rebuild from batch             |
+| =AppState.sortView=            | =(self) → void=                                | pub        | Re-sort and rebuild visible nodes            |
+| =AppState.refreshFilter=       | =(self) → void=                                | pub        | Rebuild visible nodes with current search    |
+| =AppState.toggleExpandAll=     | =(self) → void=                                | pub        | Expand or collapse all parent nodes          |
+| =AppState.toggleSelectedExpansion= | =(self) → void=                            | pub        | Expand/collapse subtree at cursor            |
+| =AppState.receive_batch=       | =(self, batch) → void=                         | pub        | Accept batch from producer, rebuild view     |
+| =AppState.getSelectedIdentity= | =(self) → ?ProcIdentity=                      | private    | Get identity of currently selected process   |
+| =AppState.restoreSelection=    | =(self, prev) → void=                          | private    | Restore cursor to previously selected process |
+| =AppState.restoreAndClamp=     | =(self, prev) → void=                          | private    | Restore + clamp cursor within bounds         |
+| =AppState.down=                | =(self) → void=                                | pub        | Move selection down by 1                     |
+| =AppState.up=                  | =(self) → void=                                | pub        | Move selection up by 1                       |
+| =AppState.jumpTop=             | =(self) → void=                                | pub        | Jump to first row                            |
+| =AppState.jumpBottom=          | =(self) → void=                                | pub        | Jump to last row                             |
+| =AppState.searchSlice=         | =(self) → []const u8=                          | pub        | Current search query as a slice              |
+| =AppState.searchAppend=        | =(self, c) → void=                             | pub        | Append character to search buffer            |
+| =AppState.searchBackspace=     | =(self) → void=                                | pub        | Remove last character from search buffer     |
+| =AppState.searchClear=         | =(self) → void=                                | pub        | Clear search buffer                          |
+| =Toast.getMessage=             | =(self) → []const u8=                          | pub        | Return toast message slice                   |
+
+** procs/store.zig
+
+| Function                  | Signature                                      | Description                                     |
+|---------------------------+------------------------------------------------+-------------------------------------------------|
+| =Store.init=              | =(gpa) → Store=                                | Create empty store                              |
+| =Store.deinit=            | =(self) → void=                                | Free all owned memory + batch arenas            |
+| =Store.sortContext=        | =(self) → SortContext=                         | Build SortContext from current SoA slices       |
+| =Store.identityAt=         | =(self, idx) → ProcIdentity=                  | Get identity at array index                     |
+| =Store.findIdentity=       | =(self, identity) → ?usize=                   | Find visible node index by identity             |
+| =Store.receiveBatch=       | =(self, batch) → void=                         | Rotate batches (free old previous, shift)       |
+| =Store.setSort=            | =(self, column) → void=                        | Set sort column, toggle direction if same       |
+| =Store.populateView=       | =(self) → !void=                               | Unpack batch into hot/cold arrays               |
+| =Store.rebuildVisible=     | =(self, search) → !void=                       | Rebuild visible node list from tree + search    |
+| =Store.materializeRenderRows= | =(self) → !void=                            | Flatten hot/cold/visible into AoS render_rows   |
+| =Store.buildPipeline=      | =(self, search) → !void=                       | Full pipeline: populate → tree → sort → visible |
+| =Store.sortAndRebuild=     | =(self, search) → !void=                       | Re-sort children + rebuild visible              |
+| =Store.isExpanded=         | =(self, idx) → bool=                           | Check if process at index is expanded           |
+| =Store.toggleExpanded=     | =(self, idx) → !void=                          | Toggle single node's expansion state            |
+| =Store.setExpandedSubtree= | =(self, root, expand) → !void=                | Expand/collapse entire subtree via DFS          |
+| =Store.toggleExpandAll=    | =(self) → !void=                               | If any collapsed → expand all, else collapse all |
+
+** procs/tree.zig
+
+| Function              | Signature                                                        | Description                              |
+|-----------------------+------------------------------------------------------------------+------------------------------------------|
+| =Adjacency.childrenOf= | =(self, idx) → []const u32=                                    | Get children slice (immutable)           |
+| =Adjacency.childrenOfMut= | =(self, idx) → []u32=                                       | Get children slice (mutable, for sorting) |
+| =buildPidIndexMap=     | =(pids, arena) → !AutoHashMap(pid_t, u32)=                     | Build PID → index lookup table           |
+| =buildAdjacency=       | =(cold, pid_map, n, arena) → !Adjacency=                       | Build CSR parent→child graph             |
+| =sortChildren=         | =(adj, n, sort_ctx, compareFn) → void=                         | Sort each parent's children in-place     |
+| =isNodeExpanded=       | =(pids, times, expanded, idx) → bool=                          | Check expansion state (private)          |
+| =matchesSearch=        | =(cold_data, search) → bool=                                   | Substring match on name/path (private)   |
+| =buildVisibleNodes=    | =(hot, cold, adj, pid_map, expanded, search, ctx, cmp, arena)= | Full tree → visible list conversion      |
+
+** procs/sort.zig
+
+| Function              | Signature                                      | Description                              |
+|-----------------------+------------------------------------------------+------------------------------------------|
+| =compareByIndex=       | =(ctx, a: usize, b: usize) → bool=            | Compare by SortContext (usize indices)   |
+| =compareByNodeIndex=   | =(ctx, a: u32, b: u32) → bool=                | Wrapper for u32 indices (tree children)  |
+
+** thread/channel.zig
+
+| Function    | Signature                             | Description                              |
+|-------------+---------------------------------------+------------------------------------------|
+| =Batch.deinit= | =(self) → void=                   | Free arena (and all batch memory)        |
+| =initQueue=    | =(gpa) → !BatchQueue=             | Create SPSC queue with capacity 4        |
+
+** thread/producer.zig
+
+| Function       | Signature                             | Description                              |
+|----------------+---------------------------------------+------------------------------------------|
+| =run=          | =(args: ThreadArgs) → void=          | Producer thread entry point              |
+| =fetchAndSend= | =(queue, running) → !void=           | Collect snapshot and push batch (private) |
+
+** platform/platform.zig
+
+| Function          | Signature                                         | Description                              |
+|-------------------+---------------------------------------------------+------------------------------------------|
+| =collectSnapshot= | =(arena) → !AutoHashMap(pid_t, Proc)=             | Delegate to platform backend             |
+| =signal=           | =(pid, force) → !void=                            | Send SIGTERM or SIGKILL                  |
+| =capabilities=     | =() → Capabilities=                               | Query platform feature support           |
+
+** platform/macos.zig
+
+| Function          | Signature                                         | Description                              |
+|-------------------+---------------------------------------------------+------------------------------------------|
+| =collectSnapshot= | =(arena) → !AutoHashMap(pid_t, Proc)=             | Enumerate all processes via libproc      |
+| =signal=           | =(pid, force) → !void=                            | Kill process via std.c.kill              |
+| =capabilities=     | =() → Capabilities=                               | Return all-true capabilities             |
+
+** event/event.zig
+
+| Function               | Signature                                   | Visibility | Description                              |
+|------------------------+---------------------------------------------+------------+------------------------------------------|
+| =handleEvent=           | =(app, event) → !void=                     | pub        | Top-level event dispatcher (keys + resize) |
+| =handleNormalMode=      | =(app, key) → void=                        | private    | Dispatch in normal/search_view modes     |
+| =mapKey=                | =(key) → ?keymap.Key=                      | private    | Convert backend key to keymap Key        |
+| =executeAction=         | =(app, action) → void=                     | private    | Execute a resolved action                |
+| =killSelected=          | =(app, force) → void=                      | private    | Kill process at cursor position          |
+| =showHelp=              | =(app) → void=                             | private    | Show help text for all modes as toast    |
+| =handleSearchEditMode=  | =(app, key) → void=                        | private    | Handle input in search editing mode      |
+
+** event/keymap.zig
+
+| Function      | Signature                                   | Description                              |
+|---------------+---------------------------------------------+------------------------------------------|
+| =getAction=   | =(key, mode) → ?Action=                    | Look up action for key in current mode   |
+| =getHelpText= | =(mode, buf) → []const u8=                 | Build help bar text for current mode     |
+
+** ui/render.zig
+
+| Function             | Signature                                      | Visibility | Description                              |
+|----------------------+------------------------------------------------+------------+------------------------------------------|
+| =render=              | =(draw_ctx, buf) → !void=                    | pub        | Top-level render function                |
+| =renderTreePrefix=    | =(buf, x, y, row: RenderRow, style, max_w) → u16= | private | Draw tree indentation + glyph            |
+| =renderHelpBar=       | =(buf, rect) → void=                          | private    | Draw key binding help in footer          |
+| =renderSearchInput=   | =(buf, rect, app) → void=                     | private    | Draw search prompt with cursor           |
+| =renderToast=         | =(buf, toast, area) → void=                   | private    | Draw centered toast overlay              |
+
+** ui/layout.zig
+
+| Function              | Signature                                        | Visibility | Description                              |
+|-----------------------+--------------------------------------------------+------------+------------------------------------------|
+| =Container.row=        | =(items) → Container=                           | pub        | Create horizontal container              |
+| =Container.column=     | =(items) → Container=                           | pub        | Create vertical container                |
+| =CalculatedLayout.get= | =(self, id) → ?Rect=                           | pub        | Look up computed rect by string ID       |
+| =CalculatedLayout.deinit= | =(self) → void=                             | pub        | Free layout hash map                     |
+| =sumGrowWeights=       | =(items) → !f32=                                | private    | Sum grow weights, error if negative      |
+| =sumFixedSizes=        | =(items) → u16=                                 | private    | Sum all fixed sizing values              |
+| =sumPercentSizes=      | =(items, available) → !u16=                     | private    | Sum percent sizes, error if out of range |
+| =calculateGrowSize=    | =(weight, total, remaining) → u16=              | private    | Compute one grow item's pixel size       |
+| =calculate=            | =(scratch, container, available) → !CalculatedLayout= | pub  | Recursively compute all item rects       |
+
+* Data-Driven Keymap System
+
+The key bindings are defined as a compile-time array of =KeyBinding= structs,
+not a switch statement. This makes the keymap declarative and enables automatic
+help bar generation.
+
+** KeyBinding Structure
+
+#+BEGIN_SRC zig
+pub const KeyBinding = struct {
+    key: Key,
+    action: Action,
+    modes: []const Mode,      // which modes this binding is active in
+    description: []const u8,  // displayed in help bar (empty = hidden)
+};
+
+pub const Key = union(enum) {
+    char: u8,
+    special: SpecialKey,
+};
+
+pub const SpecialKey = enum {
+    up, down, esc, enter, backspace,
+};
+#+END_SRC
+
+** Binding Resolution
+
+#+BEGIN_SRC zig
+pub fn getAction(key: Key, mode: Mode) ?Action {
+    for (keymap) |binding| {
+        if (std.meta.eql(binding.key, key)) {       // structural equality
+            for (binding.modes) |m| {
+                if (m == mode) return binding.action;
+            }
+        }
+    }
+    return null;
+}
+#+END_SRC
+
+The first matching binding wins. This means the *order of the keymap array
+matters* — earlier entries take priority. For example, Esc maps to =quit= in
+normal mode but =exit_search_view= in search_view mode because the bindings
+have different =modes= arrays.
+
+** Dynamic Help Bar Generation
+
+The footer bar is generated dynamically from the keymap:
+
+#+BEGIN_SRC zig
+pub fn getHelpText(mode: Mode, buf: []u8) []const u8 {
+    for (keymap) |binding| {
+        if (binding.description.len == 0) continue;  // skip hidden bindings
+        // check if binding is active in current mode
+        // format as "key:description" separated by double spaces
+    }
+    return buf[0..pos];
+}
+#+END_SRC
+
+Bindings with empty =description= fields (like arrow key duplicates of j/k) are
+excluded from the help bar. This keeps the footer clean while still supporting
+those keys. Note: =renderHelpBar= currently always passes =.normal= mode to
+=getHelpText=, so the help bar shows normal-mode bindings regardless of the
+current mode.
+
+* Sort Column Toggle Behavior
+
+When the user presses a sort key (P/N/C/M), the =setSort= function implements
+smart toggling:
+
+#+BEGIN_SRC zig
+pub fn setSort(self: *Store, column: model.SortColumn) void {
+    if (self.sort_column == column) {
+        // Same column: toggle direction (desc → asc → desc)
+        self.sort_direction = if (self.sort_direction == .asc) .desc else .asc;
+    } else {
+        // Different column: switch to it, default descending
+        self.sort_column = column;
+        self.sort_direction = .desc;
+    }
+}
+#+END_SRC
+
+This means pressing =C= once sorts by CPU descending (highest first). Pressing
+=C= again reverses to ascending (lowest first). Pressing =M= switches to memory
+descending.
+
+* Subtree Expansion Algorithm
+
+** Single Node Toggle
+
+=toggleSelectedExpansion= expands or collapses an *entire subtree*, not just one
+level:
+
+#+BEGIN_SRC zig
+pub fn setExpandedSubtree(self: *Store, root_idx: u32, expand: bool) !void {
+    var stack = std.ArrayListUnmanaged(u32){};
+    defer stack.deinit(self.gpa);
+    try stack.append(self.gpa, root_idx);
+
+    while (stack.items.len > 0) {
+        const node_idx = stack.pop();
+        const children = self.adjacency.childrenOf(node_idx);
+
+        if (children.len > 0) {
+            const id = self.identityAt(node_idx);
+            if (expand) {
+                try self.expanded_pids.put(id, {});
+            } else {
+                _ = self.expanded_pids.remove(id);
+            }
+            // Push children in reverse for DFS order
+            for (children reversed) {
+                try stack.append(self.gpa, child);
+            }
+        }
+    }
+}
+#+END_SRC
+
+This uses an iterative DFS (not recursive) to avoid stack overflow on deeply
+nested process trees.
+
+** Toggle All (=*= key)
+
+The toggle-all algorithm uses a "smart" heuristic:
+
+#+BEGIN_SRC
+toggleExpandAll():
+  1. Scan all processes
+  2. Count parent nodes (nodes with children)
+  3. Check if ANY parent is collapsed
+
+  If any_collapsed:
+    → Expand ALL parents (add to expanded_pids)
+  Else (all expanded):
+    → Collapse ALL parents (remove from expanded_pids)
+#+END_SRC
+
+This provides intuitive behavior: pressing =*= opens everything if anything
+is closed, and closes everything only when everything is already open.
+
+* Search Edit Mode: Arrow Key Navigation
+
+While typing a search query (=search_edit= mode), arrow keys still navigate
+the process list:
+
+#+BEGIN_SRC zig
+fn handleSearchEditMode(app: *state.AppState, key: tui.KeyEvent) void {
+    switch (key.code) {
+        .char => |c| {
+            if (c < 128) {
+                app.searchAppend(@intCast(c));
+                app.refreshFilter();   // live search on each keystroke
+            }
+        },
+        .backspace => {
+            app.searchBackspace();
+            app.refreshFilter();
+        },
+        .enter => app.mode = .search_view,  // cement search results
+        .esc => {
+            app.searchClear();
+            app.refreshFilter();
+            app.mode = .normal;
+        },
+        .up => app.up(),               // navigate while typing
+        .down => app.down(),
+        else => {},
+    }
+}
+#+END_SRC
+
+This enables a workflow where you can type a search, see results update live,
+and immediately navigate to the desired process without pressing Enter first.
+
+* Toast Notification Rendering
+
+Toast messages are color-coded by severity level:
+
+| Level     | Foreground | Background |
+|-----------+------------+------------|
+| =.info=   | white      | gray       |
+| =.success= | white     | green      |
+| =.warning= | black     | yellow     |
+| =.err=     | white     | red        |
+
+The toast is rendered as a centered overlay:
+
+#+BEGIN_SRC
+┌────────────────────────────────────────┐
+│         Terminal area                  │
+│                                        │
+│     ┌──────────────────────────┐       │
+│     │    Kill failed: EPERM    │  ← message line (centered)
+│     │  Press any key to dismiss│  ← dismiss prompt (centered)
+│     └──────────────────────────┘       │
+│                                        │
+└────────────────────────────────────────┘
+#+END_SRC
+
+Box width is =max(message_len, dismiss_text_len) + 4=. Positioned at vertical
+center of the terminal area.
+
+Toast dismissal: in =handleNormalMode=, if =active_toast != null=, the keypress
+clears the toast and is consumed (not passed to action handling).
+
+* macOS Path Error Handling
+
+When =proc_pidpath()= fails for a process, the path field is set to a
+human-readable error label instead of being left empty:
+
+#+BEGIN_SRC zig
+if (path_len > 0) {
+    // normal path copy
+} else {
+    const e = std.posix.errno(0);
+    if (e == .SRCH) continue;  // process exited, skip entirely
+    const err_label: []const u8 = switch (e) {
+        .PERM   => "[permission denied]",
+        .NOENT  => "[binary deleted]",
+        else    => "[path unavailable]",
+    };
+    @memcpy(proc.path[0..err_label.len], err_label);
+    proc.path[err_label.len] = 0;
+}
+#+END_SRC
+
+This means users see contextual error information in the Path column instead of
+blank entries.
+
+* Unused/Future Structures
+
+** ProcessSnapshot
+
+Defined in =model.zig= but currently *not used in the main data pipeline*. The
+pipeline works directly with =Proc= structs in batches. =ProcessSnapshot=
+exists for a potential future API where platform backends return normalized
+snapshots. No =toSnapshot()= conversion function currently exists.
+
+** SystemSnapshot
+
+#+BEGIN_SRC zig
+pub const SystemSnapshot = struct {
+    timestamp_ns: u64,
+    cpu_count: u16,
+    total_mem_bytes: u64,
+    available_mem_bytes: u64,
+    load_avg_1m: f32,
+    load_avg_5m: f32,
+    load_avg_15m: f32,
+};
+#+END_SRC
+
+Defined in =model.zig= but *not yet populated or displayed*. This struct is
+reserved for a future system summary bar (showing overall CPU, memory, and
+load averages).
+
+* Layout Engine Tests
+
+The layout system (=ui/layout.zig=) includes comprehensive unit tests:
+
+| Test Name                                  | What It Verifies                                    |
+|--------------------------------------------+-----------------------------------------------------|
+| =sumGrowWeights returns error for negative= | Negative grow weight → =error.NegativeGrow=         |
+| =sumGrowWeights totals only grow items=     | Mixed item types: only grow weights summed          |
+| =sumFixedSizes totals only fixed items=     | Mixed item types: only fixed sizes summed           |
+| =sumPercentSizes calculates from available= | 25% + 10% of 200 = 70                              |
+| =sumPercentSizes returns error for invalid= | Percent > 1.0 → =error.InvalidPercent=              |
+| =calculateGrowSize distributes proportionally= | 1/3 of 90 = 30, 2/3 of 90 = 60                 |
+| =calculateGrowSize returns zero when total is zero= | Division by zero → 0                       |
+| =calculate positions row items correctly=    | Fixed + grow items positioned in a row             |
+| =calculate positions column items correctly= | Fixed + grow items positioned in a column          |
+| =calculate handles nested containers=        | Two-panel layout with nested column inside row     |
+
+Run tests: =zig build test= (or =zig test src/ui/layout.zig= directly)
+
+* Selection Preservation
+
+Across all view mutations (sort change, search filter, batch arrival), the
+application preserves the user's cursor position by identity:
+
+#+BEGIN_SRC
+Any view mutation:
+  1. prev = getSelectedIdentity()
+     └─ Captures (pid, start_time) of selected process
+        via render_rows[selected_item].data_idx → identityAt()
+
+  2. Perform mutation (pipeline rebuild, re-sort, etc.)
+     └─ visible_nodes + render_rows arrays are rebuilt
+
+  3. restoreAndClamp(prev)
+     ├─ restoreSelection(prev)
+     │   └─ Linear scan of render_rows for matching identity
+     │      └─ If found: selected_item = found index
+     └─ Clamp: selected_item = min(selected_item, render_rows.len - 1)
+#+END_SRC
+
+Edge case: if =selected_item == 0=, =getSelectedIdentity= returns =null= (no
+restoration attempted). This avoids unnecessary scanning when the user hasn't
+moved from the top.
+
+* Error Handling Strategy
+
+The codebase uses a layered error handling approach:
+
+** Platform Layer — Per-Process Resilience
+
+Process enumeration never fails wholesale. If =proc_pidinfo= fails for one
+process, that process is skipped and the rest continue. Only =proc_listpids=
+failure (cannot get PID list at all) returns an error.
+
+** Store Layer — Toast on Failure
+
+All store operations (=buildPipeline=, =sortAndRebuild=, =rebuildVisible=)
+propagate errors via =!void=. The =AppState= wrapper catches these errors and
+displays them as toast notifications:
+
+#+BEGIN_SRC zig
+self.procs.buildPipeline(self.searchSlice()) catch |err| {
+    self.showToastFmt("buildView failed: {}", .{err}, .err);
+    return;
+};
+#+END_SRC
+
+The UI continues running even if a rebuild fails — the previous visible state
+is preserved.
+
+** Producer Thread — Log and Retry
+
+The producer thread catches all errors from =fetchAndSend= and prints them to
+stderr. It then sleeps and tries again on the next cycle:
+
+#+BEGIN_SRC zig
+fetchAndSend(args.queue, args.running) catch |err| {
+    std.debug.print("Producer Error: {}\n", .{err});
+};
+#+END_SRC
+
+This means the process viewer stays alive even if one collection cycle fails
+(e.g., temporary permission issue).
