@@ -24,6 +24,8 @@ pub fn main() !void {
 
     // Hide cursor
     try terminal.hideCursor();
+    try terminal.enableKeyboardProtocol(.{ .mode = .kitty });
+    defer terminal.disableKeyboardProtocol() catch {};
     var app = state.AppState.init(gpa_alloc);
     app.terminal = &terminal;
     defer app.deinit();

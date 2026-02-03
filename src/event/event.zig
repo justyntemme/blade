@@ -33,6 +33,9 @@ fn handleNormalMode(app: *state.AppState, key: tui.KeyEvent) void {
 }
 
 fn mapKey(key: tui.KeyEvent) ?keymap.Key {
+    // Shift+Enter → toggle expand (mapped to tab)
+    if (key.code == .enter and key.modifiers.shift) return .{ .special = .tab };
+
     return switch (key.code) {
         .char => |c| .{ .char = @intCast(c) },
         .up => .{ .special = .up },
