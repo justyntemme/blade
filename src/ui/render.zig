@@ -59,6 +59,11 @@ const detail_body_layout = layout.Container.row(&[_]layout.Item{
     .{ .id = "detail_right", .sizing = .{ .grow = 2.0 } },
 });
 
+const detail_right_layout = layout.Container.column(&[_]layout.Item{
+    .{ .id = "right_stats", .sizing = .{ .fixed = 7 } },
+    .{ .id = "right_tree", .sizing = .{ .grow = 1.0 } },
+});
+
 pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
     const app = draw_ctx.state;
     const area = buf.getArea();
@@ -673,38 +678,82 @@ fn renderDetailView(buf: *tui.render.Buffer, area: tui.render.Rect, app: *state.
         }
     }
 
-    // Clamp scroll to left pane content (dynamic based on environ length)
+    // Clamp left scroll
     const left_content_lines: usize = 11 + detail.environ.len;
-    const visible_lines: usize = @intCast(left_rect.height);
-    if (left_content_lines > visible_lines) {
-        app.detail_scroll = @min(app.detail_scroll, left_content_lines - visible_lines);
+    const left_visible: usize = @intCast(left_rect.height);
+    if (left_content_lines > left_visible) {
+        app.detail_scroll = @min(app.detail_scroll, left_content_lines - left_visible);
     } else {
         app.detail_scroll = 0;
     }
 
-    renderDetailLeftPane(buf, left_rect, detail, app.detail_scroll);
-    renderDetailRightRail(buf, right_rect, detail, live_cpu, live_mem, app);
+    // Split right pane: static stats on top, scrollable tree below
+    var right_sub = layout.calculate(scratch, detail_right_layout, layout.Rect{
+        .x = right_rect.x,
+        .y = right_rect.y,
+        .width = right_rect.width,
+        .height = right_rect.height,
+    }) catch return;
+    defer right_sub.deinit();
 
-    // --- Scroll arrows (edge indicators) ---
-    if (app.detail_scroll > 0) {
-        // Show up arrow at top-right of left pane
-        const arrow_x = left_rect.x + left_rect.width -| 1;
-        buf.setString(arrow_x, left_rect.y, "^", _Style{ .fg = .cyan });
+    const stats_rect = right_sub.get("right_stats") orelse return;
+    const tree_rect = right_sub.get("right_tree") orelse return;
+
+    const left_focused = app.detail_focus == .left;
+
+    // Render static live stats (always visible, never scrolls)
+    renderDetailStats(buf, stats_rect, detail, live_cpu, live_mem, !left_focused);
+
+    // Measure tree content, auto-scroll to show selected process, then render
+    const tree_info = renderDetailTree(buf, tree_rect, detail, app, true, false);
+    const tree_content_lines = tree_info.total_lines;
+    const tree_visible: usize = @intCast(tree_rect.height);
+    // Auto-center on first open (scroll still at 0 and selected proc not visible)
+    if (app.detail_right_scroll == 0 and tree_info.self_line >= tree_visible and tree_content_lines > tree_visible) {
+        // Center the selected process in the visible area
+        const half = tree_visible / 2;
+        app.detail_right_scroll = if (tree_info.self_line > half) tree_info.self_line - half else 0;
     }
-    if (left_content_lines > visible_lines and app.detail_scroll + visible_lines < left_content_lines) {
-        // Show down arrow at bottom-right of left pane
-        const arrow_x = left_rect.x + left_rect.width -| 1;
-        const arrow_y = left_rect.y + left_rect.height -| 1;
-        buf.setString(arrow_x, arrow_y, "v", _Style{ .fg = .cyan });
+    if (tree_content_lines > tree_visible) {
+        app.detail_right_scroll = @min(app.detail_right_scroll, tree_content_lines - tree_visible);
+    } else {
+        app.detail_right_scroll = 0;
+    }
+    _ = renderDetailTree(buf, tree_rect, detail, app, false, !left_focused);
+
+    // Render left pane
+    renderDetailLeftPane(buf, left_rect, detail, app.detail_scroll, left_focused);
+
+    // --- Scroll arrows for focused pane ---
+    if (left_focused) {
+        if (app.detail_scroll > 0) {
+            const arrow_x = left_rect.x + left_rect.width -| 1;
+            buf.setString(arrow_x, left_rect.y, "^", _Style{ .fg = .cyan });
+        }
+        if (left_content_lines > left_visible and app.detail_scroll + left_visible < left_content_lines) {
+            const arrow_x = left_rect.x + left_rect.width -| 1;
+            const arrow_y = left_rect.y + left_rect.height -| 1;
+            buf.setString(arrow_x, arrow_y, "v", _Style{ .fg = .cyan });
+        }
+    } else {
+        if (app.detail_right_scroll > 0) {
+            const arrow_x = tree_rect.x + tree_rect.width -| 1;
+            buf.setString(arrow_x, tree_rect.y, "^", _Style{ .fg = .cyan });
+        }
+        if (tree_content_lines > tree_visible and app.detail_right_scroll + tree_visible < tree_content_lines) {
+            const arrow_x = tree_rect.x + tree_rect.width -| 1;
+            const arrow_y = tree_rect.y + tree_rect.height -| 1;
+            buf.setString(arrow_x, arrow_y, "v", _Style{ .fg = .cyan });
+        }
     }
 
     // --- Footer keybinds ---
-    const footer_hint = "esc:close  j/k:scroll  u/d:page  g/G:top/bottom";
+    const footer_hint = "esc:close  h/l:pane  j/k:scroll  u/d:page  g/G:top/bottom";
     buf.setString(footer_rect.x, footer_rect.y, footer_hint, _Style{ .fg = .gray });
 }
 
-fn renderDetailLeftPane(buf: *tui.render.Buffer, rect: layout.Rect, detail: model.ProcessDetail, scroll: usize) void {
-    const sec = _Style{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } };
+fn renderDetailLeftPane(buf: *tui.render.Buffer, rect: layout.Rect, detail: model.ProcessDetail, scroll: usize, focused: bool) void {
+    const sec: _Style = if (focused) .{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } } else .{ .fg = .gray };
     const lbl = _Style{ .fg = .gray };
     const val = _Style{ .fg = .light_white };
 
@@ -826,29 +875,23 @@ fn renderDetailLeftPane(buf: *tui.render.Buffer, rect: layout.Rect, detail: mode
     }
 }
 
-fn renderDetailRightRail(buf: *tui.render.Buffer, rect: layout.Rect, detail: model.ProcessDetail, live_cpu: f32, live_mem: u64, app: *const state.AppState) void {
-    const sec = _Style{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } };
-    const lbl = _Style{ .fg = .gray };
+fn renderDetailStats(buf: *tui.render.Buffer, rect: layout.Rect, detail: model.ProcessDetail, live_cpu: f32, live_mem: u64, focused: bool) void {
+    const sec: _Style = if (focused) .{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } } else .{ .fg = .gray };
     const val = _Style{ .fg = .light_white };
-    const max_y = rect.y + rect.height;
-    // 1-char left padding from divider
     const rx: u16 = rect.x + 1;
-    const max_w: usize = @intCast(rect.width -| 1);
     var y: u16 = rect.y;
+    const max_y = rect.y + rect.height;
 
-    // Live Stats header
     if (y >= max_y) return;
     buf.setString(rx, y, "Live Stats", sec);
     y += 1;
 
-    // CPU
     if (y >= max_y) return;
     var cpu_buf: [24]u8 = undefined;
     const cpu_str = std.fmt.bufPrint(&cpu_buf, "  CPU:     {d:>5.1}%", .{live_cpu}) catch "  CPU: ???";
     buf.setString(rx, y, cpu_str, _Style{ .fg = cpuColor(live_cpu) });
     y += 1;
 
-    // MEM
     if (y >= max_y) return;
     var mem_buf: [24]u8 = undefined;
     const mem_mb = @as(f64, @floatFromInt(live_mem)) / (1024.0 * 1024.0);
@@ -856,41 +899,52 @@ fn renderDetailRightRail(buf: *tui.render.Buffer, rect: layout.Rect, detail: mod
     buf.setString(rx, y, mem_str, _Style{ .fg = memColor(live_mem) });
     y += 1;
 
-    // Threads
     if (y >= max_y) return;
     var thr_buf: [24]u8 = undefined;
     const thr_str = std.fmt.bufPrint(&thr_buf, "  Threads: {d}", .{detail.thread_count}) catch "  Threads: ???";
     buf.setString(rx, y, thr_str, val);
     y += 1;
 
-    // FDs
     if (y >= max_y) return;
     var fd_buf: [24]u8 = undefined;
     const fd_str = std.fmt.bufPrint(&fd_buf, "  FDs:     {d}", .{detail.fd_count}) catch "  FDs: ???";
     buf.setString(rx, y, fd_str, val);
     y += 1;
 
-    // Virtual memory
     if (y >= max_y) return;
     var virt_buf: [24]u8 = undefined;
     const virt_gb = @as(f64, @floatFromInt(detail.virtual_mem)) / (1024.0 * 1024.0 * 1024.0);
     const virt_str = std.fmt.bufPrint(&virt_buf, "  Virtual: {d:>5.1} GB", .{virt_gb}) catch "  Virtual: ???";
     buf.setString(rx, y, virt_str, val);
-    y += 1;
+}
 
-    // Blank
-    y += 1;
+const TreeInfo = struct { total_lines: usize, self_line: usize };
 
-    // --- Process Tree ---
-    if (y >= max_y) return;
-    buf.setString(rx, y, "Process Tree", sec);
-    y += 1;
+fn renderDetailTree(buf: *tui.render.Buffer, rect: layout.Rect, detail: model.ProcessDetail, app: *const state.AppState, measure_only: bool, focused: bool) TreeInfo {
+    const sec: _Style = if (focused) .{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } } else .{ .fg = .gray };
+    const lbl = _Style{ .fg = .gray };
+    const val = _Style{ .fg = .light_white };
+    const rx: u16 = rect.x + 1;
+    const max_w: usize = @intCast(rect.width -| 1);
+
+    const scroll = app.detail_right_scroll;
+    const vis_start = scroll;
+    const vis_end = scroll + @as(usize, rect.height);
+
+    var ln: usize = 0;
+
+    // Header
+    if (!measure_only and ln >= vis_start and ln < vis_end) {
+        const y = rect.y + @as(u16, @intCast(ln - vis_start));
+        buf.setString(rx, y, "Process Tree", sec);
+    }
+    ln += 1;
 
     const pids = app.procs.hot.items(.pid);
     const cold = app.procs.cold.items;
 
-    // Walk ancestor chain (up to 8 levels) into a stack buffer
-    const max_ancestors = 8;
+    // Walk full ancestor chain (no cap) into a stack buffer
+    const max_ancestors = 64;
     var ancestor_pids: [max_ancestors]model.pid_t = undefined;
     var ancestor_names: [max_ancestors][]const u8 = undefined;
     var ancestor_count: usize = 0;
@@ -904,71 +958,68 @@ fn renderDetailRightRail(buf: *tui.render.Buffer, rect: layout.Rect, detail: mod
             ancestor_names[ancestor_count] = cold[i].name;
             ancestor_count += 1;
             const next_ppid = cold[i].ppid;
-            if (next_ppid == walk_pid) break; // PID 1 is its own parent
+            if (next_ppid == walk_pid) break;
             walk_pid = next_ppid;
         } else break;
     }
-    // If we hit the cap and there's still a parent, note truncation
-    const truncated = ancestor_count == max_ancestors and walk_pid > 0;
 
-    // Render ancestors top-down (reverse the stack)
-    if (truncated) {
-        if (y >= max_y) return;
-        buf.setString(rx, y, "  ...", lbl);
-        y += 1;
-    }
+    // Ancestors top-down (reverse the stack)
     var ai: usize = ancestor_count;
     while (ai > 0) {
         ai -= 1;
-        if (y >= max_y) return;
-        const indent = ancestor_count - 1 - ai;
-        var anc_buf: [80]u8 = [_]u8{' '} ** 80;
-        // 2-char base indent + 2 per depth level
-        const pad: usize = 2 + indent * 2;
-        const name_slice = ancestor_names[ai];
-        var fmt_buf: [64]u8 = undefined;
-        const label = std.fmt.bufPrint(&fmt_buf, "{s} ({d})", .{ name_slice, ancestor_pids[ai] }) catch "???";
-        const start = @min(pad, anc_buf.len);
-        const end = @min(start + label.len, anc_buf.len);
-        @memcpy(anc_buf[start..end], label[0 .. end - start]);
-        buf.setString(rx, y, anc_buf[0..@min(end, max_w)], lbl);
-        y += 1;
+        if (!measure_only and ln >= vis_start and ln < vis_end) {
+            const y = rect.y + @as(u16, @intCast(ln - vis_start));
+            const indent = ancestor_count - 1 - ai;
+            var anc_buf: [80]u8 = [_]u8{' '} ** 80;
+            const pad: usize = 2 + indent * 2;
+            var fmt_buf: [64]u8 = undefined;
+            const label = std.fmt.bufPrint(&fmt_buf, "{s} ({d})", .{ ancestor_names[ai], ancestor_pids[ai] }) catch "???";
+            const start = @min(pad, anc_buf.len);
+            const end = @min(start + label.len, anc_buf.len);
+            @memcpy(anc_buf[start..end], label[0 .. end - start]);
+            buf.setString(rx, y, anc_buf[0..@min(end, max_w)], lbl);
+        }
+        ln += 1;
     }
 
-    // Current process (highlighted, indented to depth)
-    if (y >= max_y) return;
-    {
+    // Current process (highlighted)
+    const self_ln = ln;
+    if (!measure_only and ln >= vis_start and ln < vis_end) {
+        const y = rect.y + @as(u16, @intCast(ln - vis_start));
         const indent = ancestor_count * 2 + 2;
-        var self_line: [80]u8 = [_]u8{' '} ** 80;
+        var cur_buf: [80]u8 = [_]u8{' '} ** 80;
         var fmt_buf: [64]u8 = undefined;
         const label = std.fmt.bufPrint(&fmt_buf, "{s} ({d})", .{ detail.name, detail.pid }) catch "???";
-        const start = @min(indent, self_line.len);
-        const end = @min(start + label.len, self_line.len);
-        @memcpy(self_line[start..end], label[0 .. end - start]);
-        buf.setString(rx, y, self_line[0..@min(end, max_w)], _Style{ .fg = .light_yellow, .modifier = _Modifier{ .bold = true } });
-        y += 1;
+        const start = @min(indent, cur_buf.len);
+        const end = @min(start + label.len, cur_buf.len);
+        @memcpy(cur_buf[start..end], label[0 .. end - start]);
+        buf.setString(rx, y, cur_buf[0..@min(end, max_w)], _Style{ .fg = .light_yellow, .modifier = _Modifier{ .bold = true } });
     }
+    ln += 1;
 
-    // Children (scan cold for ppid matches, indented one level deeper)
+    // Children
     const child_indent = ancestor_count * 2 + 4;
     var child_count: u16 = 0;
     for (cold, 0..) |cold_entry, i| {
-        if (y >= max_y) break;
         if (i >= pids.len) break;
         if (cold_entry.ppid == detail.pid) {
-            var child_line: [80]u8 = [_]u8{' '} ** 80;
-            var fmt_buf: [64]u8 = undefined;
-            const label = std.fmt.bufPrint(&fmt_buf, "{s} ({d})", .{ cold_entry.name, pids[i] }) catch "???";
-            const start = @min(child_indent, child_line.len);
-            const end = @min(start + label.len, child_line.len);
-            @memcpy(child_line[start..end], label[0 .. end - start]);
-            buf.setString(rx, y, child_line[0..@min(end, max_w)], val);
-            y += 1;
+            if (!measure_only and ln >= vis_start and ln < vis_end) {
+                const y = rect.y + @as(u16, @intCast(ln - vis_start));
+                var child_line: [80]u8 = [_]u8{' '} ** 80;
+                var fmt_buf: [64]u8 = undefined;
+                const label = std.fmt.bufPrint(&fmt_buf, "{s} ({d})", .{ cold_entry.name, pids[i] }) catch "???";
+                const start = @min(child_indent, child_line.len);
+                const end = @min(start + label.len, child_line.len);
+                @memcpy(child_line[start..end], label[0 .. end - start]);
+                buf.setString(rx, y, child_line[0..@min(end, max_w)], val);
+            }
+            ln += 1;
             child_count += 1;
         }
     }
     if (child_count == 0) {
-        if (y < max_y) {
+        if (!measure_only and ln >= vis_start and ln < vis_end) {
+            const y = rect.y + @as(u16, @intCast(ln - vis_start));
             var no_child: [80]u8 = [_]u8{' '} ** 80;
             const msg = "(no children)";
             const start = @min(child_indent, no_child.len);
@@ -976,7 +1027,10 @@ fn renderDetailRightRail(buf: *tui.render.Buffer, rect: layout.Rect, detail: mod
             @memcpy(no_child[start..end], msg);
             buf.setString(rx, y, no_child[0..@min(end, max_w)], lbl);
         }
+        ln += 1;
     }
+
+    return .{ .total_lines = ln, .self_line = self_ln };
 }
 
 fn renderToast(buf: *tui.render.Buffer, toast: *const state.Toast, area: tui.render.Rect) void {

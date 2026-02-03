@@ -70,9 +70,11 @@ pub const keymap = [_]KeyBinding{
     .{ .key = .{ .special = .esc }, .action = .show_help, .modes = &.{.help}, .description = "" },
     .{ .key = .{ .char = 'q' }, .action = .show_help, .modes = &.{.help}, .description = "" },
 
-    // Detail mode (close)
+    // Detail mode (close + pane focus)
     .{ .key = .{ .special = .esc }, .action = .close_detail, .modes = &.{.detail}, .description = "" },
     .{ .key = .{ .char = 'q' }, .action = .close_detail, .modes = &.{.detail}, .description = "" },
+    .{ .key = .{ .char = 'h' }, .action = .focus_left, .modes = &.{.detail}, .description = "" },
+    .{ .key = .{ .char = 'l' }, .action = .focus_right, .modes = &.{.detail}, .description = "" },
 };
 
 pub fn getAction(key: Key, mode: Mode) ?Action {

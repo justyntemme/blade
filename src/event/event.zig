@@ -57,18 +57,28 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
             }
         },
         .move_up => {
-            if (app.mode == .detail) app.detailScrollUp() else if (app.mode == .help) {
+            if (app.mode == .detail) {
+                if (app.detail_focus == .left) app.detailScrollUp() else {
+                    if (app.detail_right_scroll > 0) app.detail_right_scroll -= 1;
+                }
+            } else if (app.mode == .help) {
                 if (app.help_scroll > 0) app.help_scroll -= 1;
             } else app.up();
         },
         .move_down => {
-            if (app.mode == .detail) app.detailScrollDown() else if (app.mode == .help) {
+            if (app.mode == .detail) {
+                if (app.detail_focus == .left) app.detailScrollDown() else app.detail_right_scroll += 1;
+            } else if (app.mode == .help) {
                 app.help_scroll += 1;
             } else app.down();
         },
         .page_up => {
             if (app.mode == .detail) {
-                for (0..10) |_| app.detailScrollUp();
+                if (app.detail_focus == .left) {
+                    for (0..10) |_| app.detailScrollUp();
+                } else {
+                    app.detail_right_scroll -|= 10;
+                }
             } else if (app.mode == .help) {
                 app.help_scroll -|= 10;
             } else {
@@ -77,7 +87,11 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
         },
         .page_down => {
             if (app.mode == .detail) {
-                for (0..10) |_| app.detailScrollDown();
+                if (app.detail_focus == .left) {
+                    for (0..10) |_| app.detailScrollDown();
+                } else {
+                    app.detail_right_scroll += 10;
+                }
             } else if (app.mode == .help) {
                 app.help_scroll += 10;
             } else {
@@ -85,12 +99,16 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
             }
         },
         .jump_top => {
-            if (app.mode == .detail) app.detail_scroll = 0 else if (app.mode == .help) {
+            if (app.mode == .detail) {
+                if (app.detail_focus == .left) app.detail_scroll = 0 else app.detail_right_scroll = 0;
+            } else if (app.mode == .help) {
                 app.help_scroll = 0;
             } else app.jumpTop();
         },
         .jump_bottom => {
-            if (app.mode == .detail) app.detailScrollToBottom() else if (app.mode == .help) {
+            if (app.mode == .detail) {
+                if (app.detail_focus == .left) app.detailScrollToBottom() else app.detail_right_scroll = ~@as(usize, 0);
+            } else if (app.mode == .help) {
                 app.help_scroll = ~@as(usize, 0);
             } else app.jumpBottom();
         },
@@ -122,6 +140,8 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
             app.openDetail(pid);
         },
         .close_detail => app.closeDetail(),
+        .focus_left => app.detail_focus = .left,
+        .focus_right => app.detail_focus = .right,
     }
 }
 

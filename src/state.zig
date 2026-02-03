@@ -37,8 +37,12 @@ pub const AppState = struct {
     detail_data: ?model.ProcessDetail = null,
     detail_arena: ?std.heap.ArenaAllocator = null,
     detail_scroll: usize = 0,
+    detail_right_scroll: usize = 0,
+    detail_focus: DetailFocus = .left,
     help_scroll: usize = 0,
     procs: procs.Store,
+
+    pub const DetailFocus = enum { left, right };
 
     pub fn init(gpa: std.mem.Allocator) AppState {
         return .{
@@ -237,6 +241,8 @@ pub const AppState = struct {
         self.detail_pid = pid;
         self.detail_data = null;
         self.detail_scroll = 0;
+        self.detail_right_scroll = 0;
+        self.detail_focus = .left;
         self.previous_mode = self.mode;
         self.mode = .detail;
 

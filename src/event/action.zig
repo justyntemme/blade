@@ -24,4 +24,6 @@ pub const Action = enum {
     show_help,
     open_detail,
     close_detail,
+    focus_left,
+    focus_right,
 };
