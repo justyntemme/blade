@@ -38,6 +38,11 @@ pub const SystemState = struct {
     mem_available: u64 = 0,
     mem_cached: u64 = 0,
     mem_free: u64 = 0,
+    // Per-category memory histories (percentage 0-100)
+    mem_used_history: model.CpuHistory = .{},
+    mem_available_history: model.CpuHistory = .{},
+    mem_cached_history: model.CpuHistory = .{},
+    mem_free_history: model.CpuHistory = .{},
 
     // Network cumulative totals (for Sync pane)
     net_total_recv: u64 = 0,
@@ -163,8 +168,13 @@ pub const SystemState = struct {
         self.cpu_user_history.push(self.total_user_percent);
         self.cpu_system_history.push(self.total_system_percent);
         if (self.mem_total > 0) {
-            const mem_pct: f32 = @as(f32, @floatFromInt(self.mem_used)) / @as(f32, @floatFromInt(self.mem_total)) * 100.0;
+            const mt: f32 = @floatFromInt(self.mem_total);
+            const mem_pct: f32 = @as(f32, @floatFromInt(self.mem_used)) / mt * 100.0;
             self.mem_history.push(mem_pct);
+            self.mem_used_history.push(mem_pct);
+            self.mem_available_history.push(@as(f32, @floatFromInt(self.mem_available)) / mt * 100.0);
+            self.mem_cached_history.push(@as(f32, @floatFromInt(self.mem_cached)) / mt * 100.0);
+            self.mem_free_history.push(@as(f32, @floatFromInt(self.mem_free)) / mt * 100.0);
         }
         self.disk_read_history.push(self.disk_read_rate);
         self.disk_write_history.push(self.disk_write_rate);
