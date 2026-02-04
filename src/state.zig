@@ -43,6 +43,17 @@ pub const SystemState = struct {
     net_total_recv: u64 = 0,
     net_total_sent: u64 = 0,
 
+    // Per-interface network state
+    iface_count: u8 = 0,
+    iface_names: [model.MAX_INTERFACES][model.IFACE_NAME_LEN]u8 = [_][model.IFACE_NAME_LEN]u8{[_]u8{0} ** model.IFACE_NAME_LEN} ** model.MAX_INTERFACES,
+    iface_name_lens: [model.MAX_INTERFACES]u8 = [_]u8{0} ** model.MAX_INTERFACES,
+    iface_recv_rates: [model.MAX_INTERFACES]f64 = [_]f64{0} ** model.MAX_INTERFACES,
+    iface_sent_rates: [model.MAX_INTERFACES]f64 = [_]f64{0} ** model.MAX_INTERFACES,
+    iface_recv_histories: [model.MAX_INTERFACES]model.RateHistory = [_]model.RateHistory{.{}} ** model.MAX_INTERFACES,
+    iface_sent_histories: [model.MAX_INTERFACES]model.RateHistory = [_]model.RateHistory{.{}} ** model.MAX_INTERFACES,
+    iface_total_recv: [model.MAX_INTERFACES]u64 = [_]u64{0} ** model.MAX_INTERFACES,
+    iface_total_sent: [model.MAX_INTERFACES]u64 = [_]u64{0} ** model.MAX_INTERFACES,
+
     // Disk mount info (updated via SPSC queue)
     mounts: [model.MAX_MOUNTS]model.MountInfo = [_]model.MountInfo{.{}} ** model.MAX_MOUNTS,
     mount_count: u8 = 0,
@@ -115,6 +126,36 @@ pub const SystemState = struct {
                 self.disk_write_rate = @as(f64, @floatFromInt(metrics.disk.bytes_written -| prev.disk.bytes_written)) / dt_s;
                 self.net_recv_rate = @as(f64, @floatFromInt(metrics.net.bytes_recv -| prev.net.bytes_recv)) / dt_s;
                 self.net_sent_rate = @as(f64, @floatFromInt(metrics.net.bytes_sent -| prev.net.bytes_sent)) / dt_s;
+
+                // Per-interface rates: match by name between current and previous
+                const cur_count = metrics.net.iface_count;
+                self.iface_count = cur_count;
+                for (0..cur_count) |i| {
+                    const cur_iface = metrics.net.interfaces[i];
+                    const cur_name = cur_iface.name[0..cur_iface.name_len];
+                    @memcpy(self.iface_names[i][0..cur_iface.name_len], cur_name);
+                    self.iface_name_lens[i] = cur_iface.name_len;
+                    self.iface_total_recv[i] = cur_iface.bytes_recv;
+                    self.iface_total_sent[i] = cur_iface.bytes_sent;
+
+                    // Find matching previous interface by name
+                    var prev_recv: u64 = 0;
+                    var prev_sent: u64 = 0;
+                    for (0..prev.net.iface_count) |j| {
+                        const prev_iface = prev.net.interfaces[j];
+                        const prev_name = prev_iface.name[0..prev_iface.name_len];
+                        if (std.mem.eql(u8, cur_name, prev_name)) {
+                            prev_recv = prev_iface.bytes_recv;
+                            prev_sent = prev_iface.bytes_sent;
+                            break;
+                        }
+                    }
+
+                    self.iface_recv_rates[i] = @as(f64, @floatFromInt(cur_iface.bytes_recv -| prev_recv)) / dt_s;
+                    self.iface_sent_rates[i] = @as(f64, @floatFromInt(cur_iface.bytes_sent -| prev_sent)) / dt_s;
+                    self.iface_recv_histories[i].push(self.iface_recv_rates[i]);
+                    self.iface_sent_histories[i].push(self.iface_sent_rates[i]);
+                }
             }
         }
 

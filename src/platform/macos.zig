@@ -237,7 +237,7 @@ pub fn collectSystemMetrics() model.SystemMetrics {
         }
     }
 
-    // Network IO via getifaddrs (sum non-loopback interfaces)
+    // Network IO via getifaddrs (per-interface + totals)
     {
         var ifap: ?*c.ifaddrs = null;
         if (c.getifaddrs(&ifap) == 0) {
@@ -249,8 +249,25 @@ pub fn collectSystemMetrics() model.SystemMetrics {
                 {
                     if (iface.ifa_data) |data| {
                         const if_data: *c.if_data = @ptrCast(@alignCast(data));
-                        metrics.net.bytes_recv += @intCast(if_data.ifi_ibytes);
-                        metrics.net.bytes_sent += @intCast(if_data.ifi_obytes);
+                        const recv_bytes: u64 = @intCast(if_data.ifi_ibytes);
+                        const sent_bytes: u64 = @intCast(if_data.ifi_obytes);
+                        metrics.net.bytes_recv += recv_bytes;
+                        metrics.net.bytes_sent += sent_bytes;
+
+                        // Store per-interface data (skip interfaces with zero traffic)
+                        if ((recv_bytes > 0 or sent_bytes > 0) and
+                            metrics.net.iface_count < model.MAX_INTERFACES)
+                        {
+                            const idx = metrics.net.iface_count;
+                            const name_ptr: [*:0]const u8 = @ptrCast(iface.ifa_name);
+                            const name_slice = std.mem.sliceTo(name_ptr, 0);
+                            const copy_len = @min(name_slice.len, model.IFACE_NAME_LEN);
+                            @memcpy(metrics.net.interfaces[idx].name[0..copy_len], name_slice[0..copy_len]);
+                            metrics.net.interfaces[idx].name_len = @intCast(copy_len);
+                            metrics.net.interfaces[idx].bytes_recv = recv_bytes;
+                            metrics.net.interfaces[idx].bytes_sent = sent_bytes;
+                            metrics.net.iface_count += 1;
+                        }
                     }
                 }
                 ifa = iface.ifa_next;

@@ -130,9 +130,21 @@ pub const CoreTicks = struct {
     nice: u64 = 0,
 };
 
+pub const MAX_INTERFACES = 8;
+pub const IFACE_NAME_LEN = 16;
+
+pub const InterfaceIO = struct {
+    name: [IFACE_NAME_LEN]u8 = [_]u8{0} ** IFACE_NAME_LEN,
+    name_len: u8 = 0,
+    bytes_recv: u64 = 0,
+    bytes_sent: u64 = 0,
+};
+
 pub const NetworkIO = struct {
     bytes_recv: u64 = 0,
     bytes_sent: u64 = 0,
+    interfaces: [MAX_INTERFACES]InterfaceIO = [_]InterfaceIO{.{}} ** MAX_INTERFACES,
+    iface_count: u8 = 0,
 };
 
 pub const DiskIO = struct {
