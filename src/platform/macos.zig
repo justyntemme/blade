@@ -4,6 +4,12 @@ const c = @cImport({
     @cInclude("sys/proc_info.h");
     @cInclude("sys/sysctl.h");
     @cInclude("pwd.h");
+    @cInclude("mach/mach.h");
+    @cInclude("mach/host_info.h");
+    @cInclude("mach/mach_host.h");
+    @cInclude("ifaddrs.h");
+    @cInclude("net/if.h");
+    @cInclude("stdlib.h");
 });
 
 const model = @import("model");
@@ -140,6 +146,110 @@ pub fn capabilities() platform.Capabilities {
         .has_io_stats = true,
         .has_start_time = true,
     };
+}
+
+pub fn collectSystemMetrics() model.SystemMetrics {
+    var metrics = model.SystemMetrics{};
+    metrics.timestamp_ns = std.time.nanoTimestamp();
+
+    // Per-core CPU ticks via host_processor_info()
+    {
+        var num_cpus: c.natural_t = 0;
+        var info: c.processor_info_array_t = null;
+        var info_count: c.mach_msg_type_number_t = 0;
+        const kr = c.host_processor_info(
+            c.mach_host_self(),
+            c.PROCESSOR_CPU_LOAD_INFO,
+            &num_cpus,
+            &info,
+            &info_count,
+        );
+        if (kr == c.KERN_SUCCESS) {
+            metrics.core_count = @intCast(num_cpus);
+            const cpu_load: [*]c.processor_cpu_load_info_data_t = @ptrCast(@alignCast(info));
+            const count = @min(num_cpus, model.MAX_CORES);
+            for (0..count) |i| {
+                const load = cpu_load[i];
+                metrics.core_ticks[i] = .{
+                    .user = load.cpu_ticks[c.CPU_STATE_USER],
+                    .system = load.cpu_ticks[c.CPU_STATE_SYSTEM],
+                    .idle = load.cpu_ticks[c.CPU_STATE_IDLE],
+                    .nice = load.cpu_ticks[c.CPU_STATE_NICE],
+                };
+            }
+            // Free the allocated info array
+            _ = c.vm_deallocate(
+                c.mach_task_self(),
+                @intFromPtr(info),
+                @as(c.vm_size_t, info_count) * @sizeOf(c.natural_t),
+            );
+        }
+    }
+
+    // Memory via host_statistics64(HOST_VM_INFO64) + sysctl(HW_MEMSIZE)
+    {
+        // Total physical memory
+        var mem_size: u64 = 0;
+        var mib = [2]c_int{ c.CTL_HW, c.HW_MEMSIZE };
+        var size: usize = @sizeOf(u64);
+        if (std.c.sysctl(&mib, 2, @ptrCast(&mem_size), &size, null, 0) == 0) {
+            metrics.mem_total = mem_size;
+        }
+
+        // VM stats for used memory calculation
+        var vm_info: c.vm_statistics64_data_t = undefined;
+        var count: c.mach_msg_type_number_t = @intCast(@sizeOf(c.vm_statistics64_data_t) / @sizeOf(c.natural_t));
+        const kr = c.host_statistics64(
+            c.mach_host_self(),
+            c.HOST_VM_INFO64,
+            @ptrCast(&vm_info),
+            &count,
+        );
+        if (kr == c.KERN_SUCCESS) {
+            const page_size: u64 = @intCast(c.vm_kernel_page_size);
+            const used_pages: u64 = @intCast(
+                @as(u64, @intCast(vm_info.active_count)) +
+                    @as(u64, @intCast(vm_info.wire_count)) +
+                    @as(u64, @intCast(vm_info.compressor_page_count)),
+            );
+            metrics.mem_used = used_pages * page_size;
+        }
+    }
+
+    // Load averages
+    {
+        var loadavg: [3]f64 = undefined;
+        if (c.getloadavg(&loadavg, 3) == 3) {
+            metrics.load_avg = loadavg;
+        }
+    }
+
+    // Network IO via getifaddrs (sum non-loopback interfaces)
+    {
+        var ifap: ?*c.ifaddrs = null;
+        if (c.getifaddrs(&ifap) == 0) {
+            var ifa = ifap;
+            while (ifa) |iface| {
+                if (iface.ifa_addr != null and
+                    iface.ifa_addr.*.sa_family == c.AF_LINK and
+                    (iface.ifa_flags & c.IFF_LOOPBACK) == 0)
+                {
+                    if (iface.ifa_data) |data| {
+                        const if_data: *c.if_data = @ptrCast(@alignCast(data));
+                        metrics.net.bytes_recv += @intCast(if_data.ifi_ibytes);
+                        metrics.net.bytes_sent += @intCast(if_data.ifi_obytes);
+                    }
+                }
+                ifa = iface.ifa_next;
+            }
+            c.freeifaddrs(ifap);
+        }
+    }
+
+    // Disk IO: stub with 0 for now (IOKit is complex, can add later)
+    // metrics.disk stays at default zeros
+
+    return metrics;
 }
 
 pub fn collectProcessDetail(pid: pid_t, arena: std.mem.Allocator) PlatformError!model.ProcessDetail {

@@ -22,7 +22,7 @@ fn memColor(mem_rss: u64) _Color {
     return .green;
 }
 
-fn renderHeader(buf: *tui.render.Buffer, x: u16, y: u16, label: []const u8, is_active: bool, dir_suffix: []const u8) void {
+fn renderColumnHeader(buf: *tui.render.Buffer, x: u16, y: u16, label: []const u8, is_active: bool, dir_suffix: []const u8) void {
     if (is_active) {
         var h_buf: [12]u8 = [_]u8{' '} ** 12;
         @memcpy(h_buf[0..label.len], label);
@@ -33,10 +33,33 @@ fn renderHeader(buf: *tui.render.Buffer, x: u16, y: u16, label: []const u8, is_a
     }
 }
 
-const app_layout = layout.Container.column(&[_]layout.Item{
-    .{ .id = "header", .sizing = .{ .fixed = 1 } },
-    .{ .id = "process_list", .sizing = .{ .grow = 1.0 } },
-    .{ .id = "footer_bar", .sizing = .{ .fixed = 1 } },
+// --- Horizon dashboard layout ---
+// left_stack is a nested column inside bottom_row's left half
+const left_stack = layout.Container.column(&[_]layout.Item{
+    .{ .id = "disk_io", .sizing = .{ .grow = 1.0 } },
+    .{ .id = "network", .sizing = .{ .grow = 1.0 } },
+});
+
+// proc_inner is a nested column for process pane content
+const proc_inner = layout.Container.column(&[_]layout.Item{
+    .{ .id = "proc_header", .sizing = .{ .fixed = 1 } },
+    .{ .id = "proc_list", .sizing = .{ .grow = 1.0 } },
+    .{ .id = "proc_footer", .sizing = .{ .fixed = 1 } },
+});
+
+const top_row = layout.Container.row(&[_]layout.Item{
+    .{ .id = "cpu_graph", .sizing = .{ .grow = 3.0 } },
+    .{ .id = "cores", .sizing = .{ .grow = 1.0 } },
+});
+
+const bottom_row = layout.Container.row(&[_]layout.Item{
+    .{ .id = "bottom_left", .sizing = .{ .grow = 1.0 }, .children = &left_stack },
+    .{ .id = "bottom_right", .sizing = .{ .grow = 1.0 }, .children = &proc_inner },
+});
+
+const horizon_layout = layout.Container.column(&[_]layout.Item{
+    .{ .id = "top_row", .sizing = .{ .percent = 0.375 }, .children = &top_row },
+    .{ .id = "bottom_row", .sizing = .{ .grow = 1.0 }, .children = &bottom_row },
 });
 
 const column_layout = layout.Container.row(&[_]layout.Item{
@@ -64,32 +87,91 @@ const detail_right_layout = layout.Container.column(&[_]layout.Item{
     .{ .id = "right_tree", .sizing = .{ .grow = 1.0 } },
 });
 
+/// Shrink a rect by 1 on all sides (for content inside a bordered pane).
+fn inset(rect: layout.Rect) layout.Rect {
+    return .{
+        .x = rect.x + 1,
+        .y = rect.y + 1,
+        .width = rect.width -| 2,
+        .height = rect.height -| 2,
+    };
+}
+
+fn renderPaneBorder(buf: *tui.render.Buffer, rect: layout.Rect, title: []const u8) void {
+    const block = tui.widgets.Block{
+        .title = title,
+        .borders = tui.widgets.Borders.all(),
+        .border_style = _Style{ .fg = .cyan },
+    };
+    block.render(.{ .x = rect.x, .y = rect.y, .width = rect.width, .height = rect.height }, buf);
+}
+
 pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
     const app = draw_ctx.state;
     const area = buf.getArea();
 
     var calculated = try layout.calculate(
         draw_ctx.scratch,
-        app_layout,
+        horizon_layout,
         layout.Rect{
-            .x = area.x + 1,
-            .y = area.y + 1,
-            .width = area.width -| 2,
-            .height = area.height -| 2,
+            .x = area.x,
+            .y = area.y,
+            .width = area.width,
+            .height = area.height,
         },
-    ); // ) catch return;
+    );
     defer calculated.deinit();
 
-    const header_rect = calculated.get("header") orelse {
-        buf.setString(0, 0, "Missing layout ID: header", _Style{ .fg = .red });
-        return;
-    };
-    const list_rect = calculated.get("process_list") orelse {
-        buf.setString(0, 0, "Missing layout ID: process_list", _Style{ .fg = .red });
-        return;
-    };
+    // Get pane rects from layout
+    const cpu_graph_rect = calculated.get("cpu_graph") orelse return;
+    const cores_rect = calculated.get("cores") orelse return;
+    const disk_io_rect = calculated.get("disk_io") orelse return;
+    const network_rect = calculated.get("network") orelse return;
+    const proc_header_rect = calculated.get("proc_header") orelse return;
+    const proc_list_rect = calculated.get("proc_list") orelse return;
+    const proc_footer_rect = calculated.get("proc_footer") orelse return;
+    const bottom_right_rect = calculated.get("bottom_right") orelse return;
+
+    // Draw pane borders
+    renderPaneBorder(buf, cpu_graph_rect, "CPU");
+    renderPaneBorder(buf, cores_rect, "Cores");
+    renderPaneBorder(buf, disk_io_rect, "Disk IO");
+    renderPaneBorder(buf, network_rect, "Network");
+    renderPaneBorder(buf, bottom_right_rect, "Processes");
+
+    // Render pane contents inside borders
+    renderCpuGraph(buf, inset(cpu_graph_rect), &app.system);
+    renderCoresBars(buf, inset(cores_rect), &app.system);
+    renderDiskIO(buf, inset(disk_io_rect), &app.system);
+    renderNetwork(buf, inset(network_rect), &app.system);
+
+    // Render process pane (inside the "Processes" border)
+    renderProcessPane(buf, draw_ctx.scratch, app, proc_header_rect, proc_list_rect, proc_footer_rect);
+
+    // Overlay modes
+    if (app.mode == .help) {
+        renderHelpView(buf, area, app);
+    }
+
+    if (app.mode == .detail) {
+        renderDetailView(buf, area, app, draw_ctx.scratch);
+    }
+
+    if (app.active_toast) |*toast| {
+        renderToast(buf, toast, area);
+    }
+}
+
+fn renderProcessPane(
+    buf: *tui.render.Buffer,
+    scratch: std.mem.Allocator,
+    app: *state.AppState,
+    header_rect: layout.Rect,
+    list_rect: layout.Rect,
+    footer_rect: layout.Rect,
+) void {
     var columns = layout.calculate(
-        draw_ctx.scratch,
+        scratch,
         column_layout,
         layout.Rect{
             .x = list_rect.x,
@@ -98,42 +180,15 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
             .height = 1,
         },
     ) catch return;
-
     defer columns.deinit();
 
-    const pid_col = columns.get("pid") orelse return {
-        buf.setString(0, 0, "Missing PID", _Style{ .fg = .red });
-        return;
-    };
-    const name_col = columns.get("name") orelse {
-        buf.setString(0, 0, "Missing Name", _Style{ .fg = .red });
-        return;
-    };
-    const cpu_col = columns.get("cpu") orelse {
-        buf.setString(0, 0, "Missing cpu", _Style{ .fg = .red });
-        return;
-    };
-    const mem_col = columns.get("mem") orelse {
-        buf.setString(0, 0, "Missing mem", _Style{ .fg = .red });
-        return;
-    };
-    const path_col = columns.get("path") orelse {
-        buf.setString(0, 0, "Missing path", _Style{ .fg = .red });
-        return;
-    };
+    const pid_col = columns.get("pid") orelse return;
+    const name_col = columns.get("name") orelse return;
+    const cpu_col = columns.get("cpu") orelse return;
+    const mem_col = columns.get("mem") orelse return;
+    const path_col = columns.get("path") orelse return;
 
-    const footer_rect = calculated.get("footer_bar") orelse {
-        buf.setString(0, 0, "footer_bar", _Style{ .fg = .red });
-        return;
-    };
-
-    const block = tui.widgets.Block{
-        .title = "Processes",
-        .borders = tui.widgets.Borders.all(),
-        .border_style = tui.style.Style{ .fg = .cyan },
-    };
-
-    const visible_rows = list_rect.height -| 1;
+    const visible_rows = list_rect.height;
     if (visible_rows > 0) {
         if (app.selected_item >= app.scroll_offset + visible_rows) {
             app.scroll_offset = app.selected_item - visible_rows + 1;
@@ -143,13 +198,13 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
         }
     }
     const dir_suffix: []const u8 = if (app.procs.sort_direction == .desc) "v" else "^";
-    renderHeader(buf, pid_col.x, header_rect.y, "PID", app.procs.sort_column == .pid, dir_suffix);
-    renderHeader(buf, name_col.x, header_rect.y, "Name", app.procs.sort_column == .name, dir_suffix);
-    renderHeader(buf, cpu_col.x, header_rect.y, "CPU%", app.procs.sort_column == .cpu, dir_suffix);
-    renderHeader(buf, mem_col.x, header_rect.y, "MEM", app.procs.sort_column == .mem, dir_suffix);
-    renderHeader(buf, path_col.x, header_rect.y, "Path", app.procs.sort_column == .path, dir_suffix);
+    renderColumnHeader(buf, pid_col.x, header_rect.y, "PID", app.procs.sort_column == .pid, dir_suffix);
+    renderColumnHeader(buf, name_col.x, header_rect.y, "Name", app.procs.sort_column == .name, dir_suffix);
+    renderColumnHeader(buf, cpu_col.x, header_rect.y, "CPU%", app.procs.sort_column == .cpu, dir_suffix);
+    renderColumnHeader(buf, mem_col.x, header_rect.y, "MEM", app.procs.sort_column == .mem, dir_suffix);
+    renderColumnHeader(buf, path_col.x, header_rect.y, "Path", app.procs.sort_column == .path, dir_suffix);
 
-    var y: u16 = list_rect.y + 1;
+    var y: u16 = list_rect.y;
     var idx: usize = app.scroll_offset;
     const rows = app.procs.render_rows.items;
     while (idx < rows.len) : (idx += 1) {
@@ -158,7 +213,6 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
         const row = rows[idx];
         const is_selected = idx == app.selected_item;
 
-        // Per-column styles
         const name_style: _Style = if (is_selected) .{ .bg = .blue, .fg = .white } else .{ .fg = .white };
         const secondary_style: _Style = if (is_selected) .{ .bg = .blue, .fg = .gray } else .{ .fg = .gray };
         const prefix_style: _Style = if (is_selected) .{ .bg = .blue, .fg = .gray } else .{ .fg = .gray };
@@ -200,19 +254,193 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
     } else {
         renderStatusBar(buf, footer_rect, app);
     }
-    block.render(area, buf);
+}
 
-    if (app.mode == .help) {
-        renderHelpView(buf, area, app);
+fn renderCpuGraph(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state.SystemState) void {
+    if (!sys.has_data or rect.width == 0 or rect.height == 0) {
+        buf.setString(rect.x, rect.y, "Waiting for data...", _Style{ .fg = .gray });
+        return;
     }
 
-    if (app.mode == .detail) {
-        renderDetailView(buf, area, app, draw_ctx.scratch);
+    const width: usize = @intCast(rect.width);
+    const height: usize = @intCast(rect.height);
+
+    // Draw braille area chart from CpuHistory ring buffer
+    // Each column maps to one sample, newest at right edge
+    const history = &sys.cpu_history;
+    const sample_count = history.count;
+
+    var col: usize = 0;
+    while (col < width) : (col += 1) {
+        // Map column to sample index (right-aligned)
+        const sample_idx = if (sample_count > width)
+            sample_count - width + col
+        else if (col >= width - sample_count)
+            col - (width - sample_count)
+        else {
+            continue; // no data for this column yet
+        };
+
+        const value = history.get(sample_idx);
+        const clamped = @min(value, 100.0);
+        // Height in braille dots (4 dots per character row)
+        const total_dots: usize = height * 4;
+        const fill_dots: usize = @intFromFloat(clamped / 100.0 * @as(f32, @floatFromInt(total_dots)));
+        const color = cpuColor(clamped);
+
+        // Render bottom-up: each character cell is 2 wide x 4 tall in braille
+        var row: usize = 0;
+        while (row < height) : (row += 1) {
+            const screen_row = height - 1 - row;
+            const dot_base = row * 4;
+            var pattern: u8 = 0;
+            // Braille left column dots (we use single-column: left dots only)
+            // dot 0 = bit 0, dot 1 = bit 1, dot 2 = bit 2, dot 6 = bit 6
+            const dot_bits = [4]u8{ 0x01, 0x02, 0x04, 0x40 };
+            for (dot_bits, 0..) |bit, di| {
+                if (dot_base + di < fill_dots) {
+                    pattern |= bit;
+                }
+            }
+            const braille_cp: u21 = 0x2800 + @as(u21, pattern);
+            var utf8_buf: [4]u8 = undefined;
+            const utf8_len = std.unicode.utf8Encode(braille_cp, &utf8_buf) catch continue;
+            buf.setString(
+                rect.x + @as(u16, @intCast(col)),
+                rect.y + @as(u16, @intCast(screen_row)),
+                utf8_buf[0..utf8_len],
+                _Style{ .fg = color },
+            );
+        }
     }
 
-    // Render toast notifications as overlay
-    if (app.active_toast) |*toast| {
-        renderToast(buf, toast, area);
+    // Total CPU% label at bottom-right
+    var label_buf: [12]u8 = undefined;
+    const label = std.fmt.bufPrint(&label_buf, "{d:>5.1}%", .{sys.total_cpu_percent}) catch "???";
+    const label_x = rect.x + rect.width -| @as(u16, @intCast(label.len));
+    buf.setString(label_x, rect.y + rect.height -| 1, label, _Style{ .fg = cpuColor(sys.total_cpu_percent), .modifier = _Modifier{ .bold = true } });
+}
+
+fn renderCoresBars(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state.SystemState) void {
+    if (!sys.has_data or rect.height == 0) {
+        buf.setString(rect.x, rect.y, "Waiting...", _Style{ .fg = .gray });
+        return;
+    }
+
+    const count = @min(sys.core_count, @as(u32, @intCast(rect.height -| 1)));
+    for (0..count) |i| {
+        const y = rect.y + @as(u16, @intCast(i));
+        const pct = sys.core_percents[i];
+        var line_buf: [48]u8 = undefined;
+        const label = std.fmt.bufPrint(&line_buf, "{d:>2} ", .{i}) catch "?? ";
+        buf.setString(rect.x, y, label, _Style{ .fg = .gray });
+        const bar_x = rect.x + @as(u16, @intCast(label.len));
+        const bar_w = rect.width -| @as(u16, @intCast(label.len)) -| 5;
+        renderBar(buf, bar_x, y, bar_w, pct, 100.0, cpuColor(pct));
+        var pct_buf: [6]u8 = undefined;
+        const pct_str = std.fmt.bufPrint(&pct_buf, "{d:>4.0}%", .{pct}) catch "???";
+        buf.setString(bar_x + bar_w + 1, y, pct_str, _Style{ .fg = cpuColor(pct) });
+    }
+
+    // Total line at bottom
+    const total_y = rect.y + rect.height -| 1;
+    var total_buf: [24]u8 = undefined;
+    const total_str = std.fmt.bufPrint(&total_buf, "total {d:>5.1}%", .{sys.total_cpu_percent}) catch "total ???";
+    const total_x = rect.x + rect.width -| @as(u16, @intCast(total_str.len));
+    buf.setString(total_x, total_y, total_str, _Style{ .fg = cpuColor(sys.total_cpu_percent), .modifier = _Modifier{ .bold = true } });
+}
+
+fn renderDiskIO(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state.SystemState) void {
+    if (!sys.has_data or rect.height == 0) {
+        buf.setString(rect.x, rect.y, "Waiting for data...", _Style{ .fg = .gray });
+        return;
+    }
+
+    // Read rate
+    buf.setString(rect.x, rect.y, "R ", _Style{ .fg = .green, .modifier = _Modifier{ .bold = true } });
+    const bar_w = rect.width -| 14;
+    renderRateBar(buf, rect.x + 2, rect.y, bar_w, sys.disk_read_rate, .green);
+    var r_buf: [12]u8 = undefined;
+    const r_str = formatRate(&r_buf, sys.disk_read_rate);
+    buf.setString(rect.x + 2 + bar_w + 1, rect.y, r_str, _Style{ .fg = .green });
+
+    // Write rate
+    if (rect.height > 1) {
+        buf.setString(rect.x, rect.y + 1, "W ", _Style{ .fg = .red, .modifier = _Modifier{ .bold = true } });
+        renderRateBar(buf, rect.x + 2, rect.y + 1, bar_w, sys.disk_write_rate, .red);
+        var w_buf: [12]u8 = undefined;
+        const w_str = formatRate(&w_buf, sys.disk_write_rate);
+        buf.setString(rect.x + 2 + bar_w + 1, rect.y + 1, w_str, _Style{ .fg = .red });
+    }
+}
+
+fn renderNetwork(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state.SystemState) void {
+    if (!sys.has_data or rect.height == 0) {
+        buf.setString(rect.x, rect.y, "Waiting for data...", _Style{ .fg = .gray });
+        return;
+    }
+
+    // Recv rate
+    const recv_glyph = "\xe2\x96\xbc"; // U+25BC black down-pointing triangle
+    buf.setString(rect.x, rect.y, recv_glyph, _Style{ .fg = .green, .modifier = _Modifier{ .bold = true } });
+    const bar_w = rect.width -| 14;
+    renderRateBar(buf, rect.x + 2, rect.y, bar_w, sys.net_recv_rate, .green);
+    var r_buf: [12]u8 = undefined;
+    const r_str = formatRate(&r_buf, sys.net_recv_rate);
+    buf.setString(rect.x + 2 + bar_w + 1, rect.y, r_str, _Style{ .fg = .green });
+
+    // Sent rate
+    if (rect.height > 1) {
+        const sent_glyph = "\xe2\x96\xb2"; // U+25B2 black up-pointing triangle
+        buf.setString(rect.x, rect.y + 1, sent_glyph, _Style{ .fg = .red, .modifier = _Modifier{ .bold = true } });
+        renderRateBar(buf, rect.x + 2, rect.y + 1, bar_w, sys.net_sent_rate, .red);
+        var s_buf: [12]u8 = undefined;
+        const s_str = formatRate(&s_buf, sys.net_sent_rate);
+        buf.setString(rect.x + 2 + bar_w + 1, rect.y + 1, s_str, _Style{ .fg = .red });
+    }
+}
+
+fn renderBar(buf: *tui.render.Buffer, x: u16, y: u16, width: u16, value: f32, max_val: f32, color: _Color) void {
+    if (width == 0) return;
+    const ratio = @min(value / max_val, 1.0);
+    const filled: u16 = @intFromFloat(ratio * @as(f32, @floatFromInt(width)));
+
+    var i: u16 = 0;
+    while (i < width) : (i += 1) {
+        if (i < filled) {
+            buf.setString(x + i, y, "\xe2\x96\x88", _Style{ .fg = color }); // U+2588 full block
+        } else {
+            buf.setString(x + i, y, "\xe2\x96\x91", _Style{ .fg = .gray }); // U+2591 light shade
+        }
+    }
+}
+
+fn renderRateBar(buf: *tui.render.Buffer, x: u16, y: u16, width: u16, rate: f64, color: _Color) void {
+    if (width == 0) return;
+    // Auto-scale: bar is relative to a reasonable max (100 MB/s)
+    const max_rate: f64 = 100.0 * 1024.0 * 1024.0;
+    const ratio: f32 = @floatCast(@min(rate / max_rate, 1.0));
+    const filled: u16 = @intFromFloat(ratio * @as(f32, @floatFromInt(width)));
+
+    var i: u16 = 0;
+    while (i < width) : (i += 1) {
+        if (i < filled) {
+            buf.setString(x + i, y, "\xe2\x96\x88", _Style{ .fg = color });
+        } else {
+            buf.setString(x + i, y, "\xe2\x96\x91", _Style{ .fg = .gray });
+        }
+    }
+}
+
+fn formatRate(out_buf: *[12]u8, rate: f64) []const u8 {
+    if (rate >= 1024.0 * 1024.0 * 1024.0) {
+        return std.fmt.bufPrint(out_buf, "{d:>5.1} GB/s", .{rate / (1024.0 * 1024.0 * 1024.0)}) catch "??? GB/s";
+    } else if (rate >= 1024.0 * 1024.0) {
+        return std.fmt.bufPrint(out_buf, "{d:>5.1} MB/s", .{rate / (1024.0 * 1024.0)}) catch "??? MB/s";
+    } else if (rate >= 1024.0) {
+        return std.fmt.bufPrint(out_buf, "{d:>5.1} KB/s", .{rate / 1024.0}) catch "??? KB/s";
+    } else {
+        return std.fmt.bufPrint(out_buf, "{d:>5.0}  B/s", .{rate}) catch "???  B/s";
     }
 }
 

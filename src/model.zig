@@ -118,3 +118,56 @@ pub const SortContext = struct {
     sort_column: SortColumn,
     sort_direction: SortDirection,
 };
+
+// --- System metrics types for Horizon dashboard ---
+
+pub const MAX_CORES = 128;
+
+pub const CoreTicks = struct {
+    user: u64 = 0,
+    system: u64 = 0,
+    idle: u64 = 0,
+    nice: u64 = 0,
+};
+
+pub const NetworkIO = struct {
+    bytes_recv: u64 = 0,
+    bytes_sent: u64 = 0,
+};
+
+pub const DiskIO = struct {
+    bytes_read: u64 = 0,
+    bytes_written: u64 = 0,
+};
+
+pub const SystemMetrics = struct {
+    timestamp_ns: i128 = 0,
+    core_count: u32 = 0,
+    core_ticks: [MAX_CORES]CoreTicks = [_]CoreTicks{.{}} ** MAX_CORES,
+    mem_total: u64 = 0,
+    mem_used: u64 = 0,
+    load_avg: [3]f64 = .{ 0, 0, 0 },
+    net: NetworkIO = .{},
+    disk: DiskIO = .{},
+};
+
+pub const CPU_HISTORY_LEN = 300;
+
+pub const CpuHistory = struct {
+    samples: [CPU_HISTORY_LEN]f32 = [_]f32{0} ** CPU_HISTORY_LEN,
+    head: usize = 0,
+    count: usize = 0,
+
+    pub fn push(self: *CpuHistory, value: f32) void {
+        self.samples[self.head] = value;
+        self.head = (self.head + 1) % CPU_HISTORY_LEN;
+        if (self.count < CPU_HISTORY_LEN) self.count += 1;
+    }
+
+    /// Returns sample at logical index i (0 = oldest).
+    pub fn get(self: *const CpuHistory, i: usize) f32 {
+        if (i >= self.count) return 0;
+        const start = if (self.count < CPU_HISTORY_LEN) 0 else self.head;
+        return self.samples[(start + i) % CPU_HISTORY_LEN];
+    }
+};

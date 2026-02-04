@@ -36,3 +36,7 @@ pub fn capabilities() Capabilities {
 pub fn collectProcessDetail(pid: std.posix.pid_t, arena: std.mem.Allocator) PlatformError!model.ProcessDetail {
     return backend.collectProcessDetail(pid, arena);
 }
+
+pub fn collectSystemMetrics() model.SystemMetrics {
+    return backend.collectSystemMetrics();
+}

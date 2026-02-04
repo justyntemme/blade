@@ -3,8 +3,9 @@
     .version = "0.0.1",
     .dependencies = .{
         .zigtui = .{
-            .url = "git+https://github.com/justyntemme/zigtui.git#93a42452219fa9d5fd9b45e6e5722a1017df490b",
-            .hash = "zigtui-0.1.0-U55PSITXAgDV2BnmYWUFFTAne0utbVK9QWnap5H3pG6m",
+            .path = "../zigtui/",
+            // .url = "git+https://github.com/justyntemme/zigtui.git#93a42452219fa9d5fd9b45e6e5722a1017df490b",
+            // .hash = "zigtui-0.1.0-U55PSITXAgDV2BnmYWUFFTAne0utbVK9QWnap5H3pG6m",
         },
         .spsc_queue = .{
             .url = "git+https://github.com/freref/spsc-queue.git#3ce8a39c53b026ef42eb569e66bc04c6356869e8",

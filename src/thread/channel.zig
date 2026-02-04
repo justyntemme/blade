@@ -16,6 +16,7 @@ pub const Batch = struct {
     arena: std.heap.ArenaAllocator,
     map: std.AutoHashMap(platform.pid_t, platform.Proc),
     timestamp_ns: i128 = 0,
+    system: ?model.SystemMetrics = null,
 
     pub fn deinit(self: *Batch) void {
         // Note: map.deinit() is intentionally omitted.
