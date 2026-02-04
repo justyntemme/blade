@@ -132,13 +132,11 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
     const ns_w: u16 = lt_iw -| ng_w;
     const x_vdC = area.x + 1 + ng_w;
 
-    // X: left panel bottom: memory | vdD | disk_io | vdE | disks
-    const lb_iw = left_w -| 2;
-    const mem_w: u16 = lb_iw / 3;
-    const io_w: u16 = lb_iw / 3;
-    const dk_w: u16 = lb_iw -| mem_w -| io_w;
-    const x_vdD = area.x + 1 + mem_w;
-    const x_vdE = x_vdD + 1 + io_w;
+    // X: left panel bottom: disk_io | vdD | disks (2 columns)
+    const lb_iw = left_w -| 1;
+    const io_w: u16 = lb_iw / 2;
+    const dk_w: u16 = lb_iw -| io_w;
+    const x_vdD = area.x + 1 + io_w;
 
     // ── Draw outer border ─────────────────────────────────────────
     const x0 = area.x;
@@ -208,7 +206,7 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
         buf.setChar(x_vdC, y_hd2, BD_BT, border_style);
     }
 
-    // vdD: between Memory and Disk IO (left panel bottom sub-row)
+    // vdD: between Disk IO and Disks (left panel bottom sub-row)
     {
         buf.setChar(x_vdD, y_hd2, BD_TT, border_style);
         var y: u16 = y_hd2 + 1;
@@ -216,39 +214,28 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
         buf.setChar(x_vdD, y1, BD_BT, border_style);
     }
 
-    // vdE: between Disk IO and Disks (left panel bottom sub-row)
-    {
-        buf.setChar(x_vdE, y_hd2, BD_TT, border_style);
-        var y: u16 = y_hd2 + 1;
-        while (y < y1) : (y += 1) buf.setChar(x_vdE, y, BD_VER, border_style);
-        buf.setChar(x_vdE, y1, BD_BT, border_style);
-    }
-
     // ── Titles on borders / dividers ──────────────────────────────
     drawTitle(buf, x0 + 2, y0, "CPU");
     drawTitle(buf, x_vdA + 2, y0, "Cores");
     drawTitle(buf, x0 + 2, y_hd1, "Network");
-    drawTitle(buf, x_vdC + 2, y_hd1, "Sync");
+    drawTitle(buf, x_vdC + 2, y_hd1, "Memory");
     drawTitle(buf, x_vdB + 2, y_hd1, "Processes");
-    drawTitle(buf, x0 + 2, y_hd2, "Memory");
-    drawTitle(buf, x_vdD + 2, y_hd2, "Disk IO");
-    drawTitle(buf, x_vdE + 2, y_hd2, "Disks");
+    drawTitle(buf, x0 + 2, y_hd2, "Disk IO");
+    drawTitle(buf, x_vdD + 2, y_hd2, "Disks");
 
     // ── Content rects (the usable interior of each pane) ──────────
     const cpu_rect = layout.Rect{ .x = x0 + 1, .y = y0 + 1, .width = cpu_w, .height = top_h };
     const cores_rect = layout.Rect{ .x = x_vdA + 1, .y = y0 + 1, .width = cores_w, .height = top_h };
-    const net_graph_rect = layout.Rect{ .x = x0 + 1, .y = y_hd1 + 1, .width = ng_w, .height = left_top_h };
-    const net_sync_rect = layout.Rect{ .x = x_vdC + 1, .y = y_hd1 + 1, .width = ns_w, .height = left_top_h };
-    const memory_rect = layout.Rect{ .x = x0 + 1, .y = y_hd2 + 1, .width = mem_w, .height = left_bot_h };
-    const disk_io_rect = layout.Rect{ .x = x_vdD + 1, .y = y_hd2 + 1, .width = io_w, .height = left_bot_h };
-    const disks_rect = layout.Rect{ .x = x_vdE + 1, .y = y_hd2 + 1, .width = dk_w, .height = left_bot_h };
+    const network_rect = layout.Rect{ .x = x0 + 1, .y = y_hd1 + 1, .width = ng_w, .height = left_top_h };
+    const memory_rect = layout.Rect{ .x = x_vdC + 1, .y = y_hd1 + 1, .width = ns_w, .height = left_top_h };
+    const disk_io_rect = layout.Rect{ .x = x0 + 1, .y = y_hd2 + 1, .width = io_w, .height = left_bot_h };
+    const disks_rect = layout.Rect{ .x = x_vdD + 1, .y = y_hd2 + 1, .width = dk_w, .height = left_bot_h };
     const proc_rect = layout.Rect{ .x = x_vdB + 1, .y = y_hd1 + 1, .width = proc_w, .height = y1 - y_hd1 - 1 };
 
     // ── Render content into each pane ─────────────────────────────
     renderCpuGraphBraille(buf, cpu_rect, &app.system);
     renderCoresBars(buf, cores_rect, &app.system);
-    renderNetGraph(buf, net_graph_rect, &app.system);
-    renderNetSync(buf, net_sync_rect, &app.system);
+    renderNetworkCombined(buf, network_rect, &app.system);
     renderMemoryPane(buf, memory_rect, &app.system);
     renderDiskIO(buf, disk_io_rect, &app.system);
     renderDisksPane(buf, disks_rect, &app.system);
@@ -575,9 +562,8 @@ fn renderCoresBars(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state
         return;
     }
 
-    // Layout: per-core sparkline rows, then optional memory row, then total CPU
-    // Reserve 2 lines at bottom: memory sparkline + total
-    const reserved_bottom: u16 = 2;
+    // Layout: per-core sparkline rows, then total CPU bar at bottom
+    const reserved_bottom: u16 = 1;
     const core_area_h = rect.height -| reserved_bottom;
     const count = @min(sys.core_count, @as(u32, @intCast(core_area_h)));
     const label_w: u16 = 3; // "XX "
@@ -602,31 +588,25 @@ fn renderCoresBars(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state
         buf.setString(rect.x + label_w + sparkline_w, y, pct_str, _Style{ .fg = cpuColor(pct) });
     }
 
-    // Memory sparkline (if space)
-    const mem_y = rect.y + rect.height -| 2;
-    if (sys.mem_total > 0 and mem_y > rect.y + @as(u16, @intCast(count))) {
-        const mem_pct: f32 = @as(f32, @floatFromInt(sys.mem_used)) / @as(f32, @floatFromInt(sys.mem_total)) * 100.0;
-        const mc = memPercentColor(mem_pct);
-        buf.setString(rect.x, mem_y, "Mem", _Style{ .fg = .gray });
+    // Total CPU bar at bottom: "tot [bar] NN.N%"
+    const total_y = rect.y + rect.height -| 1;
+    const cpu_color = cpuColor(sys.total_cpu_percent);
+    const cpu_bold = _Style{ .fg = cpu_color, .modifier = _Modifier{ .bold = true } };
 
-        // Memory label: "XX.X/YYG"
-        var mem_buf: [16]u8 = undefined;
-        const used_gb = @as(f64, @floatFromInt(sys.mem_used)) / (1024.0 * 1024.0 * 1024.0);
-        const total_gb = @as(f64, @floatFromInt(sys.mem_total)) / (1024.0 * 1024.0 * 1024.0);
-        const mem_str = std.fmt.bufPrint(&mem_buf, "{d:.1}/{d:.0}G", .{ used_gb, total_gb }) catch "???";
-        const mem_label_w: u16 = @intCast(mem_str.len);
-        const mem_sparkline_w = rect.width -| label_w -| mem_label_w;
+    const tot_label_w: u16 = 4; // "tot "
+    const tot_pct_w: u16 = 6; // " NN.N%"
+    const tot_overhead: u16 = tot_label_w + tot_pct_w; // 10
+    const tot_bar_w = rect.width -| tot_overhead;
 
-        renderCoreBrailleRow(buf, rect.x + label_w, mem_y, mem_sparkline_w, &sys.mem_history, mc);
-        buf.setString(rect.x + label_w + mem_sparkline_w, mem_y, mem_str, _Style{ .fg = mc });
+    buf.setString(rect.x, total_y, "tot ", cpu_bold);
+
+    if (tot_bar_w > 0) {
+        renderBar(buf, rect.x + tot_label_w, total_y, tot_bar_w, sys.total_cpu_percent, 100.0, cpu_color);
     }
 
-    // Total CPU line at bottom
-    const total_y = rect.y + rect.height -| 1;
-    var total_buf: [24]u8 = undefined;
-    const total_str = std.fmt.bufPrint(&total_buf, "total {d:>5.1}%", .{sys.total_cpu_percent}) catch "total ???";
-    const total_x = rect.x + rect.width -| @as(u16, @intCast(total_str.len));
-    buf.setString(total_x, total_y, total_str, _Style{ .fg = cpuColor(sys.total_cpu_percent), .modifier = _Modifier{ .bold = true } });
+    var tot_pct_buf: [6]u8 = undefined;
+    const tot_pct_str = std.fmt.bufPrint(&tot_pct_buf, "{d:>5.1}%", .{sys.total_cpu_percent}) catch " ???%";
+    buf.setString(rect.x + rect.width -| tot_pct_w, total_y, tot_pct_str, cpu_bold);
 }
 
 fn renderDiskIO(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state.SystemState) void {
@@ -689,116 +669,84 @@ fn renderDiskIO(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state.Sy
     }
 }
 
-fn renderNetGraph(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state.SystemState) void {
+fn renderNetworkCombined(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state.SystemState) void {
     if (!sys.has_data or rect.height == 0) {
         buf.setString(rect.x, rect.y, "Waiting for data...", _Style{ .fg = .gray });
         return;
     }
 
-    // Split vertically: recv (top half), sent (bottom half)
-    const half_h = rect.height / 2;
-    if (half_h < 1) return;
-
-    // Recv braille chart (top half)
-    if (half_h > 0) {
-        renderRateBrailleChart(buf, .{
-            .x = rect.x,
-            .y = rect.y,
-            .width = rect.width,
-            .height = half_h,
-        }, &sys.net_recv_history, .green);
-    }
-
-    // Overlay recv rate label at right edge of top half
-    var r_buf: [12]u8 = undefined;
-    const r_str = formatRate(&r_buf, sys.net_recv_rate);
-    const r_label_x = rect.x + rect.width -| @as(u16, @intCast(r_str.len));
-    buf.setString(r_label_x, rect.y + half_h -| 1, r_str, _Style{ .fg = .green, .modifier = _Modifier{ .bold = true } });
-
-    // Sent braille chart (bottom half)
-    const sent_h = rect.height -| half_h;
-    if (sent_h > 0) {
-        renderRateBrailleChart(buf, .{
-            .x = rect.x,
-            .y = rect.y + half_h,
-            .width = rect.width,
-            .height = sent_h,
-        }, &sys.net_sent_history, .red);
-    }
-
-    // Overlay sent rate label at right edge of bottom half
-    var s_buf: [12]u8 = undefined;
-    const s_str = formatRate(&s_buf, sys.net_sent_rate);
-    const s_label_x = rect.x + rect.width -| @as(u16, @intCast(s_str.len));
-    buf.setString(s_label_x, rect.y + rect.height -| 1, s_str, _Style{ .fg = .red, .modifier = _Modifier{ .bold = true } });
-}
-
-fn renderNetSync(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state.SystemState) void {
-    if (!sys.has_data or rect.height == 0) {
-        buf.setString(rect.x, rect.y, "Waiting for data...", _Style{ .fg = .gray });
-        return;
-    }
-
-    const recv_glyph = "\xe2\x96\xbc"; // U+25BC
-    const sent_glyph = "\xe2\x96\xb2"; // U+25B2
+    const recv_glyph = "\xe2\x96\xbc"; // U+25BC ▼
+    const sent_glyph = "\xe2\x96\xb2"; // U+25B2 ▲
     const lbl_style = _Style{ .fg = .gray };
 
-    // Content is 7 lines; vertically center if there's extra room
-    const content_lines: u16 = 7;
-    const pad_top: u16 = if (rect.height > content_lines) (rect.height - content_lines) / 2 else 0;
-    var y: u16 = rect.y + pad_top;
+    // Sync text on the left, graph on the right
+    const sync_w: u16 = @min(15, rect.width);
+    const gap: u16 = if (rect.width > sync_w + 4) 1 else 0;
+    const graph_w = rect.width -| sync_w -| gap;
+    const graph_x = rect.x + sync_w + gap;
+
+    var y: u16 = rect.y;
     const max_y = rect.y + rect.height;
 
-    // "download" header
+    // Download rate
     if (y < max_y) {
-        buf.setString(rect.x, y, "download", _Style{ .fg = .green, .modifier = _Modifier{ .bold = true } });
-        y += 1;
-    }
-
-    // download rate
-    if (y < max_y) {
+        buf.setString(rect.x, y, recv_glyph, _Style{ .fg = .green });
         var r_buf: [12]u8 = undefined;
         const r_str = formatRate(&r_buf, sys.net_recv_rate);
-        buf.setString(rect.x, y, recv_glyph, _Style{ .fg = .green });
         buf.setString(rect.x + 2, y, r_str, _Style{ .fg = .green });
         y += 1;
     }
 
-    // download total
+    // Download total
     if (y < max_y) {
         var t_buf: [12]u8 = undefined;
         const t_str = formatBytes(&t_buf, sys.net_total_recv);
-        buf.setString(rect.x, y, recv_glyph, _Style{ .fg = .green });
-        buf.setString(rect.x + 2, y, "Total: ", lbl_style);
-        buf.setString(rect.x + 9, y, t_str, _Style{ .fg = .green });
+        buf.setString(rect.x + 2, y, t_str, lbl_style);
         y += 1;
     }
 
-    // blank line
-    y += 1;
+    // Blank separator
+    if (y < max_y) y += 1;
 
-    // "upload" header
+    // Upload rate
     if (y < max_y) {
-        buf.setString(rect.x, y, "upload", _Style{ .fg = .red, .modifier = _Modifier{ .bold = true } });
-        y += 1;
-    }
-
-    // upload rate
-    if (y < max_y) {
+        buf.setString(rect.x, y, sent_glyph, _Style{ .fg = .red });
         var s_buf: [12]u8 = undefined;
         const s_str = formatRate(&s_buf, sys.net_sent_rate);
-        buf.setString(rect.x, y, sent_glyph, _Style{ .fg = .red });
         buf.setString(rect.x + 2, y, s_str, _Style{ .fg = .red });
         y += 1;
     }
 
-    // upload total
+    // Upload total
     if (y < max_y) {
         var t_buf: [12]u8 = undefined;
         const t_str = formatBytes(&t_buf, sys.net_total_sent);
-        buf.setString(rect.x, y, sent_glyph, _Style{ .fg = .red });
-        buf.setString(rect.x + 2, y, "Total: ", lbl_style);
-        buf.setString(rect.x + 9, y, t_str, _Style{ .fg = .red });
+        buf.setString(rect.x + 2, y, t_str, lbl_style);
+    }
+
+    // Graph on the right (if space allows)
+    if (graph_w >= 4) {
+        const half_h = rect.height / 2;
+        if (half_h >= 1) {
+            // Recv graph (top half)
+            renderRateBrailleChart(buf, .{
+                .x = graph_x,
+                .y = rect.y,
+                .width = graph_w,
+                .height = half_h,
+            }, &sys.net_recv_history, .green);
+
+            // Sent graph (bottom half)
+            const sent_h = rect.height -| half_h;
+            if (sent_h > 0) {
+                renderRateBrailleChart(buf, .{
+                    .x = graph_x,
+                    .y = rect.y + half_h,
+                    .width = graph_w,
+                    .height = sent_h,
+                }, &sys.net_sent_history, .red);
+            }
+        }
     }
 }
 
@@ -823,70 +771,62 @@ fn renderMemoryPane(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const stat
         return;
     }
 
-    const lbl_style = _Style{ .fg = .gray };
-    // Content is 6 lines; vertically center if extra room
-    const content_lines: u16 = 6;
-    const pad_top: u16 = if (rect.height > content_lines) (rect.height - content_lines) / 2 else 0;
-    var y: u16 = rect.y + pad_top;
+    var y: u16 = rect.y;
     const max_y = rect.y + rect.height;
+    const mem_total_f: f32 = @floatFromInt(sys.mem_total);
 
-    // Total
-    if (y < max_y) {
+    // Line 1: Total — label left, value right (only if width >= 15)
+    if (y < max_y and rect.width >= 15) {
+        buf.setString(rect.x, y, "Total", _Style{ .fg = .gray });
         var b: [12]u8 = undefined;
         const s = formatBytes(&b, sys.mem_total);
-        buf.setString(rect.x, y, "Total: ", lbl_style);
-        buf.setString(rect.x + 7, y, s, _Style{ .fg = .light_white });
+        const val_x = rect.x + rect.width -| @as(u16, @intCast(s.len));
+        buf.setString(val_x, y, s, _Style{ .fg = .light_white });
         y += 1;
     }
 
-    // Used
-    if (y < max_y) {
-        var b: [12]u8 = undefined;
-        const s = formatBytes(&b, sys.mem_used);
-        buf.setString(rect.x, y, "Used:  ", lbl_style);
-        buf.setString(rect.x + 7, y, s, _Style{ .fg = .light_white });
-        y += 1;
-    }
+    // Compact bar lines: "L [bar] NN%"
+    // Label: 1 char + space = 2 chars prefix
+    // Percent: " NN%" = 4 chars suffix
+    // Bar: width - 6 chars
+    const label_w: u16 = 2;
+    const pct_w: u16 = 4;
+    const overhead: u16 = label_w + pct_w; // 6
 
-    // Usage bar with percentage
-    if (y < max_y and sys.mem_total > 0) {
-        const pct: f32 = @as(f32, @floatFromInt(sys.mem_used)) / @as(f32, @floatFromInt(sys.mem_total)) * 100.0;
-        const color = memPercentColor(pct);
-        // Bar takes available width minus the " NNN%" suffix (5 chars)
-        const bar_w = rect.width -| 5;
+    const MemLine = struct {
+        label: []const u8,
+        value: u64,
+        color: _Color,
+    };
+
+    const lines = [4]MemLine{
+        .{ .label = "U ", .value = sys.mem_used, .color = if (mem_total_f > 0) memPercentColor(@as(f32, @floatFromInt(sys.mem_used)) / mem_total_f * 100.0) else .green },
+        .{ .label = "A ", .value = sys.mem_available, .color = .cyan },
+        .{ .label = "C ", .value = sys.mem_cached, .color = .blue },
+        .{ .label = "F ", .value = sys.mem_free, .color = .cyan },
+    };
+
+    for (lines) |line| {
+        if (y >= max_y) break;
+        if (mem_total_f == 0) break;
+
+        const pct: f32 = @as(f32, @floatFromInt(line.value)) / mem_total_f * 100.0;
+
+        // Label (gray)
+        buf.setString(rect.x, y, line.label, _Style{ .fg = .gray });
+
+        // Bar
+        const bar_w = rect.width -| overhead;
         if (bar_w > 0) {
-            renderBar(buf, rect.x, y, bar_w, pct, 100.0, color);
+            renderBar(buf, rect.x + label_w, y, bar_w, pct, 100.0, line.color);
         }
-        var pct_buf: [6]u8 = undefined;
-        const pct_str = std.fmt.bufPrint(&pct_buf, "{d:>4.0}%", .{pct}) catch " ???%";
-        buf.setString(rect.x + bar_w, y, pct_str, _Style{ .fg = color });
-        y += 1;
-    }
 
-    // Available
-    if (y < max_y) {
-        var b: [12]u8 = undefined;
-        const s = formatBytes(&b, sys.mem_available);
-        buf.setString(rect.x, y, "Avail: ", lbl_style);
-        buf.setString(rect.x + 7, y, s, _Style{ .fg = .light_white });
-        y += 1;
-    }
+        // Percent (right-aligned, colored)
+        var pct_buf: [4]u8 = undefined;
+        const pct_str = std.fmt.bufPrint(&pct_buf, "{d:>3.0}%", .{pct}) catch "??%";
+        buf.setString(rect.x + rect.width -| pct_w, y, pct_str, _Style{ .fg = line.color });
 
-    // Cached
-    if (y < max_y) {
-        var b: [12]u8 = undefined;
-        const s = formatBytes(&b, sys.mem_cached);
-        buf.setString(rect.x, y, "Cache: ", lbl_style);
-        buf.setString(rect.x + 7, y, s, _Style{ .fg = .light_white });
         y += 1;
-    }
-
-    // Free
-    if (y < max_y) {
-        var b: [12]u8 = undefined;
-        const s = formatBytes(&b, sys.mem_free);
-        buf.setString(rect.x, y, "Free:  ", lbl_style);
-        buf.setString(rect.x + 7, y, s, _Style{ .fg = .light_white });
     }
 }
 
@@ -902,60 +842,89 @@ fn renderDisksPane(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state
         return;
     }
 
+    const DASH: u21 = 0x2500; // ─ horizontal dash
     var y: u16 = rect.y;
     const max_y = rect.y + rect.height;
+    const pct_reserve: u16 = 5; // " NN%" = space + 3-digit + %
 
-    for (sys.mounts[0..sys.mount_count]) |mount| {
+    var mount_idx: u32 = 0;
+    while (mount_idx < sys.mount_count) : (mount_idx += 1) {
+        const mount = sys.mounts[mount_idx];
+        // Each disk needs 2 lines minimum
         if (y >= max_y) break;
+        if (y + 1 >= max_y and mount.total_bytes > 0) break;
 
         const name = mount.name[0..mount.name_len];
+        const name_len: u16 = @intCast(name.len);
 
-        // Line 1: name (bold) + right-aligned total size
-        buf.setString(rect.x, y, name, _Style{ .fg = .light_white, .modifier = _Modifier{ .bold = true } });
+        // Line 1: name (bold) ─── total_size (gray)
+        const name_display_len = @min(name_len, rect.width -| 1);
+        buf.setString(rect.x, y, name[0..name_display_len], _Style{ .fg = .light_white, .modifier = _Modifier{ .bold = true } });
+
         var total_buf: [12]u8 = undefined;
         const total_str = formatBytes(&total_buf, mount.total_bytes);
-        const total_x = rect.x + rect.width -| @as(u16, @intCast(total_str.len));
+        const total_len: u16 = @intCast(total_str.len);
+        const total_x = rect.x + rect.width -| total_len;
         buf.setString(total_x, y, total_str, _Style{ .fg = .gray });
+
+        // Fill dashes between name and total size (with 1-char gap each side)
+        const dash_start = rect.x + name_display_len + 1;
+        const dash_end = if (total_x > 0) total_x -| 1 else total_x;
+        if (dash_end > dash_start) {
+            var dx: u16 = dash_start;
+            while (dx <= dash_end) : (dx += 1) {
+                buf.setChar(dx, y, DASH, _Style{ .fg = .gray });
+            }
+        }
         y += 1;
 
         if (y >= max_y) break;
 
-        // Line 2: NN% [bar] used_size
+        // Line 2: full-width bar with percentage
         if (mount.total_bytes > 0) {
             const pct: f32 = @as(f32, @floatFromInt(mount.used_bytes)) / @as(f32, @floatFromInt(mount.total_bytes)) * 100.0;
             const color = diskPercentColor(pct);
 
-            // "NNN% " prefix (5 chars) + used_size suffix (~10 chars)
-            var pct_buf: [5]u8 = undefined;
-            const pct_str = std.fmt.bufPrint(&pct_buf, "{d:>3.0}% ", .{pct}) catch "???% ";
-            buf.setString(rect.x, y, pct_str, _Style{ .fg = color });
-
-            var used_buf: [12]u8 = undefined;
-            const used_str = formatBytes(&used_buf, mount.used_bytes);
-            const used_w: u16 = @intCast(used_str.len);
-
-            const bar_start: u16 = 5;
-            const bar_w = rect.width -| bar_start -| used_w;
+            // Bar fills from left edge, percentage at right
+            const bar_w = rect.width -| pct_reserve;
             if (bar_w > 0) {
-                renderBar(buf, rect.x + bar_start, y, bar_w, pct, 100.0, color);
+                renderBar(buf, rect.x, y, bar_w, pct, 100.0, color);
             }
-            buf.setString(rect.x + bar_start + bar_w, y, used_str, _Style{ .fg = color });
+
+            // " NN%" right-aligned
+            var pct_buf: [5]u8 = undefined;
+            const pct_str = std.fmt.bufPrint(&pct_buf, " {d:>3.0}%", .{pct}) catch " ??%";
+            buf.setString(rect.x + rect.width -| pct_reserve, y, pct_str, _Style{ .fg = color });
         }
         y += 1;
+
+        // Add blank line between disks if space allows and more disks follow
+        if (mount_idx + 1 < sys.mount_count and y + 2 < max_y) {
+            y += 1;
+        }
     }
 }
+
+// 1/8th-width block characters for sub-cell precision bars (index 0 = 1/8, index 7 = full)
+const partial_blocks = [8]u21{ 0x258F, 0x258E, 0x258D, 0x258C, 0x258B, 0x258A, 0x2589, 0x2588 };
+const EMPTY_SHADE: u21 = 0x2591; // ░ light shade for unfilled bar cells
+const FULL_BLOCK: u21 = 0x2588; // █ full block
 
 fn renderBar(buf: *tui.render.Buffer, x: u16, y: u16, width: u16, value: f32, max_val: f32, color: _Color) void {
     if (width == 0) return;
     const ratio = @min(value / max_val, 1.0);
-    const filled: u16 = @intFromFloat(ratio * @as(f32, @floatFromInt(width)));
+    const fill_eighths: u32 = @intFromFloat(ratio * @as(f32, @floatFromInt(width)) * 8.0);
+    const full_cells: u16 = @intCast(fill_eighths / 8);
+    const remainder: u3 = @intCast(fill_eighths % 8);
 
     var i: u16 = 0;
     while (i < width) : (i += 1) {
-        if (i < filled) {
-            buf.setString(x + i, y, "\xe2\x96\x88", _Style{ .fg = color }); // U+2588 full block
+        if (i < full_cells) {
+            buf.setChar(x + i, y, FULL_BLOCK, _Style{ .fg = color });
+        } else if (i == full_cells and remainder > 0) {
+            buf.setChar(x + i, y, partial_blocks[remainder - 1], _Style{ .fg = color });
         } else {
-            buf.setString(x + i, y, "\xe2\x96\x91", _Style{ .fg = .gray }); // U+2591 light shade
+            buf.setChar(x + i, y, EMPTY_SHADE, _Style{ .fg = .gray });
         }
     }
 }
