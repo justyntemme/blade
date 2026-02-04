@@ -50,3 +50,11 @@ pub const DetailResult = struct {
 };
 
 pub const DetailQueue = spsc.SpscQueue(DetailResult, false);
+
+/// MountResult carries a snapshot of mounted filesystems from worker thread to main.
+/// No arena needed — MountSnapshot is a fixed-size value type.
+pub const MountResult = struct {
+    snapshot: model.MountSnapshot,
+};
+
+pub const MountQueue = spsc.SpscQueue(MountResult, false);

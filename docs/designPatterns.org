@@ -1,5 +1,6 @@
 #+STARTUP: indent
 
+No blocking UI thread (use spsc lightwight threads to fetch data)
 * External variables
 
 When looking to use a object from an external repoistory

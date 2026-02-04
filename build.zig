@@ -147,8 +147,9 @@ pub fn build(b: *std.Build) void {
         .root_module = main_mod,
     });
     if (target.result.os.tag == .macos) {
-        //Darwin// Use external proc library for proc list
         exe.linkSystemLibrary("proc");
+        exe.linkFramework("IOKit");
+        exe.linkFramework("CoreFoundation");
     }
     b.installArtifact(exe);
     const run_exe = b.addRunArtifact(exe);

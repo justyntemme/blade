@@ -40,3 +40,7 @@ pub fn collectProcessDetail(pid: std.posix.pid_t, arena: std.mem.Allocator) Plat
 pub fn collectSystemMetrics() model.SystemMetrics {
     return backend.collectSystemMetrics();
 }
+
+pub fn collectMountInfo() model.MountSnapshot {
+    return backend.collectMountInfo();
+}

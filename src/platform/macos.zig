@@ -10,6 +10,9 @@ const c = @cImport({
     @cInclude("ifaddrs.h");
     @cInclude("net/if.h");
     @cInclude("stdlib.h");
+    @cInclude("IOKit/IOKitLib.h");
+    @cInclude("CoreFoundation/CoreFoundation.h");
+    @cInclude("sys/mount.h");
 });
 
 const model = @import("model");
@@ -207,12 +210,22 @@ pub fn collectSystemMetrics() model.SystemMetrics {
         );
         if (kr == c.KERN_SUCCESS) {
             const page_size: u64 = @intCast(c.vm_kernel_page_size);
+            const free_count: u64 = @intCast(vm_info.free_count);
+            const inactive_count: u64 = @intCast(vm_info.inactive_count);
+            const external_count: u64 = @intCast(vm_info.external_page_count);
             const used_pages: u64 = @intCast(
                 @as(u64, @intCast(vm_info.active_count)) +
                     @as(u64, @intCast(vm_info.wire_count)) +
                     @as(u64, @intCast(vm_info.compressor_page_count)),
             );
             metrics.mem_used = used_pages * page_size;
+            metrics.mem_detail = .{
+                .total = metrics.mem_total,
+                .used = metrics.mem_used,
+                .available = (free_count + inactive_count) * page_size,
+                .cached = external_count * page_size,
+                .free = free_count * page_size,
+            };
         }
     }
 
@@ -246,10 +259,121 @@ pub fn collectSystemMetrics() model.SystemMetrics {
         }
     }
 
-    // Disk IO: stub with 0 for now (IOKit is complex, can add later)
-    // metrics.disk stays at default zeros
+    // Disk IO via IOKit IOBlockStorageDriver
+    metrics.disk = collectDiskIO();
 
     return metrics;
+}
+
+fn cfDictGetI64(dict: c.CFDictionaryRef, key: c.CFStringRef) u64 {
+    var value: i64 = 0;
+    const cf_val = c.CFDictionaryGetValue(dict, @ptrCast(key));
+    if (cf_val != null) {
+        const cf_num: c.CFNumberRef = @ptrCast(@constCast(cf_val));
+        _ = c.CFNumberGetValue(cf_num, c.kCFNumberSInt64Type, @ptrCast(&value));
+    }
+    return if (value > 0) @intCast(value) else 0;
+}
+
+fn collectDiskIO() model.DiskIO {
+    var result = model.DiskIO{};
+    const matching = c.IOServiceMatching("IOBlockStorageDriver");
+    if (matching == null) return result;
+
+    var iterator: c.io_iterator_t = 0;
+    const kr = c.IOServiceGetMatchingServices(c.kIOMainPortDefault, matching, &iterator);
+    if (kr != c.KERN_SUCCESS) return result;
+    defer _ = c.IOObjectRelease(iterator);
+
+    while (true) {
+        const service = c.IOIteratorNext(iterator);
+        if (service == 0) break;
+        defer _ = c.IOObjectRelease(service);
+
+        var props: c.CFMutableDictionaryRef = null;
+        if (c.IORegistryEntryCreateCFProperties(service, &props, c.kCFAllocatorDefault, 0) != c.KERN_SUCCESS) continue;
+        defer c.CFRelease(@ptrCast(props));
+
+        const stats_key = c.CFStringCreateWithCString(c.kCFAllocatorDefault, "Statistics", c.kCFStringEncodingUTF8);
+        if (stats_key == null) continue;
+        defer c.CFRelease(@ptrCast(stats_key));
+
+        const stats_val = c.CFDictionaryGetValue(@ptrCast(props), @ptrCast(stats_key));
+        if (stats_val == null) continue;
+        const stats_dict: c.CFDictionaryRef = @ptrCast(@constCast(stats_val));
+
+        const read_key = c.CFStringCreateWithCString(c.kCFAllocatorDefault, "Bytes (Read)", c.kCFStringEncodingUTF8);
+        const write_key = c.CFStringCreateWithCString(c.kCFAllocatorDefault, "Bytes (Write)", c.kCFStringEncodingUTF8);
+        defer {
+            if (read_key != null) c.CFRelease(@ptrCast(read_key));
+            if (write_key != null) c.CFRelease(@ptrCast(write_key));
+        }
+
+        if (read_key != null) result.bytes_read += cfDictGetI64(stats_dict, read_key);
+        if (write_key != null) result.bytes_written += cfDictGetI64(stats_dict, write_key);
+    }
+
+    return result;
+}
+
+pub fn collectMountInfo() model.MountSnapshot {
+    var snap = model.MountSnapshot{};
+
+    // First call: get count of mounted filesystems
+    const count = c.getfsstat(null, 0, c.MNT_NOWAIT);
+    if (count <= 0) return snap;
+
+    // Stack buffer for up to 64 mounts; if more, we just truncate
+    const MAX_FS = 64;
+    var fs_buf: [MAX_FS]c.struct_statfs = undefined;
+    const fs_count: usize = @min(@as(usize, @intCast(count)), MAX_FS);
+    const buf_size: c_int = @intCast(fs_count * @sizeOf(c.struct_statfs));
+    const actual = c.getfsstat(&fs_buf, buf_size, c.MNT_NOWAIT);
+    if (actual <= 0) return snap;
+
+    const n: usize = @intCast(actual);
+    for (fs_buf[0..n]) |*fs| {
+        if (snap.mount_count >= model.MAX_MOUNTS) break;
+
+        // Filter out pseudo-filesystems (f_blocks == 0)
+        if (fs.f_blocks == 0) continue;
+
+        const block_size: u64 = @intCast(fs.f_bsize);
+        const total = fs.f_blocks * block_size;
+        const avail = fs.f_bavail * block_size;
+        const free_blocks = fs.f_bfree * block_size;
+        const used = total -| free_blocks;
+
+        // Extract mount point name: last path component, or "/" for root
+        const mount_on = std.mem.sliceTo(&fs.f_mntonname, 0);
+        const display_name = blk: {
+            if (mount_on.len == 1 and mount_on[0] == '/') break :blk "/";
+            // Find last '/'
+            var last_slash: usize = 0;
+            for (mount_on, 0..) |ch, i| {
+                if (ch == '/') last_slash = i;
+            }
+            if (last_slash + 1 < mount_on.len) {
+                break :blk mount_on[last_slash + 1 ..];
+            }
+            break :blk mount_on;
+        };
+
+        var mount = model.MountInfo{
+            .total_bytes = total,
+            .used_bytes = used,
+            .available_bytes = avail,
+        };
+
+        const copy_len = @min(display_name.len, model.MOUNT_NAME_LEN);
+        @memcpy(mount.name[0..copy_len], display_name[0..copy_len]);
+        mount.name_len = @intCast(copy_len);
+
+        snap.mounts[snap.mount_count] = mount;
+        snap.mount_count += 1;
+    }
+
+    return snap;
 }
 
 pub fn collectProcessDetail(pid: pid_t, arena: std.mem.Allocator) PlatformError!model.ProcessDetail {

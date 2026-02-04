@@ -11,15 +11,42 @@ pub const SortDirection = model.SortDirection;
 pub const SystemState = struct {
     core_count: u32 = 0,
     core_percents: [model.MAX_CORES]f32 = [_]f32{0} ** model.MAX_CORES,
+    core_user_percents: [model.MAX_CORES]f32 = [_]f32{0} ** model.MAX_CORES,
+    core_system_percents: [model.MAX_CORES]f32 = [_]f32{0} ** model.MAX_CORES,
     total_cpu_percent: f32 = 0,
+    total_user_percent: f32 = 0,
+    total_system_percent: f32 = 0,
     cpu_history: model.CpuHistory = .{},
+    cpu_user_history: model.CpuHistory = .{},
+    cpu_system_history: model.CpuHistory = .{},
+    core_histories: [model.MAX_CORES]model.CpuHistory = [_]model.CpuHistory{.{}} ** model.MAX_CORES,
+    core_user_histories: [model.MAX_CORES]model.CpuHistory = [_]model.CpuHistory{.{}} ** model.MAX_CORES,
+    core_system_histories: [model.MAX_CORES]model.CpuHistory = [_]model.CpuHistory{.{}} ** model.MAX_CORES,
     mem_total: u64 = 0,
     mem_used: u64 = 0,
+    mem_history: model.CpuHistory = .{},
     load_avg: [3]f64 = .{ 0, 0, 0 },
     disk_read_rate: f64 = 0,
     disk_write_rate: f64 = 0,
     net_recv_rate: f64 = 0,
     net_sent_rate: f64 = 0,
+    disk_read_history: model.RateHistory = .{},
+    disk_write_history: model.RateHistory = .{},
+    net_recv_history: model.RateHistory = .{},
+    net_sent_history: model.RateHistory = .{},
+    // Detailed memory fields
+    mem_available: u64 = 0,
+    mem_cached: u64 = 0,
+    mem_free: u64 = 0,
+
+    // Network cumulative totals (for Sync pane)
+    net_total_recv: u64 = 0,
+    net_total_sent: u64 = 0,
+
+    // Disk mount info (updated via SPSC queue)
+    mounts: [model.MAX_MOUNTS]model.MountInfo = [_]model.MountInfo{.{}} ** model.MAX_MOUNTS,
+    mount_count: u8 = 0,
+
     prev_metrics: ?model.SystemMetrics = null,
     has_data: bool = false,
 
@@ -29,10 +56,21 @@ pub const SystemState = struct {
         self.mem_used = metrics.mem_used;
         self.load_avg = metrics.load_avg;
 
+        // Detailed memory
+        self.mem_available = metrics.mem_detail.available;
+        self.mem_cached = metrics.mem_detail.cached;
+        self.mem_free = metrics.mem_detail.free;
+
+        // Network cumulative totals (valid from first sample)
+        self.net_total_recv = metrics.net.bytes_recv;
+        self.net_total_sent = metrics.net.bytes_sent;
+
         if (self.prev_metrics) |prev| {
             // Per-core CPU% from tick deltas
             var total_active: u64 = 0;
             var total_all: u64 = 0;
+            var total_user_ticks: u64 = 0;
+            var total_system_ticks: u64 = 0;
             const count = @min(metrics.core_count, model.MAX_CORES);
             for (0..count) |i| {
                 const cur = metrics.core_ticks[i];
@@ -44,15 +82,27 @@ pub const SystemState = struct {
                 const d_active = d_user + d_system + d_nice;
                 const d_total = d_active + d_idle;
                 if (d_total > 0) {
-                    self.core_percents[i] = @as(f32, @floatFromInt(d_active)) / @as(f32, @floatFromInt(d_total)) * 100.0;
+                    const ft: f32 = @floatFromInt(d_total);
+                    self.core_percents[i] = @as(f32, @floatFromInt(d_active)) / ft * 100.0;
+                    self.core_user_percents[i] = @as(f32, @floatFromInt(d_user + d_nice)) / ft * 100.0;
+                    self.core_system_percents[i] = @as(f32, @floatFromInt(d_system)) / ft * 100.0;
                 } else {
                     self.core_percents[i] = 0;
+                    self.core_user_percents[i] = 0;
+                    self.core_system_percents[i] = 0;
                 }
+                self.core_histories[i].push(self.core_percents[i]);
+                self.core_user_histories[i].push(self.core_user_percents[i]);
+                self.core_system_histories[i].push(self.core_system_percents[i]);
                 total_active += d_active;
                 total_all += d_total;
+                total_user_ticks += d_user + d_nice;
+                total_system_ticks += d_system;
             }
             if (total_all > 0) {
                 self.total_cpu_percent = @as(f32, @floatFromInt(total_active)) / @as(f32, @floatFromInt(total_all)) * 100.0;
+                self.total_user_percent = @as(f32, @floatFromInt(total_user_ticks)) / @as(f32, @floatFromInt(total_all)) * 100.0;
+                self.total_system_percent = @as(f32, @floatFromInt(total_system_ticks)) / @as(f32, @floatFromInt(total_all)) * 100.0;
             }
 
             // Rates from cumulative deltas
@@ -69,6 +119,16 @@ pub const SystemState = struct {
         }
 
         self.cpu_history.push(self.total_cpu_percent);
+        self.cpu_user_history.push(self.total_user_percent);
+        self.cpu_system_history.push(self.total_system_percent);
+        if (self.mem_total > 0) {
+            const mem_pct: f32 = @as(f32, @floatFromInt(self.mem_used)) / @as(f32, @floatFromInt(self.mem_total)) * 100.0;
+            self.mem_history.push(mem_pct);
+        }
+        self.disk_read_history.push(self.disk_read_rate);
+        self.disk_write_history.push(self.disk_write_rate);
+        self.net_recv_history.push(self.net_recv_rate);
+        self.net_sent_history.push(self.net_sent_rate);
         self.prev_metrics = metrics;
         self.has_data = true;
     }
@@ -99,6 +159,8 @@ pub const AppState = struct {
     search_len: usize = 0,
     last_update_ns: i128 = 0,
     detail_queue: *channel.DetailQueue = undefined,
+    mount_queue: *channel.MountQueue = undefined,
+    last_mount_collect_ns: i128 = 0,
     detail_pid: ?model.pid_t = null,
     detail_data: ?model.ProcessDetail = null,
     detail_arena: ?std.heap.ArenaAllocator = null,
@@ -224,6 +286,16 @@ pub const AppState = struct {
         self.procs.receiveBatch(new_batch);
         self.buildView();
 
+        // Trigger mount collection every 10 seconds (or on first batch)
+        const now_ns = std.time.nanoTimestamp();
+        const elapsed_ns = now_ns - self.last_mount_collect_ns;
+        const ten_sec_ns: i128 = 10 * std.time.ns_per_s;
+        if (self.last_mount_collect_ns == 0 or elapsed_ns >= ten_sec_ns) {
+            self.last_mount_collect_ns = now_ns;
+            const thread = std.Thread.spawn(.{}, collectMountWorker, .{self.mount_queue}) catch return;
+            thread.detach();
+        }
+
         //close detail view if the inspected process exits
         if (self.detail_pid) |dpid| {
             const exists = self.procs.pid_to_index.get(dpid) != null;
@@ -339,6 +411,12 @@ pub const AppState = struct {
         }
     }
 
+    fn collectMountWorker(queue: *channel.MountQueue) void {
+        const platform = @import("platform");
+        const snapshot = platform.collectMountInfo();
+        _ = queue.tryPush(.{ .snapshot = snapshot });
+    }
+
     pub fn receiveDetail(self: *AppState, result: channel.DetailResult) void {
         if (self.detail_pid) |current_pid| {
             if (current_pid == result.pid and self.mode == .detail) {
@@ -350,6 +428,11 @@ pub const AppState = struct {
         }
         var r = result;
         r.deinit();
+    }
+
+    pub fn receiveMounts(self: *AppState, result: channel.MountResult) void {
+        self.system.mount_count = result.snapshot.mount_count;
+        self.system.mounts = result.snapshot.mounts;
     }
 
     pub fn closeDetail(self: *AppState) void {

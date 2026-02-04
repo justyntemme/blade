@@ -22,6 +22,12 @@ fn memColor(mem_rss: u64) _Color {
     return .green;
 }
 
+fn memPercentColor(pct: f32) _Color {
+    if (pct > 50.0) return .red;
+    if (pct > 25.0) return .yellow;
+    return .green;
+}
+
 fn renderColumnHeader(buf: *tui.render.Buffer, x: u16, y: u16, label: []const u8, is_active: bool, dir_suffix: []const u8) void {
     if (is_active) {
         var h_buf: [12]u8 = [_]u8{' '} ** 12;
@@ -33,34 +39,27 @@ fn renderColumnHeader(buf: *tui.render.Buffer, x: u16, y: u16, label: []const u8
     }
 }
 
-// --- Horizon dashboard layout ---
-// left_stack is a nested column inside bottom_row's left half
-const left_stack = layout.Container.column(&[_]layout.Item{
-    .{ .id = "disk_io", .sizing = .{ .grow = 1.0 } },
-    .{ .id = "network", .sizing = .{ .grow = 1.0 } },
-});
-
-// proc_inner is a nested column for process pane content
-const proc_inner = layout.Container.column(&[_]layout.Item{
+// proc_inner_layout is calculated manually for process list content
+const proc_inner_layout = layout.Container.column(&[_]layout.Item{
     .{ .id = "proc_header", .sizing = .{ .fixed = 1 } },
     .{ .id = "proc_list", .sizing = .{ .grow = 1.0 } },
     .{ .id = "proc_footer", .sizing = .{ .fixed = 1 } },
 });
 
-const top_row = layout.Container.row(&[_]layout.Item{
-    .{ .id = "cpu_graph", .sizing = .{ .grow = 3.0 } },
-    .{ .id = "cores", .sizing = .{ .grow = 1.0 } },
-});
+// --- Box-drawing codepoints (light set, matches zigtui Block default) ---
+const BD_HOR: u21 = 0x2500; // ─
+const BD_VER: u21 = 0x2502; // │
+const BD_TL: u21 = 0x250C; // ┌
+const BD_TR: u21 = 0x2510; // ┐
+const BD_BL: u21 = 0x2514; // └
+const BD_BR: u21 = 0x2518; // ┘
+const BD_LT: u21 = 0x251C; // ├
+const BD_RT: u21 = 0x2524; // ┤
+const BD_TT: u21 = 0x252C; // ┬
+const BD_BT: u21 = 0x2534; // ┴
 
-const bottom_row = layout.Container.row(&[_]layout.Item{
-    .{ .id = "bottom_left", .sizing = .{ .grow = 1.0 }, .children = &left_stack },
-    .{ .id = "bottom_right", .sizing = .{ .grow = 1.0 }, .children = &proc_inner },
-});
-
-const horizon_layout = layout.Container.column(&[_]layout.Item{
-    .{ .id = "top_row", .sizing = .{ .percent = 0.375 }, .children = &top_row },
-    .{ .id = "bottom_row", .sizing = .{ .grow = 1.0 }, .children = &bottom_row },
-});
+const border_style = _Style{ .fg = .cyan };
+const pane_title_style = _Style{ .fg = .white, .modifier = _Modifier{ .bold = true } };
 
 const column_layout = layout.Container.row(&[_]layout.Item{
     .{ .id = "pid", .sizing = .{ .fixed = 8 } },
@@ -87,79 +86,195 @@ const detail_right_layout = layout.Container.column(&[_]layout.Item{
     .{ .id = "right_tree", .sizing = .{ .grow = 1.0 } },
 });
 
-/// Shrink a rect by 1 on all sides (for content inside a bordered pane).
-fn inset(rect: layout.Rect) layout.Rect {
-    return .{
-        .x = rect.x + 1,
-        .y = rect.y + 1,
-        .width = rect.width -| 2,
-        .height = rect.height -| 2,
-    };
-}
-
-fn renderPaneBorder(buf: *tui.render.Buffer, rect: layout.Rect, title: []const u8) void {
-    const block = tui.widgets.Block{
-        .title = title,
-        .borders = tui.widgets.Borders.all(),
-        .border_style = _Style{ .fg = .cyan },
-    };
-    block.render(.{ .x = rect.x, .y = rect.y, .width = rect.width, .height = rect.height }, buf);
-}
-
 pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
     const app = draw_ctx.state;
     const area = buf.getArea();
+    const w = area.width;
+    const h = area.height;
 
-    var calculated = try layout.calculate(
-        draw_ctx.scratch,
-        horizon_layout,
-        layout.Rect{
-            .x = area.x,
-            .y = area.y,
-            .width = area.width,
-            .height = area.height,
-        },
-    );
-    defer calculated.deinit();
+    if (w < 20 or h < 10) return;
 
-    // Get pane rects from layout
-    const cpu_graph_rect = calculated.get("cpu_graph") orelse return;
-    const cores_rect = calculated.get("cores") orelse return;
-    const disk_io_rect = calculated.get("disk_io") orelse return;
-    const network_rect = calculated.get("network") orelse return;
-    const proc_header_rect = calculated.get("proc_header") orelse return;
-    const proc_list_rect = calculated.get("proc_list") orelse return;
-    const proc_footer_rect = calculated.get("proc_footer") orelse return;
-    const bottom_right_rect = calculated.get("bottom_right") orelse return;
+    // ── Manual unified layout ─────────────────────────────────────
+    // One outer border for the entire dashboard. Internal dividers
+    // separate panes with shared edges — no double borders anywhere.
+    //
+    // Divider budget (subtracted from content space):
+    //   2 horizontal dividers (hd1 between top/bottom, hd2 within left panel)
+    //   varies by row for vertical dividers
+    //
+    // Y: top_content | hd1 | left_top_content | hd2 | left_bot_content
+    //    (Processes spans from hd1 to bottom border without hd2)
 
-    // Draw pane borders
-    renderPaneBorder(buf, cpu_graph_rect, "CPU");
-    renderPaneBorder(buf, cores_rect, "Cores");
-    renderPaneBorder(buf, disk_io_rect, "Disk IO");
-    renderPaneBorder(buf, network_rect, "Network");
-    renderPaneBorder(buf, bottom_right_rect, "Processes");
+    const avail_h = h -| 4; // minus outer borders(2) + hd1(1) + hd2(1)
+    const top_h: u16 = @max(avail_h * 3 / 8, 2);
+    const bot_avail: u16 = avail_h -| top_h;
+    const left_top_h: u16 = @max(bot_avail / 2, 2);
+    const left_bot_h: u16 = bot_avail -| left_top_h;
 
-    // Render pane contents inside borders
-    renderCpuGraph(buf, inset(cpu_graph_rect), &app.system);
-    renderCoresBars(buf, inset(cores_rect), &app.system);
-    renderDiskIO(buf, inset(disk_io_rect), &app.system);
-    renderNetwork(buf, inset(network_rect), &app.system);
+    const y_hd1 = area.y + 1 + top_h;
+    const y_hd2 = y_hd1 + 1 + left_top_h;
 
-    // Render process pane (inside the "Processes" border)
+    // X: top row: cpu | vdA | cores
+    const top_iw = w -| 3; // minus outer(2) + vdA(1)
+    const cpu_w: u16 = top_iw * 3 / 4;
+    const cores_w: u16 = top_iw -| cpu_w;
+    const x_vdA = area.x + 1 + cpu_w;
+
+    // X: bottom row: left_panel | vdB | processes
+    const bot_iw = w -| 3;
+    const left_w: u16 = bot_iw / 2;
+    const proc_w: u16 = bot_iw -| left_w;
+    const x_vdB = area.x + 1 + left_w;
+
+    // X: left panel top: net_graph | vdC | net_sync
+    const lt_iw = left_w -| 1;
+    const ng_w: u16 = lt_iw / 2;
+    const ns_w: u16 = lt_iw -| ng_w;
+    const x_vdC = area.x + 1 + ng_w;
+
+    // X: left panel bottom: memory | vdD | disk_io | vdE | disks
+    const lb_iw = left_w -| 2;
+    const mem_w: u16 = lb_iw / 3;
+    const io_w: u16 = lb_iw / 3;
+    const dk_w: u16 = lb_iw -| mem_w -| io_w;
+    const x_vdD = area.x + 1 + mem_w;
+    const x_vdE = x_vdD + 1 + io_w;
+
+    // ── Draw outer border ─────────────────────────────────────────
+    const x0 = area.x;
+    const x1 = area.x + w - 1;
+    const y0 = area.y;
+    const y1 = area.y + h - 1;
+
+    buf.setChar(x0, y0, BD_TL, border_style);
+    buf.setChar(x1, y0, BD_TR, border_style);
+    buf.setChar(x0, y1, BD_BL, border_style);
+    buf.setChar(x1, y1, BD_BR, border_style);
+
+    {
+        var x: u16 = x0 + 1;
+        while (x < x1) : (x += 1) {
+            buf.setChar(x, y0, BD_HOR, border_style);
+            buf.setChar(x, y1, BD_HOR, border_style);
+        }
+    }
+    {
+        var y: u16 = y0 + 1;
+        while (y < y1) : (y += 1) {
+            buf.setChar(x0, y, BD_VER, border_style);
+            buf.setChar(x1, y, BD_VER, border_style);
+        }
+    }
+
+    // ── Horizontal divider 1 (full width, between top row and bottom) ──
+    {
+        buf.setChar(x0, y_hd1, BD_LT, border_style);
+        buf.setChar(x1, y_hd1, BD_RT, border_style);
+        var x: u16 = x0 + 1;
+        while (x < x1) : (x += 1) buf.setChar(x, y_hd1, BD_HOR, border_style);
+    }
+
+    // ── Horizontal divider 2 (left panel only, from left border to vdB) ──
+    {
+        buf.setChar(x0, y_hd2, BD_LT, border_style);
+        var x: u16 = x0 + 1;
+        while (x < x_vdB) : (x += 1) buf.setChar(x, y_hd2, BD_HOR, border_style);
+    }
+
+    // ── Vertical dividers ─────────────────────────────────────────
+    // vdA: between CPU and Cores (top row only)
+    {
+        buf.setChar(x_vdA, y0, BD_TT, border_style);
+        var y: u16 = y0 + 1;
+        while (y < y_hd1) : (y += 1) buf.setChar(x_vdA, y, BD_VER, border_style);
+        buf.setChar(x_vdA, y_hd1, BD_BT, border_style);
+    }
+
+    // vdB: between left panel and Processes (full bottom)
+    {
+        buf.setChar(x_vdB, y_hd1, BD_TT, border_style);
+        var y: u16 = y_hd1 + 1;
+        while (y < y1) : (y += 1) buf.setChar(x_vdB, y, BD_VER, border_style);
+        buf.setChar(x_vdB, y1, BD_BT, border_style);
+        // Junction where hd2 meets vdB
+        buf.setChar(x_vdB, y_hd2, BD_RT, border_style);
+    }
+
+    // vdC: between Network and Sync (left panel top sub-row)
+    {
+        buf.setChar(x_vdC, y_hd1, BD_TT, border_style);
+        var y: u16 = y_hd1 + 1;
+        while (y < y_hd2) : (y += 1) buf.setChar(x_vdC, y, BD_VER, border_style);
+        buf.setChar(x_vdC, y_hd2, BD_BT, border_style);
+    }
+
+    // vdD: between Memory and Disk IO (left panel bottom sub-row)
+    {
+        buf.setChar(x_vdD, y_hd2, BD_TT, border_style);
+        var y: u16 = y_hd2 + 1;
+        while (y < y1) : (y += 1) buf.setChar(x_vdD, y, BD_VER, border_style);
+        buf.setChar(x_vdD, y1, BD_BT, border_style);
+    }
+
+    // vdE: between Disk IO and Disks (left panel bottom sub-row)
+    {
+        buf.setChar(x_vdE, y_hd2, BD_TT, border_style);
+        var y: u16 = y_hd2 + 1;
+        while (y < y1) : (y += 1) buf.setChar(x_vdE, y, BD_VER, border_style);
+        buf.setChar(x_vdE, y1, BD_BT, border_style);
+    }
+
+    // ── Titles on borders / dividers ──────────────────────────────
+    drawTitle(buf, x0 + 2, y0, "CPU");
+    drawTitle(buf, x_vdA + 2, y0, "Cores");
+    drawTitle(buf, x0 + 2, y_hd1, "Network");
+    drawTitle(buf, x_vdC + 2, y_hd1, "Sync");
+    drawTitle(buf, x_vdB + 2, y_hd1, "Processes");
+    drawTitle(buf, x0 + 2, y_hd2, "Memory");
+    drawTitle(buf, x_vdD + 2, y_hd2, "Disk IO");
+    drawTitle(buf, x_vdE + 2, y_hd2, "Disks");
+
+    // ── Content rects (the usable interior of each pane) ──────────
+    const cpu_rect = layout.Rect{ .x = x0 + 1, .y = y0 + 1, .width = cpu_w, .height = top_h };
+    const cores_rect = layout.Rect{ .x = x_vdA + 1, .y = y0 + 1, .width = cores_w, .height = top_h };
+    const net_graph_rect = layout.Rect{ .x = x0 + 1, .y = y_hd1 + 1, .width = ng_w, .height = left_top_h };
+    const net_sync_rect = layout.Rect{ .x = x_vdC + 1, .y = y_hd1 + 1, .width = ns_w, .height = left_top_h };
+    const memory_rect = layout.Rect{ .x = x0 + 1, .y = y_hd2 + 1, .width = mem_w, .height = left_bot_h };
+    const disk_io_rect = layout.Rect{ .x = x_vdD + 1, .y = y_hd2 + 1, .width = io_w, .height = left_bot_h };
+    const disks_rect = layout.Rect{ .x = x_vdE + 1, .y = y_hd2 + 1, .width = dk_w, .height = left_bot_h };
+    const proc_rect = layout.Rect{ .x = x_vdB + 1, .y = y_hd1 + 1, .width = proc_w, .height = y1 - y_hd1 - 1 };
+
+    // ── Render content into each pane ─────────────────────────────
+    renderCpuGraphBraille(buf, cpu_rect, &app.system);
+    renderCoresBars(buf, cores_rect, &app.system);
+    renderNetGraph(buf, net_graph_rect, &app.system);
+    renderNetSync(buf, net_sync_rect, &app.system);
+    renderMemoryPane(buf, memory_rect, &app.system);
+    renderDiskIO(buf, disk_io_rect, &app.system);
+    renderDisksPane(buf, disks_rect, &app.system);
+
+    // Processes pane: calculate sub-layout within the content rect
+    var proc_layout_calc = layout.calculate(draw_ctx.scratch, proc_inner_layout, proc_rect) catch return;
+    defer proc_layout_calc.deinit();
+    const proc_header_rect = proc_layout_calc.get("proc_header") orelse return;
+    const proc_list_rect = proc_layout_calc.get("proc_list") orelse return;
+    const proc_footer_rect = proc_layout_calc.get("proc_footer") orelse return;
     renderProcessPane(buf, draw_ctx.scratch, app, proc_header_rect, proc_list_rect, proc_footer_rect);
 
-    // Overlay modes
+    // ── Overlay modes ─────────────────────────────────────────────
     if (app.mode == .help) {
         renderHelpView(buf, area, app);
     }
-
     if (app.mode == .detail) {
         renderDetailView(buf, area, app, draw_ctx.scratch);
     }
-
     if (app.active_toast) |*toast| {
         renderToast(buf, toast, area);
     }
+}
+
+fn drawTitle(buf: *tui.render.Buffer, x: u16, y: u16, title: []const u8) void {
+    buf.setString(x, y, title, pane_title_style);
 }
 
 fn renderProcessPane(
@@ -256,7 +371,130 @@ fn renderProcessPane(
     }
 }
 
-fn renderCpuGraph(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state.SystemState) void {
+// Braille paired-column lookup table (5x5: left_level * 5 + right_level).
+// Each entry is the braille codepoint offset from U+2800 for area-fill
+// with the given left (0-4) and right (0-4) dot levels.
+const braille_up = blk: {
+    // Left column dot bits per level (bottom-up fill):
+    const left_bits = [5]u21{ 0x00, 0x40, 0x44, 0x46, 0x47 };
+    // Right column dot bits per level (bottom-up fill):
+    const right_bits = [5]u21{ 0x00, 0x80, 0xA0, 0xB0, 0xB8 };
+    var table: [25]u21 = undefined;
+    for (0..5) |l| {
+        for (0..5) |r| {
+            table[l * 5 + r] = 0x2800 + left_bits[l] | right_bits[r];
+        }
+    }
+    break :blk table;
+};
+
+/// Quantize a value into 0-4 levels within a band [low, high].
+fn quantize(value: f32, low: f32, high: f32) u3 {
+    if (value <= low) return 0;
+    if (value >= high) return 4;
+    const range = high - low;
+    if (range <= 0) return 0;
+    const ratio = (value - low) / range;
+    // 5 levels: 0,1,2,3,4 mapped from [0..1]
+    const level: u3 = @intFromFloat(@min(ratio * 4.0, 4.0));
+    return level;
+}
+
+/// Round up max(raw_max * 1.2, floor) to the next power of 2.
+fn autoScaleCeiling(raw_max: f64, floor: f64) f64 {
+    const padded = @max(raw_max * 1.2, floor);
+    if (padded <= 0) return floor;
+    // Next power of 2: 2^ceil(log2(padded))
+    const log2_val = std.math.log2(padded);
+    const ceil_log2 = @ceil(log2_val);
+    return std.math.pow(f64, 2.0, ceil_log2);
+}
+
+/// Single-row braille sparkline from a CpuHistory (values 0-100).
+/// Each braille column encodes 2 consecutive samples (left=earlier, right=later).
+fn renderCoreBrailleRow(buf: *tui.render.Buffer, x: u16, y: u16, width: u16, history: *const model.CpuHistory, color: _Color) void {
+    if (width == 0) return;
+    const w: usize = @intCast(width);
+    const sample_count = history.count;
+    const capacity = w * 2;
+    const filled_cols: usize = if (sample_count >= 2) @min((sample_count + 1) / 2, w) else if (sample_count == 1) 1 else 0;
+    const start_sample: usize = if (sample_count > capacity) sample_count - capacity else 0;
+
+    var col: usize = 0;
+    while (col < w) : (col += 1) {
+        if (col < w - filled_cols) continue;
+        const data_col = col - (w - filled_cols);
+        const pair_base = start_sample + data_col * 2;
+
+        const left_val = if (pair_base < sample_count) history.get(pair_base) else 0;
+        const right_val = if (pair_base + 1 < sample_count) history.get(pair_base + 1) else left_val;
+
+        // Single row: quantize into 0-4 for the one band [0, 100]
+        const left_level = quantize(left_val, 0, 100.0);
+        const right_level = quantize(right_val, 0, 100.0);
+        const braille_cp = braille_up[@as(usize, left_level) * 5 + @as(usize, right_level)];
+        if (braille_cp == 0x2800) continue;
+
+        var utf8_buf: [4]u8 = undefined;
+        const utf8_len = std.unicode.utf8Encode(braille_cp, &utf8_buf) catch continue;
+        buf.setString(x + @as(u16, @intCast(col)), y, utf8_buf[0..utf8_len], _Style{ .fg = color });
+    }
+}
+
+/// Multi-row braille area chart from a RateHistory with auto-scaling.
+fn renderRateBrailleChart(buf: *tui.render.Buffer, rect: layout.Rect, history: *const model.RateHistory, color: _Color) void {
+    if (rect.width == 0 or rect.height == 0) return;
+    const width: usize = @intCast(rect.width);
+    const height: usize = @intCast(rect.height);
+    const sample_count = history.count;
+    const capacity = width * 2;
+
+    // Extract samples into a normalized [0..100] buffer
+    const filled_cols: usize = if (sample_count >= 2) @min((sample_count + 1) / 2, width) else if (sample_count == 1) 1 else 0;
+    const start_sample: usize = if (sample_count > capacity) sample_count - capacity else 0;
+
+    // Find max in visible window for auto-scaling
+    const visible_samples = @min(sample_count, capacity);
+    const raw_max = if (visible_samples > 0) history.maxInWindow(visible_samples) else 0;
+    const ceiling = autoScaleCeiling(raw_max, 1024.0); // floor = 1 KB/s
+
+    var col: usize = 0;
+    while (col < width) : (col += 1) {
+        if (col < width - filled_cols) continue;
+        const data_col = col - (width - filled_cols);
+        const pair_base = start_sample + data_col * 2;
+
+        const left_raw: f64 = if (pair_base < sample_count) history.get(pair_base) else 0;
+        const right_raw: f64 = if (pair_base + 1 < sample_count) history.get(pair_base + 1) else left_raw;
+
+        // Normalize to 0-100 range
+        const left_val: f32 = if (ceiling > 0) @floatCast(@min(left_raw / ceiling * 100.0, 100.0)) else 0;
+        const right_val: f32 = if (ceiling > 0) @floatCast(@min(right_raw / ceiling * 100.0, 100.0)) else 0;
+
+        var row: usize = 0;
+        while (row < height) : (row += 1) {
+            const screen_row = height - 1 - row;
+            const band_low: f32 = @as(f32, @floatFromInt(row)) * 100.0 / @as(f32, @floatFromInt(height));
+            const band_high: f32 = @as(f32, @floatFromInt(row + 1)) * 100.0 / @as(f32, @floatFromInt(height));
+
+            const left_level = quantize(left_val, band_low, band_high);
+            const right_level = quantize(right_val, band_low, band_high);
+            const braille_cp = braille_up[@as(usize, left_level) * 5 + @as(usize, right_level)];
+            if (braille_cp == 0x2800) continue;
+
+            var utf8_buf: [4]u8 = undefined;
+            const utf8_len = std.unicode.utf8Encode(braille_cp, &utf8_buf) catch continue;
+            buf.setString(
+                rect.x + @as(u16, @intCast(col)),
+                rect.y + @as(u16, @intCast(screen_row)),
+                utf8_buf[0..utf8_len],
+                _Style{ .fg = color },
+            );
+        }
+    }
+}
+
+fn renderCpuGraphBraille(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state.SystemState) void {
     if (!sys.has_data or rect.width == 0 or rect.height == 0) {
         buf.setString(rect.x, rect.y, "Waiting for data...", _Style{ .fg = .gray });
         return;
@@ -264,45 +502,55 @@ fn renderCpuGraph(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state.
 
     const width: usize = @intCast(rect.width);
     const height: usize = @intCast(rect.height);
-
-    // Draw braille area chart from CpuHistory ring buffer
-    // Each column maps to one sample, newest at right edge
     const history = &sys.cpu_history;
     const sample_count = history.count;
 
+    // Each character column encodes 2 consecutive samples (left=prev, right=current).
+    // Effective capacity: width * 2 samples across the graph.
+    const capacity = width * 2;
+
+    // How many character columns we actually fill
+    const filled_cols: usize = if (sample_count >= 2) @min((sample_count + 1) / 2, width) else if (sample_count == 1) 1 else 0;
+
+    // Starting sample index (right-aligned: newest samples at right edge)
+    const start_sample: usize = if (sample_count > capacity)
+        sample_count - capacity
+    else
+        0;
+
     var col: usize = 0;
     while (col < width) : (col += 1) {
-        // Map column to sample index (right-aligned)
-        const sample_idx = if (sample_count > width)
-            sample_count - width + col
-        else if (col >= width - sample_count)
-            col - (width - sample_count)
-        else {
-            continue; // no data for this column yet
-        };
+        // Right-align: empty columns on the left when insufficient data
+        if (col < width - filled_cols) continue;
 
-        const value = history.get(sample_idx);
-        const clamped = @min(value, 100.0);
-        // Height in braille dots (4 dots per character row)
-        const total_dots: usize = height * 4;
-        const fill_dots: usize = @intFromFloat(clamped / 100.0 * @as(f32, @floatFromInt(total_dots)));
-        const color = cpuColor(clamped);
+        // Which pair of samples does this column represent?
+        const data_col = col - (width - filled_cols);
+        const pair_base = start_sample + data_col * 2;
 
-        // Render bottom-up: each character cell is 2 wide x 4 tall in braille
+        // Get the two samples for this column (left = earlier, right = later)
+        const left_val = if (pair_base < sample_count) history.get(pair_base) else 0;
+        const right_val = if (pair_base + 1 < sample_count) history.get(pair_base + 1) else left_val;
+
+        const left_clamped = @min(left_val, 100.0);
+        const right_clamped = @min(right_val, 100.0);
+        const max_val = @max(left_clamped, right_clamped);
+        const color = cpuColor(max_val);
+
+        // For each character row, compute the band and quantize both samples
         var row: usize = 0;
         while (row < height) : (row += 1) {
-            const screen_row = height - 1 - row;
-            const dot_base = row * 4;
-            var pattern: u8 = 0;
-            // Braille left column dots (we use single-column: left dots only)
-            // dot 0 = bit 0, dot 1 = bit 1, dot 2 = bit 2, dot 6 = bit 6
-            const dot_bits = [4]u8{ 0x01, 0x02, 0x04, 0x40 };
-            for (dot_bits, 0..) |bit, di| {
-                if (dot_base + di < fill_dots) {
-                    pattern |= bit;
-                }
-            }
-            const braille_cp: u21 = 0x2800 + @as(u21, pattern);
+            const screen_row = height - 1 - row; // row 0 = bottom
+            const band_low: f32 = @as(f32, @floatFromInt(row)) * 100.0 / @as(f32, @floatFromInt(height));
+            const band_high: f32 = @as(f32, @floatFromInt(row + 1)) * 100.0 / @as(f32, @floatFromInt(height));
+
+            const left_level = quantize(left_clamped, band_low, band_high);
+            const right_level = quantize(right_clamped, band_low, band_high);
+
+            const braille_cp = braille_up[@as(usize, left_level) * 5 + @as(usize, right_level)];
+
+            // Skip empty characters (no dots lit)
+            if (braille_cp == 0x2800) continue;
+
             var utf8_buf: [4]u8 = undefined;
             const utf8_len = std.unicode.utf8Encode(braille_cp, &utf8_buf) catch continue;
             buf.setString(
@@ -327,22 +575,53 @@ fn renderCoresBars(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state
         return;
     }
 
-    const count = @min(sys.core_count, @as(u32, @intCast(rect.height -| 1)));
+    // Layout: per-core sparkline rows, then optional memory row, then total CPU
+    // Reserve 2 lines at bottom: memory sparkline + total
+    const reserved_bottom: u16 = 2;
+    const core_area_h = rect.height -| reserved_bottom;
+    const count = @min(sys.core_count, @as(u32, @intCast(core_area_h)));
+    const label_w: u16 = 3; // "XX "
+    const pct_w: u16 = 5; // " NNN%"
+    const sparkline_w = rect.width -| label_w -| pct_w;
+
     for (0..count) |i| {
         const y = rect.y + @as(u16, @intCast(i));
         const pct = sys.core_percents[i];
+
+        // Label: "XX "
         var line_buf: [48]u8 = undefined;
         const label = std.fmt.bufPrint(&line_buf, "{d:>2} ", .{i}) catch "?? ";
         buf.setString(rect.x, y, label, _Style{ .fg = .gray });
-        const bar_x = rect.x + @as(u16, @intCast(label.len));
-        const bar_w = rect.width -| @as(u16, @intCast(label.len)) -| 5;
-        renderBar(buf, bar_x, y, bar_w, pct, 100.0, cpuColor(pct));
+
+        // Braille sparkline
+        renderCoreBrailleRow(buf, rect.x + label_w, y, sparkline_w, &sys.core_histories[i], cpuColor(pct));
+
+        // Percent label
         var pct_buf: [6]u8 = undefined;
         const pct_str = std.fmt.bufPrint(&pct_buf, "{d:>4.0}%", .{pct}) catch "???";
-        buf.setString(bar_x + bar_w + 1, y, pct_str, _Style{ .fg = cpuColor(pct) });
+        buf.setString(rect.x + label_w + sparkline_w, y, pct_str, _Style{ .fg = cpuColor(pct) });
     }
 
-    // Total line at bottom
+    // Memory sparkline (if space)
+    const mem_y = rect.y + rect.height -| 2;
+    if (sys.mem_total > 0 and mem_y > rect.y + @as(u16, @intCast(count))) {
+        const mem_pct: f32 = @as(f32, @floatFromInt(sys.mem_used)) / @as(f32, @floatFromInt(sys.mem_total)) * 100.0;
+        const mc = memPercentColor(mem_pct);
+        buf.setString(rect.x, mem_y, "Mem", _Style{ .fg = .gray });
+
+        // Memory label: "XX.X/YYG"
+        var mem_buf: [16]u8 = undefined;
+        const used_gb = @as(f64, @floatFromInt(sys.mem_used)) / (1024.0 * 1024.0 * 1024.0);
+        const total_gb = @as(f64, @floatFromInt(sys.mem_total)) / (1024.0 * 1024.0 * 1024.0);
+        const mem_str = std.fmt.bufPrint(&mem_buf, "{d:.1}/{d:.0}G", .{ used_gb, total_gb }) catch "???";
+        const mem_label_w: u16 = @intCast(mem_str.len);
+        const mem_sparkline_w = rect.width -| label_w -| mem_label_w;
+
+        renderCoreBrailleRow(buf, rect.x + label_w, mem_y, mem_sparkline_w, &sys.mem_history, mc);
+        buf.setString(rect.x + label_w + mem_sparkline_w, mem_y, mem_str, _Style{ .fg = mc });
+    }
+
+    // Total CPU line at bottom
     const total_y = rect.y + rect.height -| 1;
     var total_buf: [24]u8 = undefined;
     const total_str = std.fmt.bufPrint(&total_buf, "total {d:>5.1}%", .{sys.total_cpu_percent}) catch "total ???";
@@ -356,47 +635,313 @@ fn renderDiskIO(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state.Sy
         return;
     }
 
-    // Read rate
-    buf.setString(rect.x, rect.y, "R ", _Style{ .fg = .green, .modifier = _Modifier{ .bold = true } });
-    const bar_w = rect.width -| 14;
-    renderRateBar(buf, rect.x + 2, rect.y, bar_w, sys.disk_read_rate, .green);
+    // Split vertically: read (top half), write (bottom half)
+    // Each half: 1 label row + remaining rows for braille chart
+    const half_h = rect.height / 2;
+    if (half_h < 2) {
+        // Fallback: just show labels if too small
+        buf.setString(rect.x, rect.y, "R ", _Style{ .fg = .green, .modifier = _Modifier{ .bold = true } });
+        var r_buf: [12]u8 = undefined;
+        const r_str = formatRate(&r_buf, sys.disk_read_rate);
+        buf.setString(rect.x + 2, rect.y, r_str, _Style{ .fg = .green });
+        if (rect.height > 1) {
+            buf.setString(rect.x, rect.y + 1, "W ", _Style{ .fg = .red, .modifier = _Modifier{ .bold = true } });
+            var w_buf: [12]u8 = undefined;
+            const w_str = formatRate(&w_buf, sys.disk_write_rate);
+            buf.setString(rect.x + 2, rect.y + 1, w_str, _Style{ .fg = .red });
+        }
+        return;
+    }
+
+    // Read label row
+    buf.setString(rect.x, rect.y, "R  ", _Style{ .fg = .green, .modifier = _Modifier{ .bold = true } });
     var r_buf: [12]u8 = undefined;
     const r_str = formatRate(&r_buf, sys.disk_read_rate);
-    buf.setString(rect.x + 2 + bar_w + 1, rect.y, r_str, _Style{ .fg = .green });
+    buf.setString(rect.x + 3, rect.y, r_str, _Style{ .fg = .green });
 
-    // Write rate
-    if (rect.height > 1) {
-        buf.setString(rect.x, rect.y + 1, "W ", _Style{ .fg = .red, .modifier = _Modifier{ .bold = true } });
-        renderRateBar(buf, rect.x + 2, rect.y + 1, bar_w, sys.disk_write_rate, .red);
-        var w_buf: [12]u8 = undefined;
-        const w_str = formatRate(&w_buf, sys.disk_write_rate);
-        buf.setString(rect.x + 2 + bar_w + 1, rect.y + 1, w_str, _Style{ .fg = .red });
+    // Read braille chart
+    const read_chart_h = half_h - 1;
+    if (read_chart_h > 0) {
+        renderRateBrailleChart(buf, .{
+            .x = rect.x,
+            .y = rect.y + 1,
+            .width = rect.width,
+            .height = read_chart_h,
+        }, &sys.disk_read_history, .green);
+    }
+
+    // Write label row
+    const write_y = rect.y + half_h;
+    buf.setString(rect.x, write_y, "W  ", _Style{ .fg = .red, .modifier = _Modifier{ .bold = true } });
+    var w_buf: [12]u8 = undefined;
+    const w_str = formatRate(&w_buf, sys.disk_write_rate);
+    buf.setString(rect.x + 3, write_y, w_str, _Style{ .fg = .red });
+
+    // Write braille chart
+    const write_chart_h = rect.height - half_h - 1;
+    if (write_chart_h > 0) {
+        renderRateBrailleChart(buf, .{
+            .x = rect.x,
+            .y = write_y + 1,
+            .width = rect.width,
+            .height = write_chart_h,
+        }, &sys.disk_write_history, .red);
     }
 }
 
-fn renderNetwork(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state.SystemState) void {
+fn renderNetGraph(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state.SystemState) void {
     if (!sys.has_data or rect.height == 0) {
         buf.setString(rect.x, rect.y, "Waiting for data...", _Style{ .fg = .gray });
         return;
     }
 
-    // Recv rate
-    const recv_glyph = "\xe2\x96\xbc"; // U+25BC black down-pointing triangle
-    buf.setString(rect.x, rect.y, recv_glyph, _Style{ .fg = .green, .modifier = _Modifier{ .bold = true } });
-    const bar_w = rect.width -| 14;
-    renderRateBar(buf, rect.x + 2, rect.y, bar_w, sys.net_recv_rate, .green);
+    // Split vertically: recv (top half), sent (bottom half)
+    const half_h = rect.height / 2;
+    if (half_h < 1) return;
+
+    // Recv braille chart (top half)
+    if (half_h > 0) {
+        renderRateBrailleChart(buf, .{
+            .x = rect.x,
+            .y = rect.y,
+            .width = rect.width,
+            .height = half_h,
+        }, &sys.net_recv_history, .green);
+    }
+
+    // Overlay recv rate label at right edge of top half
     var r_buf: [12]u8 = undefined;
     const r_str = formatRate(&r_buf, sys.net_recv_rate);
-    buf.setString(rect.x + 2 + bar_w + 1, rect.y, r_str, _Style{ .fg = .green });
+    const r_label_x = rect.x + rect.width -| @as(u16, @intCast(r_str.len));
+    buf.setString(r_label_x, rect.y + half_h -| 1, r_str, _Style{ .fg = .green, .modifier = _Modifier{ .bold = true } });
 
-    // Sent rate
-    if (rect.height > 1) {
-        const sent_glyph = "\xe2\x96\xb2"; // U+25B2 black up-pointing triangle
-        buf.setString(rect.x, rect.y + 1, sent_glyph, _Style{ .fg = .red, .modifier = _Modifier{ .bold = true } });
-        renderRateBar(buf, rect.x + 2, rect.y + 1, bar_w, sys.net_sent_rate, .red);
+    // Sent braille chart (bottom half)
+    const sent_h = rect.height -| half_h;
+    if (sent_h > 0) {
+        renderRateBrailleChart(buf, .{
+            .x = rect.x,
+            .y = rect.y + half_h,
+            .width = rect.width,
+            .height = sent_h,
+        }, &sys.net_sent_history, .red);
+    }
+
+    // Overlay sent rate label at right edge of bottom half
+    var s_buf: [12]u8 = undefined;
+    const s_str = formatRate(&s_buf, sys.net_sent_rate);
+    const s_label_x = rect.x + rect.width -| @as(u16, @intCast(s_str.len));
+    buf.setString(s_label_x, rect.y + rect.height -| 1, s_str, _Style{ .fg = .red, .modifier = _Modifier{ .bold = true } });
+}
+
+fn renderNetSync(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state.SystemState) void {
+    if (!sys.has_data or rect.height == 0) {
+        buf.setString(rect.x, rect.y, "Waiting for data...", _Style{ .fg = .gray });
+        return;
+    }
+
+    const recv_glyph = "\xe2\x96\xbc"; // U+25BC
+    const sent_glyph = "\xe2\x96\xb2"; // U+25B2
+    const lbl_style = _Style{ .fg = .gray };
+
+    // Content is 7 lines; vertically center if there's extra room
+    const content_lines: u16 = 7;
+    const pad_top: u16 = if (rect.height > content_lines) (rect.height - content_lines) / 2 else 0;
+    var y: u16 = rect.y + pad_top;
+    const max_y = rect.y + rect.height;
+
+    // "download" header
+    if (y < max_y) {
+        buf.setString(rect.x, y, "download", _Style{ .fg = .green, .modifier = _Modifier{ .bold = true } });
+        y += 1;
+    }
+
+    // download rate
+    if (y < max_y) {
+        var r_buf: [12]u8 = undefined;
+        const r_str = formatRate(&r_buf, sys.net_recv_rate);
+        buf.setString(rect.x, y, recv_glyph, _Style{ .fg = .green });
+        buf.setString(rect.x + 2, y, r_str, _Style{ .fg = .green });
+        y += 1;
+    }
+
+    // download total
+    if (y < max_y) {
+        var t_buf: [12]u8 = undefined;
+        const t_str = formatBytes(&t_buf, sys.net_total_recv);
+        buf.setString(rect.x, y, recv_glyph, _Style{ .fg = .green });
+        buf.setString(rect.x + 2, y, "Total: ", lbl_style);
+        buf.setString(rect.x + 9, y, t_str, _Style{ .fg = .green });
+        y += 1;
+    }
+
+    // blank line
+    y += 1;
+
+    // "upload" header
+    if (y < max_y) {
+        buf.setString(rect.x, y, "upload", _Style{ .fg = .red, .modifier = _Modifier{ .bold = true } });
+        y += 1;
+    }
+
+    // upload rate
+    if (y < max_y) {
         var s_buf: [12]u8 = undefined;
         const s_str = formatRate(&s_buf, sys.net_sent_rate);
-        buf.setString(rect.x + 2 + bar_w + 1, rect.y + 1, s_str, _Style{ .fg = .red });
+        buf.setString(rect.x, y, sent_glyph, _Style{ .fg = .red });
+        buf.setString(rect.x + 2, y, s_str, _Style{ .fg = .red });
+        y += 1;
+    }
+
+    // upload total
+    if (y < max_y) {
+        var t_buf: [12]u8 = undefined;
+        const t_str = formatBytes(&t_buf, sys.net_total_sent);
+        buf.setString(rect.x, y, sent_glyph, _Style{ .fg = .red });
+        buf.setString(rect.x + 2, y, "Total: ", lbl_style);
+        buf.setString(rect.x + 9, y, t_str, _Style{ .fg = .red });
+    }
+}
+
+fn formatBytes(out_buf: *[12]u8, bytes: u64) []const u8 {
+    const fb: f64 = @floatFromInt(bytes);
+    if (fb >= 1024.0 * 1024.0 * 1024.0 * 1024.0) {
+        return std.fmt.bufPrint(out_buf, "{d:>5.1} TiB", .{fb / (1024.0 * 1024.0 * 1024.0 * 1024.0)}) catch "??? TiB";
+    } else if (fb >= 1024.0 * 1024.0 * 1024.0) {
+        return std.fmt.bufPrint(out_buf, "{d:>5.1} GiB", .{fb / (1024.0 * 1024.0 * 1024.0)}) catch "??? GiB";
+    } else if (fb >= 1024.0 * 1024.0) {
+        return std.fmt.bufPrint(out_buf, "{d:>5.1} MiB", .{fb / (1024.0 * 1024.0)}) catch "??? MiB";
+    } else if (fb >= 1024.0) {
+        return std.fmt.bufPrint(out_buf, "{d:>5.1} KiB", .{fb / 1024.0}) catch "??? KiB";
+    } else {
+        return std.fmt.bufPrint(out_buf, "{d:>5.0}   B", .{fb}) catch "???   B";
+    }
+}
+
+fn renderMemoryPane(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state.SystemState) void {
+    if (!sys.has_data or rect.height == 0) {
+        buf.setString(rect.x, rect.y, "Waiting...", _Style{ .fg = .gray });
+        return;
+    }
+
+    const lbl_style = _Style{ .fg = .gray };
+    // Content is 6 lines; vertically center if extra room
+    const content_lines: u16 = 6;
+    const pad_top: u16 = if (rect.height > content_lines) (rect.height - content_lines) / 2 else 0;
+    var y: u16 = rect.y + pad_top;
+    const max_y = rect.y + rect.height;
+
+    // Total
+    if (y < max_y) {
+        var b: [12]u8 = undefined;
+        const s = formatBytes(&b, sys.mem_total);
+        buf.setString(rect.x, y, "Total: ", lbl_style);
+        buf.setString(rect.x + 7, y, s, _Style{ .fg = .light_white });
+        y += 1;
+    }
+
+    // Used
+    if (y < max_y) {
+        var b: [12]u8 = undefined;
+        const s = formatBytes(&b, sys.mem_used);
+        buf.setString(rect.x, y, "Used:  ", lbl_style);
+        buf.setString(rect.x + 7, y, s, _Style{ .fg = .light_white });
+        y += 1;
+    }
+
+    // Usage bar with percentage
+    if (y < max_y and sys.mem_total > 0) {
+        const pct: f32 = @as(f32, @floatFromInt(sys.mem_used)) / @as(f32, @floatFromInt(sys.mem_total)) * 100.0;
+        const color = memPercentColor(pct);
+        // Bar takes available width minus the " NNN%" suffix (5 chars)
+        const bar_w = rect.width -| 5;
+        if (bar_w > 0) {
+            renderBar(buf, rect.x, y, bar_w, pct, 100.0, color);
+        }
+        var pct_buf: [6]u8 = undefined;
+        const pct_str = std.fmt.bufPrint(&pct_buf, "{d:>4.0}%", .{pct}) catch " ???%";
+        buf.setString(rect.x + bar_w, y, pct_str, _Style{ .fg = color });
+        y += 1;
+    }
+
+    // Available
+    if (y < max_y) {
+        var b: [12]u8 = undefined;
+        const s = formatBytes(&b, sys.mem_available);
+        buf.setString(rect.x, y, "Avail: ", lbl_style);
+        buf.setString(rect.x + 7, y, s, _Style{ .fg = .light_white });
+        y += 1;
+    }
+
+    // Cached
+    if (y < max_y) {
+        var b: [12]u8 = undefined;
+        const s = formatBytes(&b, sys.mem_cached);
+        buf.setString(rect.x, y, "Cache: ", lbl_style);
+        buf.setString(rect.x + 7, y, s, _Style{ .fg = .light_white });
+        y += 1;
+    }
+
+    // Free
+    if (y < max_y) {
+        var b: [12]u8 = undefined;
+        const s = formatBytes(&b, sys.mem_free);
+        buf.setString(rect.x, y, "Free:  ", lbl_style);
+        buf.setString(rect.x + 7, y, s, _Style{ .fg = .light_white });
+    }
+}
+
+fn diskPercentColor(pct: f32) _Color {
+    if (pct >= 90.0) return .red;
+    if (pct >= 70.0) return .yellow;
+    return .green;
+}
+
+fn renderDisksPane(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state.SystemState) void {
+    if (sys.mount_count == 0 or rect.height == 0) {
+        buf.setString(rect.x, rect.y, "No disks", _Style{ .fg = .gray });
+        return;
+    }
+
+    var y: u16 = rect.y;
+    const max_y = rect.y + rect.height;
+
+    for (sys.mounts[0..sys.mount_count]) |mount| {
+        if (y >= max_y) break;
+
+        const name = mount.name[0..mount.name_len];
+
+        // Line 1: name (bold) + right-aligned total size
+        buf.setString(rect.x, y, name, _Style{ .fg = .light_white, .modifier = _Modifier{ .bold = true } });
+        var total_buf: [12]u8 = undefined;
+        const total_str = formatBytes(&total_buf, mount.total_bytes);
+        const total_x = rect.x + rect.width -| @as(u16, @intCast(total_str.len));
+        buf.setString(total_x, y, total_str, _Style{ .fg = .gray });
+        y += 1;
+
+        if (y >= max_y) break;
+
+        // Line 2: NN% [bar] used_size
+        if (mount.total_bytes > 0) {
+            const pct: f32 = @as(f32, @floatFromInt(mount.used_bytes)) / @as(f32, @floatFromInt(mount.total_bytes)) * 100.0;
+            const color = diskPercentColor(pct);
+
+            // "NNN% " prefix (5 chars) + used_size suffix (~10 chars)
+            var pct_buf: [5]u8 = undefined;
+            const pct_str = std.fmt.bufPrint(&pct_buf, "{d:>3.0}% ", .{pct}) catch "???% ";
+            buf.setString(rect.x, y, pct_str, _Style{ .fg = color });
+
+            var used_buf: [12]u8 = undefined;
+            const used_str = formatBytes(&used_buf, mount.used_bytes);
+            const used_w: u16 = @intCast(used_str.len);
+
+            const bar_start: u16 = 5;
+            const bar_w = rect.width -| bar_start -| used_w;
+            if (bar_w > 0) {
+                renderBar(buf, rect.x + bar_start, y, bar_w, pct, 100.0, color);
+            }
+            buf.setString(rect.x + bar_start + bar_w, y, used_str, _Style{ .fg = color });
+        }
+        y += 1;
     }
 }
 
@@ -411,23 +956,6 @@ fn renderBar(buf: *tui.render.Buffer, x: u16, y: u16, width: u16, value: f32, ma
             buf.setString(x + i, y, "\xe2\x96\x88", _Style{ .fg = color }); // U+2588 full block
         } else {
             buf.setString(x + i, y, "\xe2\x96\x91", _Style{ .fg = .gray }); // U+2591 light shade
-        }
-    }
-}
-
-fn renderRateBar(buf: *tui.render.Buffer, x: u16, y: u16, width: u16, rate: f64, color: _Color) void {
-    if (width == 0) return;
-    // Auto-scale: bar is relative to a reasonable max (100 MB/s)
-    const max_rate: f64 = 100.0 * 1024.0 * 1024.0;
-    const ratio: f32 = @floatCast(@min(rate / max_rate, 1.0));
-    const filled: u16 = @intFromFloat(ratio * @as(f32, @floatFromInt(width)));
-
-    var i: u16 = 0;
-    while (i < width) : (i += 1) {
-        if (i < filled) {
-            buf.setString(x + i, y, "\xe2\x96\x88", _Style{ .fg = color });
-        } else {
-            buf.setString(x + i, y, "\xe2\x96\x91", _Style{ .fg = .gray });
         }
     }
 }

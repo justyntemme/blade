@@ -36,6 +36,11 @@ pub fn main() !void {
     defer detail_queue.deinit();
     app.detail_queue = &detail_queue;
 
+    // mount info queue
+    var mount_queue = try channel.MountQueue.initCapacity(gpa_alloc, 2);
+    defer mount_queue.deinit();
+    app.mount_queue = &mount_queue;
+
     // Thread synch
     var mutex: std.Thread.Mutex = .{};
     var condition: std.Thread.Condition = .{};
@@ -67,6 +72,12 @@ pub fn main() !void {
             const result = result_ptr.*;
             detail_queue.pop();
             app.receiveDetail(result);
+        }
+
+        if (mount_queue.front()) |result_ptr| {
+            const result = result_ptr.*;
+            mount_queue.pop();
+            app.receiveMounts(result);
         }
 
         // Poll for events (100ms timeout)

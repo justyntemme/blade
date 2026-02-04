@@ -140,6 +140,30 @@ pub const DiskIO = struct {
     bytes_written: u64 = 0,
 };
 
+pub const MemoryDetail = struct {
+    total: u64 = 0,
+    used: u64 = 0,
+    available: u64 = 0,
+    cached: u64 = 0,
+    free: u64 = 0,
+};
+
+pub const MAX_MOUNTS = 16;
+pub const MOUNT_NAME_LEN = 32;
+
+pub const MountInfo = struct {
+    name: [MOUNT_NAME_LEN]u8 = [_]u8{0} ** MOUNT_NAME_LEN,
+    name_len: u8 = 0,
+    total_bytes: u64 = 0,
+    used_bytes: u64 = 0,
+    available_bytes: u64 = 0,
+};
+
+pub const MountSnapshot = struct {
+    mounts: [MAX_MOUNTS]MountInfo = [_]MountInfo{.{}} ** MAX_MOUNTS,
+    mount_count: u8 = 0,
+};
+
 pub const SystemMetrics = struct {
     timestamp_ns: i128 = 0,
     core_count: u32 = 0,
@@ -149,6 +173,7 @@ pub const SystemMetrics = struct {
     load_avg: [3]f64 = .{ 0, 0, 0 },
     net: NetworkIO = .{},
     disk: DiskIO = .{},
+    mem_detail: MemoryDetail = .{},
 };
 
 pub const CPU_HISTORY_LEN = 300;
@@ -169,5 +194,39 @@ pub const CpuHistory = struct {
         if (i >= self.count) return 0;
         const start = if (self.count < CPU_HISTORY_LEN) 0 else self.head;
         return self.samples[(start + i) % CPU_HISTORY_LEN];
+    }
+};
+
+pub const RATE_HISTORY_LEN = 300;
+
+pub const RateHistory = struct {
+    samples: [RATE_HISTORY_LEN]f64 = [_]f64{0} ** RATE_HISTORY_LEN,
+    head: usize = 0,
+    count: usize = 0,
+
+    pub fn push(self: *RateHistory, value: f64) void {
+        self.samples[self.head] = value;
+        self.head = (self.head + 1) % RATE_HISTORY_LEN;
+        if (self.count < RATE_HISTORY_LEN) self.count += 1;
+    }
+
+    /// Returns sample at logical index i (0 = oldest).
+    pub fn get(self: *const RateHistory, i: usize) f64 {
+        if (i >= self.count) return 0;
+        const start = if (self.count < RATE_HISTORY_LEN) 0 else self.head;
+        return self.samples[(start + i) % RATE_HISTORY_LEN];
+    }
+
+    /// Returns the maximum value in the last `window` samples.
+    pub fn maxInWindow(self: *const RateHistory, window: usize) f64 {
+        if (self.count == 0) return 0;
+        var max_val: f64 = 0;
+        const n = @min(window, self.count);
+        const start_idx = self.count - n;
+        for (start_idx..self.count) |i| {
+            const v = self.get(i);
+            if (v > max_val) max_val = v;
+        }
+        return max_val;
     }
 };
