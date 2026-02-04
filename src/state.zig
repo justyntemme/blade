@@ -26,6 +26,7 @@ pub const SystemState = struct {
     mem_used: u64 = 0,
     mem_history: model.CpuHistory = .{},
     load_avg: [3]f64 = .{ 0, 0, 0 },
+    uptime_seconds: u64 = 0,
     disk_read_rate: f64 = 0,
     disk_write_rate: f64 = 0,
     net_recv_rate: f64 = 0,
@@ -47,6 +48,9 @@ pub const SystemState = struct {
     // Network cumulative totals (for Sync pane)
     net_total_recv: u64 = 0,
     net_total_sent: u64 = 0,
+    // IPv4 address
+    ipv4_addr: [model.IP_ADDR_LEN]u8 = [_]u8{0} ** model.IP_ADDR_LEN,
+    ipv4_addr_len: u8 = 0,
 
     // Per-interface network state
     iface_count: u8 = 0,
@@ -71,6 +75,7 @@ pub const SystemState = struct {
         self.mem_total = metrics.mem_total;
         self.mem_used = metrics.mem_used;
         self.load_avg = metrics.load_avg;
+        self.uptime_seconds = metrics.uptime_seconds;
 
         // Detailed memory
         self.mem_available = metrics.mem_detail.available;
@@ -80,6 +85,10 @@ pub const SystemState = struct {
         // Network cumulative totals (valid from first sample)
         self.net_total_recv = metrics.net.bytes_recv;
         self.net_total_sent = metrics.net.bytes_sent;
+        if (metrics.net.ipv4_addr_len > 0) {
+            @memcpy(self.ipv4_addr[0..metrics.net.ipv4_addr_len], metrics.net.ipv4_addr[0..metrics.net.ipv4_addr_len]);
+            self.ipv4_addr_len = metrics.net.ipv4_addr_len;
+        }
 
         if (self.prev_metrics) |prev| {
             // Per-core CPU% from tick deltas

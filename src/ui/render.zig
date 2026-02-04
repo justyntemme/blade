@@ -115,7 +115,7 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
     //    (Processes spans from hd1 to bottom border without hd2)
 
     const avail_h = h -| 4; // minus outer borders(2) + hd1(1) + hd2(1)
-    const top_h: u16 = @max(avail_h * 2 / 5, 2);
+    const top_h: u16 = @max(avail_h / 3, 2);
     const bot_avail: u16 = avail_h -| top_h;
     const left_top_h: u16 = @max(bot_avail / 2, 2);
     const left_bot_h: u16 = bot_avail -| left_top_h;
@@ -227,6 +227,10 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
     drawTitle(buf, x0 + 2, y0, "CPU");
     drawTitle(buf, x_vdA + 2, y0, "Cores");
     drawTitle(buf, x0 + 2, y_hd1, "Network");
+    if (app.system.ipv4_addr_len > 0) {
+        const ip_str = app.system.ipv4_addr[0..app.system.ipv4_addr_len];
+        buf.setString(x0 + 2 + @as(u16, @intCast("Network".len)) + 1, y_hd1, ip_str, _Style{ .fg = .gray });
+    }
     drawTitle(buf, x_vdC + 2, y_hd1, "Memory");
     drawTitle(buf, x_vdB + 2, y_hd1, "Processes");
     drawTitle(buf, x0 + 2, y_hd2, "Disk IO");
@@ -521,8 +525,9 @@ fn renderCoreBrailleBlock(buf: *tui.render.Buffer, rect: layout.Rect, history: *
     }
 }
 
-/// Braille area chart from a CpuHistory (values 0-100) with a fixed color.
-/// No noise floor, no per-column coloring — suited for memory category charts.
+/// Braille area chart from a CpuHistory (values 0-100) with a fixed scale.
+/// Each braille dot level = 10%, so each character row = 40%.
+/// The chart height determines the max displayable value (height * 40%).
 fn renderMemBrailleChart(buf: *tui.render.Buffer, rect: layout.Rect, history: *const model.CpuHistory, color: _Color) void {
     if (rect.width == 0 or rect.height == 0) return;
     const width: usize = @intCast(rect.width);
@@ -531,6 +536,9 @@ fn renderMemBrailleChart(buf: *tui.render.Buffer, rect: layout.Rect, history: *c
     const capacity = width * 2;
     const filled_cols: usize = if (sample_count >= 2) @min((sample_count + 1) / 2, width) else if (sample_count == 1) 1 else 0;
     const start_sample: usize = if (sample_count > capacity) sample_count - capacity else 0;
+
+    // Fixed scale: 10% per dot level, 40% per row
+    const pct_per_row: f32 = 40.0;
 
     var col: usize = 0;
     while (col < width) : (col += 1) {
@@ -546,11 +554,17 @@ fn renderMemBrailleChart(buf: *tui.render.Buffer, rect: layout.Rect, history: *c
         var row: usize = 0;
         while (row < height) : (row += 1) {
             const screen_row = height - 1 - row;
-            const band_low: f32 = @as(f32, @floatFromInt(row)) * 100.0 / @as(f32, @floatFromInt(height));
-            const band_high: f32 = @as(f32, @floatFromInt(row + 1)) * 100.0 / @as(f32, @floatFromInt(height));
+            const band_low: f32 = @as(f32, @floatFromInt(row)) * pct_per_row;
+            const band_high: f32 = @as(f32, @floatFromInt(row + 1)) * pct_per_row;
 
-            const left_level = quantize(left_val, band_low, band_high);
-            const right_level = quantize(right_val, band_low, band_high);
+            var left_level = quantize(left_val, band_low, band_high);
+            var right_level = quantize(right_val, band_low, band_high);
+            // Ensure non-zero values always produce at least 1 dot in bottom band
+            if (row == 0) {
+                if (left_val > 0 and left_level == 0) left_level = 1;
+                if (right_val > 0 and right_level == 0) right_level = 1;
+            }
+
             const braille_cp = braille_up[@as(usize, left_level) * 5 + @as(usize, right_level)];
             if (braille_cp == 0x2800) continue;
 
@@ -620,16 +634,6 @@ fn renderRateBrailleChart(buf: *tui.render.Buffer, rect: layout.Rect, history: *
         }
     }
 
-    // Y-axis scale label: ceiling value at top-right (when height >= 3)
-    if (height >= 3) {
-        var scale_buf: [12]u8 = undefined;
-        const scale_str = formatRate(&scale_buf, ceiling);
-        const scale_len: u16 = @intCast(scale_str.len);
-        if (scale_len < rect.width) {
-            const scale_x = rect.x + rect.width -| scale_len;
-            buf.setString(scale_x, rect.y, scale_str, _Style{ .fg = .gray });
-        }
-    }
 }
 
 fn renderCpuGraphBraille(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state.SystemState) void {
@@ -639,7 +643,8 @@ fn renderCpuGraphBraille(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const
     }
 
     const width: usize = @intCast(rect.width);
-    const height: usize = @intCast(rect.height);
+    const chart_height: usize = if (rect.height > 2) @as(usize, @intCast(rect.height)) - 1 else @intCast(rect.height); // reserve 1 row for info bar
+    const height = chart_height;
     const history = &sys.cpu_history;
     const sample_count = history.count;
 
@@ -705,11 +710,25 @@ fn renderCpuGraphBraille(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const
         buf.setString(scale_x, rect.y, scale_label, _Style{ .fg = .gray });
     }
 
-    // Total CPU% label at bottom-right
-    var label_buf: [12]u8 = undefined;
-    const label = std.fmt.bufPrint(&label_buf, "{d:>5.1}%", .{sys.total_cpu_percent}) catch "???";
-    const label_x = rect.x + rect.width -| @as(u16, @intCast(label.len));
-    buf.setString(label_x, rect.y + rect.height -| 1, label, _Style{ .fg = cpuColor(sys.total_cpu_percent), .modifier = _Modifier{ .bold = true } });
+    // Info bar at bottom: "Up: 3d 14h 22m"
+    const info_y = rect.y + rect.height -| 1;
+    {
+        const up_s = sys.uptime_seconds;
+        const days = up_s / 86400;
+        const hours = (up_s % 86400) / 3600;
+        const minutes = (up_s % 3600) / 60;
+
+        var info_buf: [40]u8 = undefined;
+        const info_str = if (days > 0)
+            std.fmt.bufPrint(&info_buf, "Up: {d}d {d}h {d}m", .{ days, hours, minutes }) catch ""
+        else
+            std.fmt.bufPrint(&info_buf, "Up: {d}h {d}m", .{ hours, minutes }) catch "";
+
+        if (info_str.len > 0) {
+            const show_len: u16 = @intCast(@min(info_str.len, @as(usize, @intCast(rect.width))));
+            buf.setString(rect.x, info_y, info_str[0..show_len], _Style{ .fg = .gray });
+        }
+    }
 }
 
 fn renderCoresBars(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state.SystemState) void {
@@ -1058,18 +1077,20 @@ fn renderNetworkCombined(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const
         colors[i] = ifaceColor(i);
     }
 
-    // Shared scale across both halves (max of all recv + all sent)
-    const capacity = @as(usize, @intCast(rect.width)) * 2;
+    // Shared scale across both halves — use a short recent window so the
+    // chart adapts quickly to current traffic instead of being pinned by
+    // old spikes, which causes low traffic to appear as floating dots.
+    const scale_window: usize = 30; // ~30 seconds of recent data
     var global_max: f64 = 0;
     for (0..iface_count) |i| {
-        const rv = @min(sys.iface_recv_histories[i].count, capacity);
-        if (rv > 0) {
-            const m = sys.iface_recv_histories[i].maxInWindow(rv);
+        const rw = @min(sys.iface_recv_histories[i].count, scale_window);
+        if (rw > 0) {
+            const m = sys.iface_recv_histories[i].maxInWindow(rw);
             if (m > global_max) global_max = m;
         }
-        const sv = @min(sys.iface_sent_histories[i].count, capacity);
-        if (sv > 0) {
-            const m = sys.iface_sent_histories[i].maxInWindow(sv);
+        const sw = @min(sys.iface_sent_histories[i].count, scale_window);
+        if (sw > 0) {
+            const m = sys.iface_sent_histories[i].maxInWindow(sw);
             if (m > global_max) global_max = m;
         }
     }
@@ -1080,45 +1101,35 @@ fn renderNetworkCombined(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const
         renderMultiRateUp(buf, .{
             .x = rect.x, .y = chart_y, .width = rect.width, .height = dl_h,
         }, recv_ptrs[0..iface_count], colors[0..iface_count], ceiling);
-
-        // Scale label at top-right of download half
-        var scale_buf: [12]u8 = undefined;
-        const scale_str = formatRate(&scale_buf, ceiling);
-        const scale_len: u16 = @intCast(scale_str.len);
-        if (scale_len < rect.width) {
-            buf.setString(rect.x + rect.width -| scale_len, chart_y, scale_str, _Style{ .fg = .gray });
-        }
     }
 
-    // Center axis row: "▼ 5.1 MB/s ▲ 1.2 MB/s ──────"
+    // Center axis row: "▼5.1M ▲1.2M ──────────"
     {
         const DASH: u21 = 0x2500;
 
-        var dl_rate_buf: [12]u8 = undefined;
-        const dl_rate_str = formatRate(&dl_rate_buf, sys.net_recv_rate);
-        var ul_rate_buf: [12]u8 = undefined;
-        const ul_rate_str = formatRate(&ul_rate_buf, sys.net_sent_rate);
+        var dl_short_buf: [8]u8 = undefined;
+        const dl_short = formatRateShort(&dl_short_buf, sys.net_recv_rate);
+        var ul_short_buf: [8]u8 = undefined;
+        const ul_short = formatRateShort(&ul_short_buf, sys.net_sent_rate);
 
-        // ▼ + space + rate
-        var cursor: u16 = rect.x;
-        buf.setString(cursor, axis_y, recv_glyph, _Style{ .fg = .green });
-        cursor += @intCast(recv_glyph.len);
-        buf.setString(cursor, axis_y, dl_rate_str, _Style{ .fg = .green });
-        cursor += @intCast(dl_rate_str.len);
-        cursor += 1; // gap
-        // ▲ + space + rate
-        buf.setString(cursor, axis_y, sent_glyph, _Style{ .fg = .red });
-        cursor += @intCast(sent_glyph.len);
-        buf.setString(cursor, axis_y, ul_rate_str, _Style{ .fg = .red });
-        cursor += @intCast(ul_rate_str.len);
-        // Fill dashes to right edge
-        const dash_end = rect.x + rect.width;
-        if (dash_end > cursor) {
-            var dx: u16 = cursor;
-            while (dx < dash_end) : (dx += 1) {
+        // Fill entire axis with dashes first
+        {
+            var dx: u16 = rect.x;
+            while (dx < rect.x + rect.width) : (dx += 1) {
                 buf.setChar(dx, axis_y, DASH, _Style{ .fg = .gray });
             }
         }
+
+        // Overlay indicators on left
+        var cursor: u16 = rect.x;
+        buf.setString(cursor, axis_y, recv_glyph, _Style{ .fg = .green });
+        cursor += 1; // glyph is 1 cell wide
+        buf.setString(cursor, axis_y, dl_short, _Style{ .fg = .green });
+        cursor += @intCast(dl_short.len);
+        cursor += 1; // gap
+        buf.setString(cursor, axis_y, sent_glyph, _Style{ .fg = .red });
+        cursor += 1;
+        buf.setString(cursor, axis_y, ul_short, _Style{ .fg = .red });
     }
 
     // Upload half: braille grows downward
@@ -1167,112 +1178,61 @@ fn renderMemoryPane(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const stat
         .{ .label = "Free", .short_label = "F ", .value = sys.mem_free, .color = .cyan, .history = &sys.mem_free_history },
     };
 
-    // Full format: height >= 10 and width >= 20
-    if (rect.height >= 10 and rect.width >= 20) {
-        var y: u16 = rect.y;
-        const max_y = rect.y + rect.height;
-        const DASH: u21 = 0x2500; // ─
+    var y: u16 = rect.y;
+    const max_y = rect.y + rect.height;
+    const DASH: u21 = 0x2500; // ─
 
-        // Total header line: "Total ─────── 16.0 GiB"
-        if (y < max_y) {
-            const total_label = "Total";
-            buf.setString(rect.x, y, total_label, _Style{ .fg = .light_white, .modifier = _Modifier{ .bold = true } });
-            var b: [12]u8 = undefined;
-            const s = formatBytes(&b, sys.mem_total);
-            const s_len: u16 = @intCast(s.len);
-            const val_x = rect.x + rect.width -| s_len;
-            buf.setString(val_x, y, s, _Style{ .fg = .light_white });
+    // Total header line: "Total ─────── 16.0 GiB"
+    if (y < max_y) {
+        const total_label = "Total";
+        buf.setString(rect.x, y, total_label, _Style{ .fg = .light_white, .modifier = _Modifier{ .bold = true } });
+        var b: [12]u8 = undefined;
+        const s = formatBytes(&b, sys.mem_total);
+        const s_len: u16 = @intCast(s.len);
+        const val_x = rect.x + rect.width -| s_len;
+        buf.setString(val_x, y, s, _Style{ .fg = .light_white });
 
-            // Fill dashes between label and value
-            const dash_start = rect.x + @as(u16, @intCast(total_label.len)) + 1;
-            const dash_end = if (val_x > 0) val_x -| 1 else val_x;
-            if (dash_end > dash_start) {
-                var dx: u16 = dash_start;
-                while (dx <= dash_end) : (dx += 1) {
-                    buf.setChar(dx, y, DASH, _Style{ .fg = .gray });
-                }
+        // Fill dashes between label and value
+        const dash_start = rect.x + @as(u16, @intCast(total_label.len)) + 1;
+        const dash_end = if (val_x > 0) val_x -| 1 else val_x;
+        if (dash_end > dash_start) {
+            var dx: u16 = dash_start;
+            while (dx <= dash_end) : (dx += 1) {
+                buf.setChar(dx, y, DASH, _Style{ .fg = .gray });
             }
-            y += 1;
         }
+        y += 1;
+    }
 
-        // Each entry: 1 label row + braille chart rows
-        // Distribute remaining rows evenly across 4 categories
-        const remaining = max_y -| y;
-        const rows_per_entry = remaining / 4;
+    // Fixed scale: 1 dot = 10%, 1 row = 40%. Chart rows per entry = ceil(pct / 40).
+    for (lines) |line| {
+        if (y >= max_y) break;
+        if (mem_total_f == 0) break;
 
-        for (lines) |line| {
-            if (y >= max_y) break;
-            if (mem_total_f == 0) break;
+        const pct: f32 = @as(f32, @floatFromInt(line.value)) / mem_total_f * 100.0;
 
-            const pct: f32 = @as(f32, @floatFromInt(line.value)) / mem_total_f * 100.0;
+        // Label row: "Used   8.1 GiB   50%"
+        buf.setString(rect.x, y, line.label, _Style{ .fg = line.color, .modifier = _Modifier{ .bold = true } });
 
-            // Label row: "Used   8.1 GiB   50%"
-            buf.setString(rect.x, y, line.label, _Style{ .fg = line.color, .modifier = _Modifier{ .bold = true } });
-
-            var val_buf: [12]u8 = undefined;
-            const val_str = formatBytes(&val_buf, line.value);
-            const label_col_w: u16 = 10;
+        var val_buf: [12]u8 = undefined;
+        const val_str = formatBytes(&val_buf, line.value);
+        const label_col_w: u16 = @intCast(@max(line.label.len + 1, 10));
+        if (label_col_w < rect.width) {
             buf.setString(rect.x + label_col_w, y, val_str, _Style{ .fg = line.color });
-
-            const pct_w: u16 = 5;
-            var pct_buf: [5]u8 = undefined;
-            const pct_str = std.fmt.bufPrint(&pct_buf, "{d:>4.0}%", .{pct}) catch " ??%";
-            buf.setString(rect.x + rect.width -| pct_w, y, pct_str, _Style{ .fg = line.color });
-            y += 1;
-
-            // Braille chart rows
-            const chart_rows: u16 = if (rows_per_entry > 1) rows_per_entry - 1 else 0;
-            if (chart_rows > 0 and y + chart_rows <= max_y) {
-                renderMemBrailleChart(buf, .{ .x = rect.x, .y = y, .width = rect.width, .height = chart_rows }, line.history, line.color);
-                y += chart_rows;
-            }
-        }
-    } else {
-        // Compact layout: full names + braille chart per entry, filling available space
-        var y: u16 = rect.y;
-        const max_y = rect.y + rect.height;
-
-        // Total line
-        if (y < max_y) {
-            buf.setString(rect.x, y, "Total", _Style{ .fg = .gray });
-            var b: [12]u8 = undefined;
-            const s = formatBytes(&b, sys.mem_total);
-            const val_x = rect.x + rect.width -| @as(u16, @intCast(s.len));
-            buf.setString(val_x, y, s, _Style{ .fg = .light_white });
-            y += 1;
         }
 
-        // Distribute remaining rows across 4 categories
-        const remaining = max_y -| y;
-        const rows_per_entry = remaining / 4;
+        const pct_w: u16 = 5;
+        var pct_buf: [5]u8 = undefined;
+        const pct_str = std.fmt.bufPrint(&pct_buf, "{d:>4.0}%", .{pct}) catch " ??%";
+        buf.setString(rect.x + rect.width -| pct_w, y, pct_str, _Style{ .fg = line.color });
+        y += 1;
 
-        for (lines) |line| {
-            if (y >= max_y) break;
-            if (mem_total_f == 0) break;
-
-            const pct: f32 = @as(f32, @floatFromInt(line.value)) / mem_total_f * 100.0;
-
-            // Label row: "Used  8.1 GiB  50%"
-            const label_len: u16 = @intCast(line.label.len);
-            buf.setString(rect.x, y, line.label, _Style{ .fg = line.color, .modifier = _Modifier{ .bold = true } });
-
-            var val_buf: [12]u8 = undefined;
-            const val_str = formatBytes(&val_buf, line.value);
-            const val_x = rect.x + label_len + 1;
-            buf.setString(val_x, y, val_str, _Style{ .fg = line.color });
-
-            const pct_w: u16 = 4;
-            var pct_buf: [4]u8 = undefined;
-            const pct_str = std.fmt.bufPrint(&pct_buf, "{d:>3.0}%", .{pct}) catch "??%";
-            buf.setString(rect.x + rect.width -| pct_w, y, pct_str, _Style{ .fg = line.color });
-            y += 1;
-
-            // Braille chart rows (fill remaining allocated space)
-            const chart_rows: u16 = if (rows_per_entry > 1) rows_per_entry - 1 else 0;
-            if (chart_rows > 0 and y + chart_rows <= max_y) {
-                renderMemBrailleChart(buf, .{ .x = rect.x, .y = y, .width = rect.width, .height = chart_rows }, line.history, line.color);
-                y += chart_rows;
-            }
+        // Chart rows based on value: ceil(pct / 40), at least 1 if value > 0
+        const needed: u16 = if (pct > 0) @intFromFloat(@ceil(pct / 40.0)) else 0;
+        const chart_rows: u16 = @min(@max(needed, if (pct > 0) @as(u16, 1) else 0), max_y -| y);
+        if (chart_rows > 0) {
+            renderMemBrailleChart(buf, .{ .x = rect.x, .y = y, .width = rect.width, .height = chart_rows }, line.history, line.color);
+            y += chart_rows;
         }
     }
 }
@@ -1391,6 +1351,19 @@ fn renderBar(buf: *tui.render.Buffer, x: u16, y: u16, width: u16, value: f32, ma
         } else {
             buf.setChar(x + i, y, EMPTY_SHADE, _Style{ .fg = .gray });
         }
+    }
+}
+
+/// Compact rate format for tight spaces: "5.1M", "120K", "0B"
+fn formatRateShort(out_buf: *[8]u8, rate: f64) []const u8 {
+    if (rate >= 1024.0 * 1024.0 * 1024.0) {
+        return std.fmt.bufPrint(out_buf, "{d:.1}G", .{rate / (1024.0 * 1024.0 * 1024.0)}) catch "?G";
+    } else if (rate >= 1024.0 * 1024.0) {
+        return std.fmt.bufPrint(out_buf, "{d:.1}M", .{rate / (1024.0 * 1024.0)}) catch "?M";
+    } else if (rate >= 1024.0) {
+        return std.fmt.bufPrint(out_buf, "{d:.0}K", .{rate / 1024.0}) catch "?K";
+    } else {
+        return std.fmt.bufPrint(out_buf, "{d:.0}B", .{rate}) catch "0B";
     }
 }
 

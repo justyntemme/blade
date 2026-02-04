@@ -13,6 +13,8 @@ const c = @cImport({
     @cInclude("IOKit/IOKitLib.h");
     @cInclude("CoreFoundation/CoreFoundation.h");
     @cInclude("sys/mount.h");
+    @cInclude("arpa/inet.h");
+    @cInclude("netinet/in.h");
 });
 
 const model = @import("model");
@@ -237,6 +239,20 @@ pub fn collectSystemMetrics() model.SystemMetrics {
         }
     }
 
+    // System uptime via KERN_BOOTTIME
+    {
+        var boottime: std.c.timeval = undefined;
+        var bt_mib = [2]c_int{ c.CTL_KERN, c.KERN_BOOTTIME };
+        var bt_size: usize = @sizeOf(std.c.timeval);
+        if (std.c.sysctl(&bt_mib, 2, @ptrCast(&boottime), &bt_size, null, 0) == 0) {
+            const now = std.time.timestamp();
+            const boot_s: i64 = boottime.sec;
+            if (now > boot_s) {
+                metrics.uptime_seconds = @intCast(now - boot_s);
+            }
+        }
+    }
+
     // Network IO via getifaddrs (per-interface + totals)
     {
         var ifap: ?*c.ifaddrs = null;
@@ -272,6 +288,27 @@ pub fn collectSystemMetrics() model.SystemMetrics {
                 }
                 ifa = iface.ifa_next;
             }
+            // Second pass: find first non-loopback IPv4 address
+            ifa = ifap;
+            while (ifa) |iface| {
+                if (iface.ifa_addr != null and
+                    iface.ifa_addr.*.sa_family == c.AF_INET and
+                    (iface.ifa_flags & c.IFF_LOOPBACK) == 0 and
+                    (iface.ifa_flags & c.IFF_UP) != 0)
+                {
+                    const sa_in: *const c.sockaddr_in = @ptrCast(@alignCast(iface.ifa_addr));
+                    var ip_buf: [c.INET_ADDRSTRLEN]u8 = undefined;
+                    if (c.inet_ntop(c.AF_INET, &sa_in.sin_addr, &ip_buf, c.INET_ADDRSTRLEN)) |ip_ptr| {
+                        const ip_slice = std.mem.sliceTo(ip_ptr, 0);
+                        const copy_len = @min(ip_slice.len, model.IP_ADDR_LEN);
+                        @memcpy(metrics.net.ipv4_addr[0..copy_len], ip_slice[0..copy_len]);
+                        metrics.net.ipv4_addr_len = @intCast(copy_len);
+                        break;
+                    }
+                }
+                ifa = iface.ifa_next;
+            }
+
             c.freeifaddrs(ifap);
         }
     }

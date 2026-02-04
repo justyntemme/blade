@@ -140,11 +140,15 @@ pub const InterfaceIO = struct {
     bytes_sent: u64 = 0,
 };
 
+pub const IP_ADDR_LEN = 16; // "255.255.255.255\0"
+
 pub const NetworkIO = struct {
     bytes_recv: u64 = 0,
     bytes_sent: u64 = 0,
     interfaces: [MAX_INTERFACES]InterfaceIO = [_]InterfaceIO{.{}} ** MAX_INTERFACES,
     iface_count: u8 = 0,
+    ipv4_addr: [IP_ADDR_LEN]u8 = [_]u8{0} ** IP_ADDR_LEN,
+    ipv4_addr_len: u8 = 0,
 };
 
 pub const DiskIO = struct {
@@ -183,6 +187,7 @@ pub const SystemMetrics = struct {
     mem_total: u64 = 0,
     mem_used: u64 = 0,
     load_avg: [3]f64 = .{ 0, 0, 0 },
+    uptime_seconds: u64 = 0,
     net: NetworkIO = .{},
     disk: DiskIO = .{},
     mem_detail: MemoryDetail = .{},
