@@ -24,8 +24,8 @@ pub const Proc = struct {
     pid: pid_t = 0,
     ppid: pid_t = 0,
     start_time_ns: i128 = 0,
-    s_name: [256:0]u8,
-    path: [4096]u8,
+    name: []const u8 = "",
+    path: []const u8 = "",
     mem_rss: u64 = 0,
     total_user: u64 = 0,
     total_system: u64 = 0,
@@ -65,9 +65,9 @@ pub const ProcCold = struct {
     name: []const u8,
     path: []const u8,
     ppid: std.posix.pid_t,
-    name_lower: []const u8,
-    path_lower: []const u8,
 };
+
+pub const ProcColdList = std.MultiArrayList(ProcCold);
 
 pub const VisibleNode = struct {
     data_idx: u32,
@@ -114,7 +114,8 @@ pub const SortContext = struct {
     pids: []const pid_t,
     cpu_percents: []const f32,
     mem_rsss: []const u64,
-    cold_items: []const ProcCold,
+    cold_names: []const []const u8,
+    cold_paths: []const []const u8,
     sort_column: SortColumn,
     sort_direction: SortDirection,
 };

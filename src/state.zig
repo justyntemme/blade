@@ -82,12 +82,26 @@ pub const SystemState = struct {
         self.mem_cached = metrics.mem_detail.cached;
         self.mem_free = metrics.mem_detail.free;
 
-        // Network cumulative totals (valid from first sample)
+        // Network absolute data (valid from first sample, like core_count/mem_total)
         self.net_total_recv = metrics.net.bytes_recv;
         self.net_total_sent = metrics.net.bytes_sent;
         if (metrics.net.ipv4_addr_len > 0) {
             @memcpy(self.ipv4_addr[0..metrics.net.ipv4_addr_len], metrics.net.ipv4_addr[0..metrics.net.ipv4_addr_len]);
             self.ipv4_addr_len = metrics.net.ipv4_addr_len;
+        }
+
+        // Per-interface identity (names, cumulative totals) — available from first sample.
+        // Rates are computed below only when prev_metrics exists.
+        {
+            const cur_count = metrics.net.iface_count;
+            self.iface_count = cur_count;
+            for (0..cur_count) |i| {
+                const cur_iface = metrics.net.interfaces[i];
+                @memcpy(self.iface_names[i][0..cur_iface.name_len], cur_iface.name[0..cur_iface.name_len]);
+                self.iface_name_lens[i] = cur_iface.name_len;
+                self.iface_total_recv[i] = cur_iface.bytes_recv;
+                self.iface_total_sent[i] = cur_iface.bytes_sent;
+            }
         }
 
         if (self.prev_metrics) |prev| {
@@ -141,16 +155,10 @@ pub const SystemState = struct {
                 self.net_recv_rate = @as(f64, @floatFromInt(metrics.net.bytes_recv -| prev.net.bytes_recv)) / dt_s;
                 self.net_sent_rate = @as(f64, @floatFromInt(metrics.net.bytes_sent -| prev.net.bytes_sent)) / dt_s;
 
-                // Per-interface rates: match by name between current and previous
-                const cur_count = metrics.net.iface_count;
-                self.iface_count = cur_count;
-                for (0..cur_count) |i| {
+                // Per-interface rates (names/totals already stored above)
+                for (0..metrics.net.iface_count) |i| {
                     const cur_iface = metrics.net.interfaces[i];
                     const cur_name = cur_iface.name[0..cur_iface.name_len];
-                    @memcpy(self.iface_names[i][0..cur_iface.name_len], cur_name);
-                    self.iface_name_lens[i] = cur_iface.name_len;
-                    self.iface_total_recv[i] = cur_iface.bytes_recv;
-                    self.iface_total_sent[i] = cur_iface.bytes_sent;
 
                     // Find matching previous interface by name
                     var prev_recv: u64 = 0;

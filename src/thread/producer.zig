@@ -33,6 +33,7 @@ pub fn run(args: ThreadArgs) void {
 
 fn fetchAndSend(queue: *channel.BatchQueue, running: *std.atomic.Value(bool)) !void {
     var batch_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    errdefer batch_arena.deinit();
     const arena_alloc = batch_arena.allocator();
     //create a new batch
     // Allocate BEFORE copying the arena into the batch

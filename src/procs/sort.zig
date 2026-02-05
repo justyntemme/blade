@@ -13,11 +13,11 @@ pub fn compareByIndex(ctx: model.SortContext, a: usize, b: usize) bool {
             break :blk if (cmp != .eq) cmp else std.math.order(ctx.pids[a], ctx.pids[b]);
         },
         .name => blk: {
-            const cmp = std.mem.order(u8, ctx.cold_items[a].name, ctx.cold_items[b].name);
+            const cmp = std.mem.order(u8, ctx.cold_names[a], ctx.cold_names[b]);
             break :blk if (cmp != .eq) cmp else std.math.order(ctx.pids[a], ctx.pids[b]);
         },
         .path => blk: {
-            const cmp = std.mem.order(u8, ctx.cold_items[a].path, ctx.cold_items[b].path);
+            const cmp = std.mem.order(u8, ctx.cold_paths[a], ctx.cold_paths[b]);
             break :blk if (cmp != .eq) cmp else std.math.order(ctx.pids[a], ctx.pids[b]);
         },
     };

@@ -38,7 +38,6 @@ pub fn collectSnapshot(arena: std.mem.Allocator) PlatformError!std.AutoHashMap(p
     const bytes = c.proc_listpids(c.PROC_ALL_PIDS, 0, null, 0);
     const count = @divExact(@as(usize, @intCast(bytes)), @sizeOf(pid_t));
     const pids = try arena.alloc(pid_t, count);
-    defer arena.free(pids);
     if (count <= 0) {
         std.debug.print("Failed to get process count\n", .{});
         return error.FailedToGetProcessCount;
@@ -94,25 +93,11 @@ pub fn collectSnapshot(arena: std.mem.Allocator) PlatformError!std.AutoHashMap(p
             const start_sec: i128 = @intCast(proc_info.pbi_start_tvsec);
             const start_usec: i128 = @intCast(proc_info.pbi_start_tvusec);
             const start_time_ns = start_sec * std.time.ns_per_s + start_usec * std.time.ns_per_us;
-            // SAFETY: s_name and path are fully written via @memcpy before struct is used
-            var proc = Proc{
-                .pid = pid,
-                .ppid = @intCast(proc_info.pbi_ppid),
-                .start_time_ns = start_time_ns,
-                .s_name = undefined,
-                .path = undefined,
-                .mem_rss = if (task_size > 0) task_info.pti_resident_size else 0,
-                .total_user = if (task_size > 0) task_info.pti_total_user else 0,
-                .total_system = if (task_size > 0) task_info.pti_total_system else 0,
-            };
-            @memcpy(proc.s_name[0..c_name.len], c_name);
-            proc.s_name[c_name.len] = 0;
-            if (path_len > 0) {
-                const len: usize = @intCast(@min(path_len, proc.path.len - 1));
-                @memcpy(proc.path[0..len], path_buf[0..len]);
 
-                proc.path[@intCast(path_len)] = 0;
-            } else {
+            const name = arena.dupe(u8, c_name) catch return error.OutOfMemory;
+            const path_str = if (path_len > 0)
+                arena.dupe(u8, path_buf[0..@as(usize, @intCast(path_len))]) catch return error.OutOfMemory
+            else blk: {
                 const e = std.posix.errno(0);
                 if (e == .SRCH) continue; // process exited between listing and path lookup
                 const err_label: []const u8 = switch (e) {
@@ -120,10 +105,20 @@ pub fn collectSnapshot(arena: std.mem.Allocator) PlatformError!std.AutoHashMap(p
                     .NOENT => "[binary deleted]",
                     else => "[path unavailable]",
                 };
-                @memcpy(proc.path[0..err_label.len], err_label);
-                proc.path[err_label.len] = 0;
-            }
-            try proc_map.put(pid, proc);
+                break :blk arena.dupe(u8, err_label) catch return error.OutOfMemory;
+            };
+
+            const proc = Proc{
+                .pid = pid,
+                .ppid = @intCast(proc_info.pbi_ppid),
+                .start_time_ns = start_time_ns,
+                .name = name,
+                .path = path_str,
+                .mem_rss = if (task_size > 0) task_info.pti_resident_size else 0,
+                .total_user = if (task_size > 0) task_info.pti_total_user else 0,
+                .total_system = if (task_size > 0) task_info.pti_total_system else 0,
+            };
+            proc_map.putAssumeCapacity(pid, proc);
         }
     } // for each PID
 

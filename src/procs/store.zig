@@ -6,7 +6,7 @@ const channel = @import("thread_channel");
 
 pub const Store = struct {
     hot: model.ProcHotList = .{},
-    cold: std.ArrayList(model.ProcCold) = .empty,
+    cold: model.ProcColdList = .{},
     visible_nodes: std.ArrayListUnmanaged(model.VisibleNode) = .empty,
     render_rows: std.ArrayListUnmanaged(model.RenderRow) = .empty,
     sort_column: model.SortColumn = .cpu,
@@ -44,7 +44,8 @@ pub const Store = struct {
             .pids = self.hot.items(.pid),
             .cpu_percents = self.hot.items(.cpu_percent),
             .mem_rsss = self.hot.items(.mem_rss),
-            .cold_items = self.cold.items,
+            .cold_names = self.cold.items(.name),
+            .cold_paths = self.cold.items(.path),
             .sort_column = self.sort_column,
             .sort_direction = self.sort_direction,
         };
@@ -88,11 +89,10 @@ pub const Store = struct {
 
     pub fn populateView(self: *Store) !void {
         self.hot.shrinkRetainingCapacity(0);
-        self.cold.clearRetainingCapacity();
+        self.cold.shrinkRetainingCapacity(0);
 
         if (self.current_batch == null) return;
         const batch = &self.current_batch.?;
-        const arena = batch.arena.allocator();
         const time_delta: i128 = if (self.previous_batch) |*prev|
             batch.timestamp_ns - prev.timestamp_ns
         else
@@ -116,19 +116,10 @@ pub const Store = struct {
                 }
             }
 
-            const name_slice = std.mem.sliceTo(&proc_ptr.s_name, 0);
-            const path_slice = std.mem.sliceTo(&proc_ptr.path, 0);
-            const name_lower = try arena.alloc(u8, name_slice.len);
-            _ = std.ascii.lowerString(name_lower, name_slice);
-            const path_lower = try arena.alloc(u8, path_slice.len);
-            _ = std.ascii.lowerString(path_lower, path_slice);
-
             self.cold.appendAssumeCapacity(.{
-                .name = std.mem.sliceTo(&proc_ptr.s_name, 0),
-                .path = std.mem.sliceTo(&proc_ptr.path, 0),
+                .name = proc_ptr.name,
+                .path = proc_ptr.path,
                 .ppid = proc_ptr.ppid,
-                .name_lower = name_lower,
-                .path_lower = path_lower,
             });
             self.hot.appendAssumeCapacity(.{
                 .pid = proc_ptr.pid,
@@ -137,7 +128,7 @@ pub const Store = struct {
                 .mem_rss = proc_ptr.mem_rss,
             });
         }
-        std.debug.assert(self.hot.len == self.cold.items.len);
+        std.debug.assert(self.hot.len == self.cold.len);
     }
 
     pub fn rebuildVisible(self: *Store, search: []const u8) !void {
@@ -147,7 +138,9 @@ pub const Store = struct {
 
         self.visible_nodes = try tree.buildVisibleNodes(
             self.hot,
-            self.cold.items,
+            self.cold.items(.ppid),
+            self.cold.items(.name),
+            self.cold.items(.path),
             &self.adjacency,
             self.pid_to_index,
             &self.expanded_pids,
@@ -164,7 +157,7 @@ pub const Store = struct {
         if (self.current_batch) |*batch| {
             const arena = batch.arena.allocator();
             self.pid_to_index = try tree.buildPidIndexMap(self.hot.items(.pid), arena);
-            self.adjacency = try tree.buildAdjacency(self.cold.items, self.pid_to_index, self.hot.len, arena);
+            self.adjacency = try tree.buildAdjacency(self.cold.items(.ppid), self.pid_to_index, self.hot.len, arena);
             const ctx = self.sortContext();
             tree.sortChildren(&self.adjacency, self.hot.len, ctx, _sort.compareByNodeIndex);
         } else {
@@ -237,6 +230,8 @@ pub const Store = struct {
         const pids = self.hot.items(.pid);
         const cpus = self.hot.items(.cpu_percent);
         const mems = self.hot.items(.mem_rss);
+        const names = self.cold.items(.name);
+        const paths = self.cold.items(.path);
 
         for (self.visible_nodes.items) |vn| {
             const di: usize = @intCast(vn.data_idx);
@@ -244,8 +239,8 @@ pub const Store = struct {
                 .pid = pids[di],
                 .cpu_percent = cpus[di],
                 .mem_rss = mems[di],
-                .name = self.cold.items[di].name,
-                .path = self.cold.items[di].path,
+                .name = names[di],
+                .path = paths[di],
                 .depth = vn.depth,
                 .has_children = vn.has_children,
                 .is_expanded = vn.is_expanded,

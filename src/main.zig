@@ -61,7 +61,15 @@ pub fn main() !void {
     }
     defer terminal.showCursor() catch {};
 
+    // Frame-scoped scratch arena: all per-frame allocations (layout, formatting)
+    // use bump-pointer allocation and bulk-free at frame end. .retain_capacity
+    // keeps backing memory across frames — no repeated mmap/munmap.
+    var frame_arena = std.heap.ArenaAllocator.init(gpa_alloc);
+    defer frame_arena.deinit();
+
     while (app.running) {
+        defer _ = frame_arena.reset(.retain_capacity);
+
         if (queue.front()) |batch_ptr| {
             const batch = batch_ptr.*;
             queue.pop();
@@ -86,7 +94,8 @@ pub fn main() !void {
         // Handle input
         try event.handleEvent(&app, e);
 
-        const ctx = state.DrawContext{ .state = &app, .scratch = gpa_alloc };
+        const scratch = frame_arena.allocator();
+        const ctx = state.DrawContext{ .state = &app, .scratch = scratch };
 
         // Draw UI
         try terminal.draw(ctx, render.render);

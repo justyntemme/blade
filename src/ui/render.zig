@@ -48,11 +48,11 @@ fn renderColumnHeader(buf: *tui.render.Buffer, x: u16, y: u16, label: []const u8
     }
 }
 
-// proc_inner_layout is calculated manually for process list content
+// proc_inner_layout: [0]=header, [1]=list, [2]=footer
 const proc_inner_layout = layout.Container.column(&[_]layout.Item{
-    .{ .id = "proc_header", .sizing = .{ .fixed = 1 } },
-    .{ .id = "proc_list", .sizing = .{ .grow = 1.0 } },
-    .{ .id = "proc_footer", .sizing = .{ .fixed = 1 } },
+    .{ .sizing = .{ .fixed = 1 } },
+    .{ .sizing = .{ .grow = 1.0 } },
+    .{ .sizing = .{ .fixed = 1 } },
 });
 
 // --- Box-drawing codepoints (light set, matches zigtui Block default) ---
@@ -66,33 +66,41 @@ const BD_LT: u21 = 0x251C; // ├
 const BD_RT: u21 = 0x2524; // ┤
 const BD_TT: u21 = 0x252C; // ┬
 const BD_BT: u21 = 0x2534; // ┴
+const BD_RTL: u21 = 0x256D; // ╭
+const BD_RTR: u21 = 0x256E; // ╮
+const BD_RBL: u21 = 0x2570; // ╰
+const BD_RBR: u21 = 0x256F; // ╯
 
 const border_style = _Style{ .fg = .cyan };
-const pane_title_style = _Style{ .fg = .white, .modifier = _Modifier{ .bold = true } };
+const pane_title_style = _Style{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } };
 
+// column_layout: [0]=pid, [1]=name, [2]=cpu, [3]=mem, [4]=path
 const column_layout = layout.Container.row(&[_]layout.Item{
-    .{ .id = "pid", .sizing = .{ .fixed = 8 } },
-    .{ .id = "name", .sizing = .{ .grow = 1.0 } },
-    .{ .id = "cpu", .sizing = .{ .fixed = 7.0 } },
-    .{ .id = "mem", .sizing = .{ .fixed = 10.0 } },
-    .{ .id = "path", .sizing = .{ .grow = 2.0 } },
+    .{ .sizing = .{ .fixed = 8 } },
+    .{ .sizing = .{ .grow = 1.0 } },
+    .{ .sizing = .{ .fixed = 7 } },
+    .{ .sizing = .{ .fixed = 10 } },
+    .{ .sizing = .{ .grow = 2.0 } },
 });
 
+// detail_page_layout: [0]=header, [1]=body, [2]=footer
 const detail_page_layout = layout.Container.column(&[_]layout.Item{
-    .{ .id = "detail_header", .sizing = .{ .fixed = 4 } },
-    .{ .id = "detail_body", .sizing = .{ .grow = 1.0 } },
-    .{ .id = "detail_footer", .sizing = .{ .fixed = 1 } },
+    .{ .sizing = .{ .fixed = 4 } },
+    .{ .sizing = .{ .grow = 1.0 } },
+    .{ .sizing = .{ .fixed = 1 } },
 });
 
+// detail_body_layout: [0]=left, [1]=divider, [2]=right
 const detail_body_layout = layout.Container.row(&[_]layout.Item{
-    .{ .id = "detail_left", .sizing = .{ .grow = 3.0 } },
-    .{ .id = "detail_div", .sizing = .{ .fixed = 1 } },
-    .{ .id = "detail_right", .sizing = .{ .grow = 2.0 } },
+    .{ .sizing = .{ .grow = 3.0 } },
+    .{ .sizing = .{ .fixed = 1 } },
+    .{ .sizing = .{ .grow = 2.0 } },
 });
 
+// detail_right_layout: [0]=stats, [1]=tree
 const detail_right_layout = layout.Container.column(&[_]layout.Item{
-    .{ .id = "right_stats", .sizing = .{ .fixed = 7 } },
-    .{ .id = "right_tree", .sizing = .{ .grow = 1.0 } },
+    .{ .sizing = .{ .fixed = 7 } },
+    .{ .sizing = .{ .grow = 1.0 } },
 });
 
 pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
@@ -153,10 +161,10 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
     const y0 = area.y;
     const y1 = area.y + h - 1;
 
-    buf.setChar(x0, y0, BD_TL, border_style);
-    buf.setChar(x1, y0, BD_TR, border_style);
-    buf.setChar(x0, y1, BD_BL, border_style);
-    buf.setChar(x1, y1, BD_BR, border_style);
+    buf.setChar(x0, y0, BD_RTL, border_style);
+    buf.setChar(x1, y0, BD_RTR, border_style);
+    buf.setChar(x0, y1, BD_RBL, border_style);
+    buf.setChar(x1, y1, BD_RBR, border_style);
 
     {
         var x: u16 = x0 + 1;
@@ -229,7 +237,10 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
     drawTitle(buf, x0 + 2, y_hd1, "Network");
     if (app.system.ipv4_addr_len > 0) {
         const ip_str = app.system.ipv4_addr[0..app.system.ipv4_addr_len];
-        buf.setString(x0 + 2 + @as(u16, @intCast("Network".len)) + 1, y_hd1, ip_str, _Style{ .fg = .gray });
+        const ip_x = x0 + 2 + @as(u16, @intCast("Network".len)) + 3;
+        buf.setChar(ip_x, y_hd1, BD_TR, border_style);
+        buf.setString(ip_x + 1, y_hd1, ip_str, _Style{ .fg = .gray });
+        buf.setChar(ip_x + 1 + @as(u16, @intCast(app.system.ipv4_addr_len)), y_hd1, BD_TL, border_style);
     }
     drawTitle(buf, x_vdC + 2, y_hd1, "Memory");
     drawTitle(buf, x_vdB + 2, y_hd1, "Processes");
@@ -254,19 +265,15 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
     renderDisksPane(buf, disks_rect, &app.system);
 
     // Processes pane: calculate sub-layout within the content rect
-    var proc_layout_calc = layout.calculate(draw_ctx.scratch, proc_inner_layout, proc_rect) catch return;
-    defer proc_layout_calc.deinit();
-    const proc_header_rect = proc_layout_calc.get("proc_header") orelse return;
-    const proc_list_rect = proc_layout_calc.get("proc_list") orelse return;
-    const proc_footer_rect = proc_layout_calc.get("proc_footer") orelse return;
-    renderProcessPane(buf, draw_ctx.scratch, app, proc_header_rect, proc_list_rect, proc_footer_rect);
+    const proc_rects = layout.calculate(proc_inner_layout, proc_rect);
+    renderProcessPane(buf, app, proc_rects[0], proc_rects[1], proc_rects[2]);
 
     // ── Overlay modes ─────────────────────────────────────────────
     if (app.mode == .help) {
         renderHelpView(buf, area, app);
     }
     if (app.mode == .detail) {
-        renderDetailView(buf, area, app, draw_ctx.scratch);
+        renderDetailView(buf, area, app);
     }
     if (app.active_toast) |*toast| {
         renderToast(buf, toast, area);
@@ -274,34 +281,31 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
 }
 
 fn drawTitle(buf: *tui.render.Buffer, x: u16, y: u16, title: []const u8) void {
-    buf.setString(x, y, title, pane_title_style);
+    buf.setChar(x, y, BD_TR, border_style);
+    buf.setString(x + 1, y, title, pane_title_style);
+    const title_len: u16 = @intCast(title.len);
+    buf.setChar(x + 1 + title_len, y, BD_TL, border_style);
 }
 
 fn renderProcessPane(
     buf: *tui.render.Buffer,
-    scratch: std.mem.Allocator,
     app: *state.AppState,
     header_rect: layout.Rect,
     list_rect: layout.Rect,
     footer_rect: layout.Rect,
 ) void {
-    var columns = layout.calculate(
-        scratch,
-        column_layout,
-        layout.Rect{
-            .x = list_rect.x,
-            .y = list_rect.y,
-            .width = list_rect.width,
-            .height = 1,
-        },
-    ) catch return;
-    defer columns.deinit();
+    const col_rects = layout.calculate(column_layout, .{
+        .x = list_rect.x,
+        .y = list_rect.y,
+        .width = list_rect.width,
+        .height = 1,
+    });
 
-    const pid_col = columns.get("pid") orelse return;
-    const name_col = columns.get("name") orelse return;
-    const cpu_col = columns.get("cpu") orelse return;
-    const mem_col = columns.get("mem") orelse return;
-    const path_col = columns.get("path") orelse return;
+    const pid_col = col_rects[0];
+    const name_col = col_rects[1];
+    const cpu_col = col_rects[2];
+    const mem_col = col_rects[3];
+    const path_col = col_rects[4];
 
     const visible_rows = list_rect.height;
     if (visible_rows > 0) {
@@ -1592,13 +1596,15 @@ fn renderStatusBar(buf: *tui.render.Buffer, rect: layout.Rect, app: *const state
     const visible = app.procs.render_rows.items.len;
     const total = app.procs.hot.len;
     var count_buf: [32]u8 = undefined;
-    if (std.fmt.bufPrint(&count_buf, "{d}/{d} shown", .{ visible, total })) |slice| {
+    if (std.fmt.bufPrint(&count_buf, "{d}/{d}", .{ visible, total })) |slice| {
         buf.setString(x, rect.y, slice, _Style{ .fg = .light_white });
         x += @intCast(slice.len);
     } else |_| {}
+    buf.setString(x, rect.y, " shown", _Style{ .fg = .gray, .modifier = _Modifier{ .dim = true } });
+    x += 6;
 
     // Separator
-    buf.setString(x, rect.y, " | ", _Style{ .fg = .gray });
+    buf.setString(x, rect.y, " | ", _Style{ .fg = .gray, .modifier = _Modifier{ .dim = true } });
     x += 3;
 
     // Segment 2: last update (green if fresh, yellow if stale, gray if old)
@@ -1608,17 +1614,19 @@ fn renderStatusBar(buf: *tui.render.Buffer, rect: layout.Rect, app: *const state
         const delta_s: u64 = @intCast(@max(0, @divTrunc(delta_ns, std.time.ns_per_s)));
         const update_style: _Style = if (delta_s < 5) .{ .fg = .green } else if (delta_s < 15) .{ .fg = .yellow } else .{ .fg = .gray };
         var update_buf: [32]u8 = undefined;
-        if (std.fmt.bufPrint(&update_buf, "updated {d}s ago", .{delta_s})) |slice| {
+        if (std.fmt.bufPrint(&update_buf, "updated {d}s", .{delta_s})) |slice| {
             buf.setString(x, rect.y, slice, update_style);
             x += @intCast(slice.len);
         } else |_| {}
+        buf.setString(x, rect.y, " ago", _Style{ .fg = .gray, .modifier = _Modifier{ .dim = true } });
+        x += 4;
     } else {
         buf.setString(x, rect.y, "no data", _Style{ .fg = .gray });
         x += 7;
     }
 
     // Separator
-    buf.setString(x, rect.y, " | ", _Style{ .fg = .gray });
+    buf.setString(x, rect.y, " | ", _Style{ .fg = .gray, .modifier = _Modifier{ .dim = true } });
     x += 3;
 
     // Segment 3: sort indicator
@@ -1640,7 +1648,7 @@ fn renderStatusBar(buf: *tui.render.Buffer, rect: layout.Rect, app: *const state
     if (app.mode == .search_view) {
         const query = app.searchSlice();
         if (query.len > 0) {
-            buf.setString(x, rect.y, " | ", _Style{ .fg = .gray });
+            buf.setString(x, rect.y, " | ", _Style{ .fg = .gray, .modifier = _Modifier{ .dim = true } });
             x += 3;
             var search_buf: [64]u8 = undefined;
             if (std.fmt.bufPrint(&search_buf, "search: \"{s}\"", .{query})) |slice| {
@@ -1693,7 +1701,7 @@ fn renderSearchInput(
     buf.setString(cursor_x, rect.y, "_", cursor_style);
 }
 
-fn renderDetailView(buf: *tui.render.Buffer, area: tui.render.Rect, app: *state.AppState, scratch: std.mem.Allocator) void {
+fn renderDetailView(buf: *tui.render.Buffer, area: tui.render.Rect, app: *state.AppState) void {
     // Modal dimensions: 3/4 of screen, centered
     const box_w: u16 = area.width * 3 / 4;
     const box_h: u16 = area.height * 3 / 4;
@@ -1727,17 +1735,16 @@ fn renderDetailView(buf: *tui.render.Buffer, area: tui.render.Rect, app: *state.
     // Page layout inside border (2-char horizontal padding, 1-char vertical)
     const pad_x: u16 = 3;
     const pad_y: u16 = 1;
-    var page = layout.calculate(scratch, detail_page_layout, layout.Rect{
+    const page_rects = layout.calculate(detail_page_layout, .{
         .x = modal.x + pad_x,
         .y = modal.y + pad_y,
         .width = modal.width -| (pad_x * 2),
         .height = modal.height -| (pad_y * 2),
-    }) catch return;
-    defer page.deinit();
+    });
 
-    const header_rect = page.get("detail_header") orelse return;
-    const body_rect = page.get("detail_body") orelse return;
-    const footer_rect = page.get("detail_footer") orelse return;
+    const header_rect = page_rects[0];
+    const body_rect = page_rects[1];
+    const footer_rect = page_rects[2];
 
     // Loading state — centered text when SPSC result hasn't arrived yet
     if (app.detail_data == null) {
@@ -1821,17 +1828,11 @@ fn renderDetailView(buf: *tui.render.Buffer, area: tui.render.Rect, app: *state.
     }
 
     // --- Body: two-pane split (3:divider:2 left:right) ---
-    var body = layout.calculate(scratch, detail_body_layout, layout.Rect{
-        .x = body_rect.x,
-        .y = body_rect.y,
-        .width = body_rect.width,
-        .height = body_rect.height,
-    }) catch return;
-    defer body.deinit();
+    const body_rects = layout.calculate(detail_body_layout, body_rect);
 
-    const left_rect = body.get("detail_left") orelse return;
-    const div_rect = body.get("detail_div") orelse return;
-    const right_rect = body.get("detail_right") orelse return;
+    const left_rect = body_rects[0];
+    const div_rect = body_rects[1];
+    const right_rect = body_rects[2];
 
     // Render vertical divider between panes
     {
@@ -1851,16 +1852,10 @@ fn renderDetailView(buf: *tui.render.Buffer, area: tui.render.Rect, app: *state.
     }
 
     // Split right pane: static stats on top, scrollable tree below
-    var right_sub = layout.calculate(scratch, detail_right_layout, layout.Rect{
-        .x = right_rect.x,
-        .y = right_rect.y,
-        .width = right_rect.width,
-        .height = right_rect.height,
-    }) catch return;
-    defer right_sub.deinit();
+    const right_rects = layout.calculate(detail_right_layout, right_rect);
 
-    const stats_rect = right_sub.get("right_stats") orelse return;
-    const tree_rect = right_sub.get("right_tree") orelse return;
+    const stats_rect = right_rects[0];
+    const tree_rect = right_rects[1];
 
     const left_focused = app.detail_focus == .left;
 
@@ -1915,6 +1910,50 @@ fn renderDetailView(buf: *tui.render.Buffer, area: tui.render.Rect, app: *state.
     buf.setString(footer_rect.x, footer_rect.y, footer_hint, _Style{ .fg = .gray });
 }
 
+/// Render a label + value pair, wrapping the value to continuation lines if it
+/// exceeds the available width. Continuation lines are indented to the value column.
+fn renderWrappedField(
+    buf: *tui.render.Buffer,
+    rect_x: u16,
+    rect_y: u16,
+    label: []const u8,
+    value: []const u8,
+    label_w: u16,
+    max_w: usize,
+    lbl_style: _Style,
+    val_style: _Style,
+    vis_start: usize,
+    vis_end: usize,
+    ln: *usize,
+) void {
+    const vmax = max_w -| @as(usize, label_w);
+
+    if (value.len == 0 or vmax == 0) {
+        if (ln.* >= vis_start and ln.* < vis_end) {
+            const y: u16 = rect_y + @as(u16, @intCast(ln.* - vis_start));
+            buf.setString(rect_x, y, label, lbl_style);
+        }
+        ln.* += 1;
+        return;
+    }
+
+    var offset: usize = 0;
+    var is_first = true;
+    while (offset < value.len) {
+        const end = @min(offset + vmax, value.len);
+        if (ln.* >= vis_start and ln.* < vis_end) {
+            const y: u16 = rect_y + @as(u16, @intCast(ln.* - vis_start));
+            if (is_first) {
+                buf.setString(rect_x, y, label, lbl_style);
+            }
+            buf.setString(rect_x + label_w, y, value[offset..end], val_style);
+        }
+        offset = end;
+        is_first = false;
+        ln.* += 1;
+    }
+}
+
 fn renderDetailLeftPane(buf: *tui.render.Buffer, rect: layout.Rect, detail: model.ProcessDetail, scroll: usize, focused: bool) void {
     const sec: _Style = if (focused) .{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } } else .{ .fg = .gray };
     const lbl = _Style{ .fg = .gray };
@@ -1933,38 +1972,13 @@ fn renderDetailLeftPane(buf: *tui.render.Buffer, rect: layout.Rect, detail: mode
     }
     ln += 1;
 
-    if (ln >= vis_start and ln < vis_end) {
-        const y: u16 = rect.y + @as(u16, @intCast(ln - vis_start));
-        buf.setString(rect.x, y, "  Executable: ", lbl);
-        const vmax = max_w -| 14;
-        buf.setString(rect.x + 14, y, detail.path[0..@min(detail.path.len, vmax)], val);
-    }
-    ln += 1;
+    renderWrappedField(buf, rect.x, rect.y, "  Executable: ", detail.path, 14, max_w, lbl, val, vis_start, vis_end, &ln);
+    renderWrappedField(buf, rect.x, rect.y, "  Cmdline:    ", detail.cmdline, 14, max_w, lbl, val, vis_start, vis_end, &ln);
+    renderWrappedField(buf, rect.x, rect.y, "  CWD:        ", detail.cwd, 14, max_w, lbl, val, vis_start, vis_end, &ln);
 
-    if (ln >= vis_start and ln < vis_end) {
-        const y: u16 = rect.y + @as(u16, @intCast(ln - vis_start));
-        buf.setString(rect.x, y, "  Cmdline:    ", lbl);
-        const vmax = max_w -| 14;
-        buf.setString(rect.x + 14, y, detail.cmdline[0..@min(detail.cmdline.len, vmax)], val);
-    }
-    ln += 1;
-
-    if (ln >= vis_start and ln < vis_end) {
-        const y: u16 = rect.y + @as(u16, @intCast(ln - vis_start));
-        buf.setString(rect.x, y, "  CWD:        ", lbl);
-        const vmax = max_w -| 14;
-        buf.setString(rect.x + 14, y, detail.cwd[0..@min(detail.cwd.len, vmax)], val);
-    }
-    ln += 1;
-
-    if (ln >= vis_start and ln < vis_end) {
-        const y: u16 = rect.y + @as(u16, @intCast(ln - vis_start));
-        buf.setString(rect.x, y, "  User:       ", lbl);
-        var user_buf: [48]u8 = undefined;
-        const user_str = std.fmt.bufPrint(&user_buf, "{s} (uid: {d})", .{ detail.user_name, detail.uid }) catch "???";
-        buf.setString(rect.x + 14, y, user_str, val);
-    }
-    ln += 1;
+    var user_buf: [48]u8 = undefined;
+    const user_str = std.fmt.bufPrint(&user_buf, "{s} (uid: {d})", .{ detail.user_name, detail.uid }) catch "???";
+    renderWrappedField(buf, rect.x, rect.y, "  User:       ", user_str, 14, max_w, lbl, val, vis_start, vis_end, &ln);
 
     // blank
     ln += 1;
@@ -2104,7 +2118,9 @@ fn renderDetailTree(buf: *tui.render.Buffer, rect: layout.Rect, detail: model.Pr
     ln += 1;
 
     const pids = app.procs.hot.items(.pid);
-    const cold = app.procs.cold.items;
+    const cold_names = app.procs.cold.items(.name);
+    const cold_ppids = app.procs.cold.items(.ppid);
+    const cold_len = app.procs.cold.len;
 
     // Walk full ancestor chain (no cap) into a stack buffer
     const max_ancestors = 64;
@@ -2116,11 +2132,11 @@ fn renderDetailTree(buf: *tui.render.Buffer, rect: layout.Rect, detail: model.Pr
         if (walk_pid <= 0) break;
         if (app.procs.pid_to_index.get(walk_pid)) |idx| {
             const i: usize = @intCast(idx);
-            if (i >= cold.len) break;
+            if (i >= cold_len) break;
             ancestor_pids[ancestor_count] = walk_pid;
-            ancestor_names[ancestor_count] = cold[i].name;
+            ancestor_names[ancestor_count] = cold_names[i];
             ancestor_count += 1;
-            const next_ppid = cold[i].ppid;
+            const next_ppid = cold_ppids[i];
             if (next_ppid == walk_pid) break;
             walk_pid = next_ppid;
         } else break;
@@ -2163,14 +2179,14 @@ fn renderDetailTree(buf: *tui.render.Buffer, rect: layout.Rect, detail: model.Pr
     // Children
     const child_indent = ancestor_count * 2 + 4;
     var child_count: u16 = 0;
-    for (cold, 0..) |cold_entry, i| {
+    for (cold_ppids, cold_names, 0..) |ppid, name, i| {
         if (i >= pids.len) break;
-        if (cold_entry.ppid == detail.pid) {
+        if (ppid == detail.pid) {
             if (!measure_only and ln >= vis_start and ln < vis_end) {
                 const y = rect.y + @as(u16, @intCast(ln - vis_start));
                 var child_line: [80]u8 = [_]u8{' '} ** 80;
                 var fmt_buf: [64]u8 = undefined;
-                const label = std.fmt.bufPrint(&fmt_buf, "{s} ({d})", .{ cold_entry.name, pids[i] }) catch "???";
+                const label = std.fmt.bufPrint(&fmt_buf, "{s} ({d})", .{ name, pids[i] }) catch "???";
                 const start = @min(child_indent, child_line.len);
                 const end = @min(start + label.len, child_line.len);
                 @memcpy(child_line[start..end], label[0 .. end - start]);

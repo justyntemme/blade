@@ -28,7 +28,7 @@ pub fn buildPidIndexMap(pids: []const std.posix.pid_t, arena: std.mem.Allocator)
 }
 
 pub fn buildAdjacency(
-    cold_items: []const model.ProcCold,
+    ppids: []const model.pid_t,
     pid_to_index: std.AutoHashMap(std.posix.pid_t, u32),
     n: usize,
     arena: std.mem.Allocator,
@@ -39,8 +39,8 @@ pub fn buildAdjacency(
     const child_counts = try arena.alloc(u32, n);
     @memset(child_counts, 0);
 
-    for (cold_items) |cold_item| {
-        if (pid_to_index.get(cold_item.ppid)) |parent_idx| {
+    for (ppids) |ppid| {
+        if (pid_to_index.get(ppid)) |parent_idx| {
             child_counts[@intCast(parent_idx)] += 1;
         }
     }
@@ -62,8 +62,8 @@ pub fn buildAdjacency(
     const write_cursor = try arena.alloc(u32, n);
     @memcpy(write_cursor, adj.offsets.items[0..n]);
 
-    for (cold_items, 0..) |cold_item, child_i| {
-        if (pid_to_index.get(cold_item.ppid)) |parent_idx| {
+    for (ppids, 0..) |ppid, child_i| {
+        if (pid_to_index.get(ppid)) |parent_idx| {
             const parent_u: usize = @intCast(parent_idx);
             const cursor = &write_cursor[parent_u];
             adj.flat.items[@intCast(cursor.*)] = @intCast(child_i);
@@ -100,15 +100,35 @@ fn isNodeExpanded(
     return expanded_pids.contains(id);
 }
 
-fn matchesSearch(cold_data: model.ProcCold, search: []const u8) bool {
-    if (std.mem.indexOf(u8, cold_data.name_lower, search) != null) return true;
-    if (std.mem.indexOf(u8, cold_data.path_lower, search) != null) return true;
+/// Case-insensitive substring search. Needle MUST already be lowercase.
+fn containsInsensitive(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > haystack.len) return false;
+    const end = haystack.len - needle.len + 1;
+    for (0..end) |i| {
+        if (matchAt(haystack, i, needle)) return true;
+    }
+    return false;
+}
+
+inline fn matchAt(haystack: []const u8, offset: usize, needle: []const u8) bool {
+    for (needle, 0..) |nc, j| {
+        if (std.ascii.toLower(haystack[offset + j]) != nc) return false;
+    }
+    return true;
+}
+
+fn matchesSearch(name: []const u8, path: []const u8, search: []const u8) bool {
+    if (containsInsensitive(name, search)) return true;
+    if (containsInsensitive(path, search)) return true;
     return false;
 }
 
 pub fn buildVisibleNodes(
     hot: model.ProcHotList,
-    cold_items: []const model.ProcCold,
+    ppids: []const model.pid_t,
+    names: []const []const u8,
+    paths: []const []const u8,
     adj: *const Adjacency,
     pid_to_index: std.AutoHashMap(std.posix.pid_t, u32),
     expanded_pids: *const std.AutoHashMap(model.ProcIdentity, void),
@@ -132,8 +152,8 @@ pub fn buildVisibleNodes(
 
     var roots = std.ArrayListUnmanaged(u32){};
     try roots.ensureTotalCapacity(arena, n);
-    for (cold_items, 0..) |cold_item, idx| {
-        if (!pid_to_index.contains(cold_item.ppid)) {
+    for (ppids, 0..) |ppid, idx| {
+        if (!pid_to_index.contains(ppid)) {
             roots.appendAssumeCapacity(@intCast(idx));
         }
     }
@@ -149,8 +169,8 @@ pub fn buildVisibleNodes(
         @memset(matches_arr, false);
         @memset(subtree, false);
 
-        for (cold_items, 0..) |cold_item, idx| {
-            if (matchesSearch(cold_item, search_lower)) {
+        for (names, paths, 0..) |name, path, idx| {
+            if (matchesSearch(name, path, search_lower)) {
                 matches_arr[idx] = true;
             }
         }
