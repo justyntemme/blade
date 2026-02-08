@@ -103,6 +103,7 @@ pub const RenderRow = struct {
     path: []const u8,
     depth: u16,
     has_children: bool,
+    is_last: bool,
     is_expanded: bool,
     data_idx: u32,
 };

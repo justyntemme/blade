@@ -203,6 +203,9 @@ pub const SystemState = struct {
 };
 
 pub const ToastLevel = enum { info, success, warning, err };
+
+pub const CpuOverlayMode = enum { cores, aggregate };
+
 pub const Toast = struct {
     message_buf: [128]u8 = [_]u8{0} ** 128,
     message_len: usize = 0,
@@ -238,6 +241,7 @@ pub const AppState = struct {
     help_scroll: usize = 0,
     procs: procs.Store,
     system: SystemState = .{},
+    cpu_overlay_mode: CpuOverlayMode = .cores,
 
     pub const DetailFocus = enum { left, right };
 

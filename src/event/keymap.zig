@@ -53,14 +53,16 @@ pub const keymap = [_]KeyBinding{
 
     // Search
     .{ .key = .{ .char = '/' }, .action = .start_search, .modes = &.{ .normal, .search_view }, .description = "search", .category = "Search" },
-    .{ .key = .{ .char = 'c' }, .action = .clear_search, .modes = &.{ .normal, .search_view }, .description = "clear", .category = "Search" },
-    .{ .key = .{ .special = .esc }, .action = .exit_search_view, .modes = &.{.search_view}, .description = "Exit search", .category = "Search" },
+    .{ .key = .{ .special = .esc }, .action = .exit_search_view, .modes = &.{.search_view}, .description = "clear/exit", .category = "Search" },
 
     // Sorting
     .{ .key = .{ .char = 'P' }, .action = .sort_by_pid, .modes = &.{ .normal, .search_view }, .description = "sort PID", .category = "Sorting" },
     .{ .key = .{ .char = 'N' }, .action = .sort_by_name, .modes = &.{ .normal, .search_view }, .description = "sort Name", .category = "Sorting" },
     .{ .key = .{ .char = 'C' }, .action = .sort_by_cpu, .modes = &.{ .normal, .search_view }, .description = "sort CPU", .category = "Sorting" },
     .{ .key = .{ .char = 'M' }, .action = .sort_by_mem, .modes = &.{ .normal, .search_view }, .description = "sort mem", .category = "Sorting" },
+
+    // CPU Overlay
+    .{ .key = .{ .char = 'c' }, .action = .toggle_cpu_overlay, .modes = &.{ .normal, .search_view }, .description = "cores overlay", .category = "Display" },
 
     // Application
     .{ .key = .{ .char = 'q' }, .action = .quit, .modes = &.{ .normal, .search_view }, .description = "quit", .category = "General" },

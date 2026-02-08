@@ -145,6 +145,9 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
         .close_detail => app.closeDetail(),
         .focus_left => app.detail_focus = .left,
         .focus_right => app.detail_focus = .right,
+        .toggle_cpu_overlay => {
+            app.cpu_overlay_mode = if (app.cpu_overlay_mode == .cores) .aggregate else .cores;
+        },
     }
 }
 

@@ -26,4 +26,5 @@ pub const Action = enum {
     close_detail,
     focus_left,
     focus_right,
+    toggle_cpu_overlay,
 };

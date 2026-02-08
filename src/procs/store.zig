@@ -243,6 +243,7 @@ pub const Store = struct {
                 .path = paths[di],
                 .depth = vn.depth,
                 .has_children = vn.has_children,
+                .is_last = vn.is_last,
                 .is_expanded = vn.is_expanded,
                 .data_idx = vn.data_idx,
             });
