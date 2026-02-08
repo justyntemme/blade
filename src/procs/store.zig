@@ -183,7 +183,8 @@ pub const Store = struct {
         if (self.expanded_pids.contains(id)) {
             _ = self.expanded_pids.remove(id);
         } else {
-            try self.expanded_pids.put(id, {});
+            try self.expanded_pids.ensureUnusedCapacity(1);
+            self.expanded_pids.putAssumeCapacity(id, {});
         }
     }
 
@@ -192,10 +193,17 @@ pub const Store = struct {
         if (n == 0) return;
         if (self.adjacency.offsets.items.len != n + 1) return error.invalidState;
 
+        // Reserve capacity upfront — worst case is all nodes
+        if (expand) {
+            try self.expanded_pids.ensureUnusedCapacity(@intCast(n));
+        }
+
         var stack = std.ArrayListUnmanaged(u32){};
         defer stack.deinit(self.gpa);
+        try stack.ensureTotalCapacity(self.gpa, @intCast(n));
 
-        try stack.append(self.gpa, root_idx);
+        // All mutations below are now infallible
+        stack.appendAssumeCapacity(root_idx);
 
         while (stack.items.len > 0) {
             const last = stack.items.len - 1;
@@ -209,7 +217,7 @@ pub const Store = struct {
             if (has_children) {
                 const id = self.identityAt(node_u);
                 if (expand) {
-                    try self.expanded_pids.put(id, {});
+                    self.expanded_pids.putAssumeCapacity(id, {});
                 } else {
                     _ = self.expanded_pids.remove(id);
                 }
@@ -217,7 +225,7 @@ pub const Store = struct {
                 var i: usize = children.len;
                 while (i > 0) {
                     i -= 1;
-                    try stack.append(self.gpa, children[i]);
+                    stack.appendAssumeCapacity(children[i]);
                 }
             }
         }

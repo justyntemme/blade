@@ -148,9 +148,167 @@ pub fn capabilities() platform.Capabilities {
     };
 }
 
+// SMC structures for temperature reading
+const SMCKeyData = extern struct {
+    key: u32 = 0,
+    vers: [6]u8 = [_]u8{0} ** 6,
+    pLimitData: [16]u8 = [_]u8{0} ** 16,
+    keyInfo: KeyInfo = .{},
+    result: u8 = 0,
+    status: u8 = 0,
+    data8: u8 = 0,
+    data32: u32 = 0,
+    bytes: [32]u8 = [_]u8{0} ** 32,
+};
+
+const KeyInfo = extern struct {
+    dataSize: u32 = 0,
+    dataType: u32 = 0,
+    dataAttributes: u8 = 0,
+};
+
+const SMC_CMD_READ_KEYINFO: u8 = 9;
+const SMC_CMD_READ_BYTES: u8 = 5;
+
+fn fourCharCode(s: *const [4]u8) u32 {
+    return (@as(u32, s[0]) << 24) | (@as(u32, s[1]) << 16) | (@as(u32, s[2]) << 8) | @as(u32, s[3]);
+}
+
+/// Read CPU temperature from SMC. Returns 0 if unavailable.
+fn readSmcCpuTemp() f32 {
+    // Open connection to AppleSMC
+    const matching = c.IOServiceMatching("AppleSMC");
+    if (matching == null) return 0;
+
+    const service = c.IOServiceGetMatchingService(c.kIOMainPortDefault, matching);
+    if (service == 0) return 0;
+    defer _ = c.IOObjectRelease(service);
+
+    var conn: c.io_connect_t = 0;
+    if (c.IOServiceOpen(service, c.mach_task_self(), 0, &conn) != c.KERN_SUCCESS) return 0;
+    defer _ = c.IOServiceClose(conn);
+
+    // Try CPU temperature keys - Intel and Apple Silicon variants
+    // Intel: TC0P (proximity), TC0D (die), TC0E, TC0F
+    // Apple Silicon: Tp09, Tp0T, Tp01, Tp05, Tp0P (various package sensors)
+    const keys = [_]*const [4]u8{
+        // Apple Silicon keys (try first as more common now)
+        "Tp09", "Tp0T", "Tp01", "Tp05", "Tp0P", "Tp0C",
+        // Intel keys
+        "TC0P", "TC0D", "TC0E", "TC0F", "TCXC",
+    };
+    for (keys) |key| {
+        const temp = readSmcKey(conn, key);
+        if (temp > 0 and temp < 150) return temp; // Valid temperature range
+    }
+
+    return 0;
+}
+
+/// Derive max P-core frequency from Apple Silicon brand string.
+/// Returns frequency in MHz, or 0 if not recognized.
+fn appleChipFrequency(brand: []const u8) u32 {
+    // Check for Apple Silicon chips and return known max P-core frequencies
+    if (std.mem.indexOf(u8, brand, "Apple M4")) |_| {
+        return 4400; // M4/M4 Pro/M4 Max: 4.4 GHz
+    }
+    if (std.mem.indexOf(u8, brand, "Apple M3")) |_| {
+        return 4050; // M3/M3 Pro/M3 Max: ~4.05 GHz
+    }
+    if (std.mem.indexOf(u8, brand, "Apple M2")) |_| {
+        return 3500; // M2/M2 Pro/M2 Max/M2 Ultra: 3.5 GHz
+    }
+    if (std.mem.indexOf(u8, brand, "Apple M1")) |_| {
+        return 3200; // M1/M1 Pro/M1 Max/M1 Ultra: 3.2 GHz
+    }
+    return 0;
+}
+
+fn readSmcKey(conn: c.io_connect_t, key: *const [4]u8) f32 {
+    var input = SMCKeyData{};
+    var output = SMCKeyData{};
+    var output_size: usize = @sizeOf(SMCKeyData);
+
+    // First get key info
+    input.key = fourCharCode(key);
+    input.data8 = SMC_CMD_READ_KEYINFO;
+
+    if (c.IOConnectCallStructMethod(
+        conn,
+        2, // kSMCHandleYPCEvent
+        &input,
+        @sizeOf(SMCKeyData),
+        &output,
+        &output_size,
+    ) != c.KERN_SUCCESS) return 0;
+
+    // Now read the value
+    input.keyInfo.dataSize = output.keyInfo.dataSize;
+    input.data8 = SMC_CMD_READ_BYTES;
+
+    if (c.IOConnectCallStructMethod(
+        conn,
+        2,
+        &input,
+        @sizeOf(SMCKeyData),
+        &output,
+        &output_size,
+    ) != c.KERN_SUCCESS) return 0;
+
+    // Parse SP78 format (signed 7.8 fixed point) - common for temperatures
+    // bytes[0] = integer part, bytes[1] = fractional part (1/256)
+    if (output.keyInfo.dataSize >= 2) {
+        const int_part: f32 = @floatFromInt(@as(i8, @bitCast(output.bytes[0])));
+        const frac_part: f32 = @as(f32, @floatFromInt(output.bytes[1])) / 256.0;
+        return int_part + frac_part;
+    }
+
+    return 0;
+}
+
 pub fn collectSystemMetrics() model.SystemMetrics {
     var metrics = model.SystemMetrics{};
     metrics.timestamp_ns = std.time.nanoTimestamp();
+
+    // CPU brand string via sysctl machdep.cpu.brand_string
+    {
+        var brand_buf: [64]u8 = [_]u8{0} ** 64;
+        var brand_len: usize = brand_buf.len;
+        // sysctlbyname for "machdep.cpu.brand_string"
+        const name = "machdep.cpu.brand_string";
+        const rc = std.c.sysctlbyname(name, &brand_buf, &brand_len, null, 0);
+        if (rc == 0 and brand_len > 0) {
+            // Remove trailing null if present
+            const actual_len = if (brand_len > 0 and brand_buf[brand_len - 1] == 0)
+                brand_len - 1
+            else
+                brand_len;
+            const copy_len = @min(actual_len, metrics.cpu_brand.len);
+            @memcpy(metrics.cpu_brand[0..copy_len], brand_buf[0..copy_len]);
+            metrics.cpu_brand_len = @intCast(copy_len);
+        }
+    }
+
+    // CPU frequency via sysctl hw.cpufrequency (Intel) or hw.cpufrequency_max
+    {
+        var freq: u64 = 0;
+        var freq_size: usize = @sizeOf(u64);
+        // Try hw.cpufrequency first (Intel)
+        var rc = std.c.sysctlbyname("hw.cpufrequency", @ptrCast(&freq), &freq_size, null, 0);
+        if (rc != 0) {
+            // Try hw.cpufrequency_max as fallback
+            rc = std.c.sysctlbyname("hw.cpufrequency_max", @ptrCast(&freq), &freq_size, null, 0);
+        }
+        if (rc == 0 and freq > 0) {
+            metrics.cpu_freq_mhz = @intCast(freq / 1_000_000);
+        } else {
+            // Apple Silicon: derive frequency from brand string
+            metrics.cpu_freq_mhz = appleChipFrequency(metrics.cpu_brand[0..metrics.cpu_brand_len]);
+        }
+    }
+
+    // CPU temperature via IOKit SMC (AppleSMC)
+    metrics.cpu_temp_celsius = readSmcCpuTemp();
 
     // Per-core CPU ticks via host_processor_info()
     {

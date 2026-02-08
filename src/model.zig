@@ -193,6 +193,11 @@ pub const SystemMetrics = struct {
     net: NetworkIO = .{},
     disk: DiskIO = .{},
     mem_detail: MemoryDetail = .{},
+    // CPU identification and thermal
+    cpu_brand: [64]u8 = [_]u8{0} ** 64,
+    cpu_brand_len: u8 = 0,
+    cpu_freq_mhz: u32 = 0, // 0 = unavailable/dynamic
+    cpu_temp_celsius: f32 = 0, // 0 = unavailable
 };
 
 pub const CPU_HISTORY_LEN = 300;

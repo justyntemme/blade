@@ -67,6 +67,12 @@ pub const SystemState = struct {
     mounts: [model.MAX_MOUNTS]model.MountInfo = [_]model.MountInfo{.{}} ** model.MAX_MOUNTS,
     mount_count: u8 = 0,
 
+    // CPU identification and thermal
+    cpu_brand: [64]u8 = [_]u8{0} ** 64,
+    cpu_brand_len: u8 = 0,
+    cpu_freq_mhz: u32 = 0, // 0 = unavailable/dynamic
+    cpu_temp_celsius: f32 = 0, // 0 = unavailable
+
     prev_metrics: ?model.SystemMetrics = null,
     has_data: bool = false,
 
@@ -76,6 +82,14 @@ pub const SystemState = struct {
         self.mem_used = metrics.mem_used;
         self.load_avg = metrics.load_avg;
         self.uptime_seconds = metrics.uptime_seconds;
+
+        // CPU identification and thermal
+        if (metrics.cpu_brand_len > 0) {
+            @memcpy(self.cpu_brand[0..metrics.cpu_brand_len], metrics.cpu_brand[0..metrics.cpu_brand_len]);
+            self.cpu_brand_len = metrics.cpu_brand_len;
+        }
+        self.cpu_freq_mhz = metrics.cpu_freq_mhz;
+        self.cpu_temp_celsius = metrics.cpu_temp_celsius;
 
         // Detailed memory
         self.mem_available = metrics.mem_detail.available;
