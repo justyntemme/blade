@@ -1,3 +1,4 @@
+const std = @import("std");
 const state = @import("state");
 const keymap = @import("event_keymap");
 const platform = @import("platform");
@@ -8,7 +9,7 @@ pub fn handleEvent(app: *state.AppState, event: tui.Event) !void {
         .key => |key| {
             //check app mode for search
             switch (app.mode) {
-                .normal, .search_view, .help, .detail => handleNormalMode(app, key),
+                .normal, .search_view, .help, .detail, .confirm_dialog => handleNormalMode(app, key),
                 .search_edit => handleSearchEditMode(app, key),
             }
         },
@@ -122,8 +123,8 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
             app.refreshFilter();
             if (app.mode == .search_view) app.mode = .normal;
         },
-        .kill_term => killSelected(app, false),
-        .kill_force => killSelected(app, true),
+        .kill_term => showKillConfirm(app, false),
+        .kill_force => showKillConfirm(app, true),
         .sort_by_pid => app.setSort(.pid),
         .sort_by_name => app.setSort(.name),
         .sort_by_cpu => app.setSort(.cpu),
@@ -151,17 +152,50 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
         .toggle_temp_unit => {
             app.temp_unit = if (app.temp_unit == .celsius) .fahrenheit else .celsius;
         },
+        .cycle_storage_detail => {
+            app.storage_detail_mode = switch (app.storage_detail_mode) {
+                .compact => .full,
+                .full => .with_swap,
+                .with_swap => .compact,
+            };
+        },
+        .toggle_mount_filter => {
+            app.mount_filter = if (app.mount_filter == .user_only) .all else .user_only;
+        },
+        .confirm_dialog_yes => {
+            if (app.confirm_dialog) |dialog| {
+                const force = dialog.action == .kill_force;
+                executeKill(app, dialog.target_pid, force);
+            }
+            app.closeConfirmDialog();
+        },
+        .confirm_dialog_no => {
+            app.closeConfirmDialog();
+        },
     }
 }
 
-fn killSelected(app: *state.AppState, force: bool) void {
+fn showKillConfirm(app: *state.AppState, force: bool) void {
     const rows = app.procs.render_rows.items;
     if (rows.len == 0) {
         app.showToast("No Process Selected", .err);
         return;
     }
     const idx = @min(app.selected_item, rows.len - 1);
-    const pid = rows[idx].pid;
+    const row = rows[idx];
+    const pid = row.pid;
+    const name = row.name;
+
+    const action: state.ConfirmAction = if (force) .kill_force else .kill_term;
+    const title = if (force) "Force Kill Process?" else "Kill Process?";
+
+    var msg_buf: [128]u8 = undefined;
+    const message = std.fmt.bufPrint(&msg_buf, "PID {d}: {s}", .{ pid, name }) catch "Unknown process";
+
+    app.showConfirmDialog(title, message, action, pid, name);
+}
+
+fn executeKill(app: *state.AppState, pid: std.posix.pid_t, force: bool) void {
     platform.signal(pid, force) catch |err| {
         app.showToastFmt("Kill failed: {}", .{err}, .err);
         return;

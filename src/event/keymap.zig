@@ -4,7 +4,7 @@ const actions = @import("event_action");
 
 pub const Action = actions.Action;
 
-pub const Mode = enum { normal, search_edit, search_view, help, detail };
+pub const Mode = enum { normal, search_edit, search_view, help, detail, confirm_dialog };
 
 pub const KeyBinding = struct {
     key: Key,
@@ -48,8 +48,8 @@ pub const keymap = [_]KeyBinding{
 
     // Process
     .{ .key = .{ .special = .enter }, .action = .open_detail, .modes = &.{ .normal, .search_view }, .description = "details", .category = "Process" },
-    .{ .key = .{ .char = 'x' }, .action = .kill_term, .modes = &.{.normal}, .description = "kill", .category = "Process" },
-    .{ .key = .{ .char = 'X' }, .action = .kill_force, .modes = &.{.normal}, .description = "kill -9", .category = "Process" },
+    .{ .key = .{ .char = 'x' }, .action = .kill_term, .modes = &.{ .normal, .search_view }, .description = "kill", .category = "Process" },
+    .{ .key = .{ .char = 'X' }, .action = .kill_force, .modes = &.{ .normal, .search_view }, .description = "kill -9", .category = "Process" },
 
     // Search
     .{ .key = .{ .char = '/' }, .action = .start_search, .modes = &.{ .normal, .search_view }, .description = "search", .category = "Search" },
@@ -65,6 +65,10 @@ pub const keymap = [_]KeyBinding{
     .{ .key = .{ .char = 'c' }, .action = .toggle_cpu_overlay, .modes = &.{ .normal, .search_view }, .description = "cores overlay", .category = "Display" },
     .{ .key = .{ .char = 't' }, .action = .toggle_temp_unit, .modes = &.{ .normal, .search_view }, .description = "temp °C/°F", .category = "Display" },
 
+    // Storage Overlay
+    .{ .key = .{ .char = 's' }, .action = .cycle_storage_detail, .modes = &.{ .normal, .search_view }, .description = "storage detail", .category = "Display" },
+    .{ .key = .{ .char = 'm' }, .action = .toggle_mount_filter, .modes = &.{ .normal, .search_view }, .description = "mount filter", .category = "Display" },
+
     // Application
     .{ .key = .{ .char = 'q' }, .action = .quit, .modes = &.{ .normal, .search_view }, .description = "quit", .category = "General" },
     .{ .key = .{ .special = .esc }, .action = .quit, .modes = &.{.normal}, .description = "" },
@@ -78,6 +82,15 @@ pub const keymap = [_]KeyBinding{
     .{ .key = .{ .char = 'q' }, .action = .close_detail, .modes = &.{.detail}, .description = "" },
     .{ .key = .{ .char = 'h' }, .action = .focus_left, .modes = &.{.detail}, .description = "" },
     .{ .key = .{ .char = 'l' }, .action = .focus_right, .modes = &.{.detail}, .description = "" },
+
+    // Confirm dialog mode
+    .{ .key = .{ .char = 'y' }, .action = .confirm_dialog_yes, .modes = &.{.confirm_dialog}, .description = "" },
+    .{ .key = .{ .char = 'Y' }, .action = .confirm_dialog_yes, .modes = &.{.confirm_dialog}, .description = "" },
+    .{ .key = .{ .special = .enter }, .action = .confirm_dialog_yes, .modes = &.{.confirm_dialog}, .description = "" },
+    .{ .key = .{ .char = 'n' }, .action = .confirm_dialog_no, .modes = &.{.confirm_dialog}, .description = "" },
+    .{ .key = .{ .char = 'N' }, .action = .confirm_dialog_no, .modes = &.{.confirm_dialog}, .description = "" },
+    .{ .key = .{ .special = .esc }, .action = .confirm_dialog_no, .modes = &.{.confirm_dialog}, .description = "" },
+    .{ .key = .{ .char = 'q' }, .action = .confirm_dialog_no, .modes = &.{.confirm_dialog}, .description = "" },
 };
 
 pub fn getAction(key: Key, mode: Mode) ?Action {

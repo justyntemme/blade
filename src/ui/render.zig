@@ -246,7 +246,7 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
     renderCpuGraphBraille(buf, cpu_graph_rect, &app.system);
     renderCpuOverlay(buf, cpu_full_rect, &app.system, app.cpu_overlay_mode, app.temp_unit);
     renderDiskIO(buf, disk_io_chart_rect, &app.system);
-    renderStorageOverlay(buf, disk_io_full_rect, &app.system); // Combined Memory + Disks overlay
+    renderStorageOverlay(buf, disk_io_full_rect, &app.system, app.storage_detail_mode, app.mount_filter); // Combined Memory + Mounts overlay
     renderNetworkCombined(buf, network_rect, &app.system);
 
     // Processes pane: calculate sub-layout within the content rect
@@ -262,6 +262,9 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
     }
     if (app.active_toast) |*toast| {
         renderToast(buf, toast, area);
+    }
+    if (app.confirm_dialog) |*dialog| {
+        renderConfirmDialog(buf, dialog, area);
     }
 }
 
@@ -1118,9 +1121,9 @@ fn renderDiskIO(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state.Sy
     }
 }
 
-/// Combined Storage overlay showing Memory and Disks with visual separation
+/// Combined Storage overlay showing Memory and Mounts with visual separation
 /// Positioned bottom-right of Disk IO pane
-fn renderStorageOverlay(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state.SystemState) void {
+fn renderStorageOverlay(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state.SystemState, detail_mode: state.StorageDetailMode, mount_filter: state.MountFilter) void {
     if (!sys.has_data) return;
 
     // Skip if pane too small
@@ -1142,11 +1145,22 @@ fn renderStorageOverlay(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const 
     buf.setChar(box_x, box_y + box_h - 1, BD_RBL, dim_border);
     buf.setChar(box_x + box_w - 1, box_y + box_h - 1, BD_RBR, dim_border);
 
-    // Top edge with title: "Storage"
+    // Top edge with title: "[s]torage" with highlighted key
     buf.setChar(box_x + 1, box_y, BD_HOR, dim_border);
-    buf.setString(box_x + 2, box_y, "Storage", _Style{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } });
+    buf.setString(box_x + 2, box_y, "[", _Style{ .fg = .gray });
+    buf.setString(box_x + 3, box_y, "s", _Style{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } });
+    buf.setString(box_x + 4, box_y, "]torage", _Style{ .fg = .gray });
+
+    // Show current mode indicator
+    const mode_str: []const u8 = switch (detail_mode) {
+        .compact => "(2)",
+        .full => "(4)",
+        .with_swap => "(+S)",
+    };
+    buf.setString(box_x + 11, box_y, mode_str, _Style{ .fg = .gray, .modifier = _Modifier{ .dim = true } });
+
     {
-        var x: u16 = box_x + 9;
+        var x: u16 = box_x + 11 + @as(u16, @intCast(mode_str.len));
         while (x < box_x + box_w - 1) : (x += 1) {
             buf.setChar(x, box_y, BD_HOR, dim_border);
         }
@@ -1187,27 +1201,39 @@ fn renderStorageOverlay(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const 
     const inner_h = box_h -| 2;
 
     // ═══ MEMORY SECTION ═══
-    // 2x2 layout: Used/Avail on row 1, Cache/Free on row 2
+    // Layout depends on detail_mode: compact (2), full (4), with_swap (5)
     const mem_total_f: f32 = @floatFromInt(sys.mem_total);
     if (mem_total_f > 0) {
         const MemEntry = struct { label: []const u8, value: u64, color: _Color };
-        const mem_entries = [4]MemEntry{
+
+        // Build entries based on detail mode
+        const all_entries = [5]MemEntry{
             .{ .label = "Used", .value = sys.mem_used, .color = memPercentColor(@as(f32, @floatFromInt(sys.mem_used)) / mem_total_f * 100.0) },
             .{ .label = "Avail", .value = sys.mem_available, .color = .cyan },
             .{ .label = "Cache", .value = sys.mem_cached, .color = .blue },
             .{ .label = "Free", .value = sys.mem_free, .color = .cyan },
+            .{ .label = "Swap", .value = 0, .color = .magenta }, // TODO: Add swap tracking
+        };
+
+        const entry_count: usize = switch (detail_mode) {
+            .compact => 2,
+            .full => 4,
+            .with_swap => 5,
         };
 
         const col_gap: u16 = 2;
         const mem_col_w: u16 = (inner_w -| col_gap) / 2;
 
-        // Render 2x2 memory grid
+        // Render memory entries in 2-column grid
+        const rows_needed: u16 = @intCast((entry_count + 1) / 2);
         var mem_row: u16 = 0;
-        while (mem_row < 2 and content_y < box_y + inner_h) : (mem_row += 1) {
+        while (mem_row < rows_needed and content_y < box_y + inner_h) : (mem_row += 1) {
             var mem_col: u16 = 0;
             while (mem_col < 2) : (mem_col += 1) {
                 const idx = mem_row * 2 + mem_col;
-                const entry = mem_entries[idx];
+                if (idx >= entry_count) break;
+
+                const entry = all_entries[idx];
                 const col_x = content_x + mem_col * (mem_col_w + col_gap);
                 const pct: f32 = @as(f32, @floatFromInt(entry.value)) / mem_total_f * 100.0;
 
@@ -1227,32 +1253,68 @@ fn renderStorageOverlay(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const 
             content_y += 1;
         }
 
-        // ─── Separator line ───
+        // ─── Separator line with "[m]ounts" label ───
         if (content_y < box_y + inner_h and sys.mount_count > 0) {
             const DASH: u21 = 0x2500;
-            var dx: u16 = content_x;
+            // Draw "[m]ounts" with highlighted key
+            buf.setString(content_x, content_y, "[", _Style{ .fg = .gray });
+            buf.setString(content_x + 1, content_y, "m", _Style{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } });
+            buf.setString(content_x + 2, content_y, "]ounts", _Style{ .fg = .gray });
+
+            // Show filter indicator
+            const filter_indicator: []const u8 = if (mount_filter == .all) "*" else "";
+            buf.setString(content_x + 8, content_y, filter_indicator, _Style{ .fg = .gray, .modifier = _Modifier{ .dim = true } });
+
+            // Fill rest with dashes
+            var dx: u16 = content_x + 9;
             while (dx < content_x + inner_w) : (dx += 1) {
                 buf.setChar(dx, content_y, DASH, _Style{ .fg = .gray, .modifier = _Modifier{ .dim = true } });
             }
-            // Add "Disks" label in separator
-            buf.setString(content_x, content_y, "Disks", _Style{ .fg = .gray });
             content_y += 1;
         }
     }
 
-    // ═══ DISKS SECTION ═══
+    // ═══ MOUNTS SECTION ═══
     if (sys.mount_count > 0) {
-        const mount_count: u16 = @intCast(sys.mount_count);
+        // Filter mounts based on mount_filter setting
+        // System mounts: devfs, autofs, map, synthfs, or those with 0 total bytes
+        var filtered_indices: [model.MAX_MOUNTS]u8 = undefined;
+        var filtered_count: u16 = 0;
+
+        for (0..sys.mount_count) |i| {
+            const mount = sys.mounts[i];
+            const name = mount.name[0..mount.name_len];
+
+            // Skip empty mounts
+            if (mount.total_bytes == 0) continue;
+
+            // If filtering, skip system mounts
+            if (mount_filter == .user_only) {
+                // Skip if name starts with system prefixes
+                if (std.mem.startsWith(u8, name, "devfs")) continue;
+                if (std.mem.startsWith(u8, name, "autofs")) continue;
+                if (std.mem.startsWith(u8, name, "map ")) continue;
+                if (std.mem.startsWith(u8, name, "synthfs")) continue;
+                // Skip if it doesn't look like a real disk (no /)
+                if (name.len > 0 and name[0] != '/') continue;
+            }
+
+            filtered_indices[filtered_count] = @intCast(i);
+            filtered_count += 1;
+        }
+
+        if (filtered_count == 0) return;
+
         const disks_area_h = (box_y + box_h - 1) -| content_y;
         const lines_per_disk: u16 = 2;
-        const total_lines_needed = mount_count * lines_per_disk;
+        const total_lines_needed = filtered_count * lines_per_disk;
 
-        // Use 2 columns if disks won't fit
+        // Use 2 columns if mounts won't fit
         const use_two_cols = total_lines_needed > disks_area_h and inner_w >= 28;
         const num_cols: u16 = if (use_two_cols) 2 else 1;
         const col_gap: u16 = if (use_two_cols) 2 else 0;
         const col_w: u16 = if (use_two_cols) (inner_w -| col_gap) / 2 else inner_w;
-        const disks_per_col: u16 = if (use_two_cols) (mount_count + 1) / 2 else mount_count;
+        const disks_per_col: u16 = if (use_two_cols) (filtered_count + 1) / 2 else filtered_count;
 
         var col: u16 = 0;
         while (col < num_cols) : (col += 1) {
@@ -1260,13 +1322,13 @@ fn renderStorageOverlay(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const 
 
             var disk_in_col: u16 = 0;
             while (disk_in_col < disks_per_col) : (disk_in_col += 1) {
-                const mount_idx = col * disks_per_col + disk_in_col;
-                if (mount_idx >= mount_count) break;
+                const filtered_idx = col * disks_per_col + disk_in_col;
+                if (filtered_idx >= filtered_count) break;
 
                 const y_start = content_y + disk_in_col * lines_per_disk;
                 if (y_start + 1 >= box_y + box_h - 1) break;
 
-                const mount = sys.mounts[mount_idx];
+                const mount = sys.mounts[filtered_indices[filtered_idx]];
                 const name = mount.name[0..mount.name_len];
 
                 // Line 1: Mount name and total size
@@ -3054,4 +3116,126 @@ fn renderToast(buf: *tui.render.Buffer, toast: *const state.Toast, area: tui.ren
     buf.setString(toast_x, toast_y - 1, msg_buf[0..box_width], style);
     // buf.setString(toast_x, toast_y, msg_buf[0..box_width], style);
     buf.setString(toast_x, toast_y, dismiss_buf[0..box_width], style);
+}
+
+fn renderConfirmDialog(buf: *tui.render.Buffer, dialog: *const state.ConfirmDialog, area: tui.render.Rect) void {
+    const title = dialog.getTitle();
+    const message = dialog.getMessage();
+
+    // Dialog dimensions
+    const title_len: u16 = @intCast(title.len);
+    const msg_len: u16 = @intCast(message.len);
+    const min_content_w: u16 = @max(title_len + 4, msg_len + 4);
+    const box_width: u16 = @max(min_content_w, 40);
+    const box_height: u16 = 9;
+
+    // Center the dialog
+    const dialog_x = area.x + (area.width -| box_width) / 2;
+    const dialog_y = area.y + (area.height -| box_height) / 2;
+
+    // Colors based on action type
+    const is_force = dialog.action == .kill_force;
+    const border_color: _Color = if (is_force) .red else .yellow;
+    const border_style_dialog = _Style{ .fg = border_color };
+    const title_style = _Style{ .fg = border_color, .modifier = _Modifier{ .bold = true } };
+    const content_style = _Style{ .fg = .white };
+    const dim_style = _Style{ .fg = .gray };
+
+    // Clear interior with spaces
+    {
+        var y: u16 = dialog_y;
+        while (y < dialog_y + box_height) : (y += 1) {
+            var x: u16 = dialog_x;
+            while (x < dialog_x + box_width) : (x += 1) {
+                buf.setChar(x, y, ' ', _Style{});
+            }
+        }
+    }
+
+    // Draw border - corners
+    buf.setChar(dialog_x, dialog_y, BD_RTL, border_style_dialog); // ╭
+    buf.setChar(dialog_x + box_width - 1, dialog_y, BD_RTR, border_style_dialog); // ╮
+    buf.setChar(dialog_x, dialog_y + box_height - 1, BD_RBL, border_style_dialog); // ╰
+    buf.setChar(dialog_x + box_width - 1, dialog_y + box_height - 1, BD_RBR, border_style_dialog); // ╯
+
+    // Top edge with title
+    buf.setChar(dialog_x + 1, dialog_y, BD_HOR, border_style_dialog);
+    buf.setChar(dialog_x + 2, dialog_y, ' ', border_style_dialog);
+    buf.setString(dialog_x + 3, dialog_y, title, title_style);
+    {
+        var x: u16 = dialog_x + 3 + title_len + 1;
+        while (x < dialog_x + box_width - 1) : (x += 1) {
+            buf.setChar(x, dialog_y, BD_HOR, border_style_dialog);
+        }
+    }
+
+    // Bottom edge
+    {
+        var x: u16 = dialog_x + 1;
+        while (x < dialog_x + box_width - 1) : (x += 1) {
+            buf.setChar(x, dialog_y + box_height - 1, BD_HOR, border_style_dialog);
+        }
+    }
+
+    // Side edges
+    {
+        var y: u16 = dialog_y + 1;
+        while (y < dialog_y + box_height - 1) : (y += 1) {
+            buf.setChar(dialog_x, y, BD_VER, border_style_dialog);
+            buf.setChar(dialog_x + box_width - 1, y, BD_VER, border_style_dialog);
+        }
+    }
+
+    // Content area
+    const content_x = dialog_x + 2;
+    const content_w = box_width - 4;
+
+    // Process info line (centered)
+    const msg_x = content_x + (content_w -| msg_len) / 2;
+    buf.setString(msg_x, dialog_y + 2, message, content_style);
+
+    // Warning for force kill
+    if (is_force) {
+        const warn_text = "SIGKILL - Cannot be caught!";
+        const warn_len: u16 = @intCast(warn_text.len);
+        const warn_x = content_x + (content_w -| warn_len) / 2;
+        buf.setString(warn_x, dialog_y + 3, warn_text, _Style{ .fg = .red, .modifier = _Modifier{ .bold = true } });
+    }
+
+    // Separator line before buttons
+    {
+        const sep_y = dialog_y + 5;
+        var x: u16 = content_x;
+        while (x < content_x + content_w) : (x += 1) {
+            buf.setChar(x, sep_y, 0x2500, dim_style); // ─
+        }
+    }
+
+    // Buttons with borders
+    const button_y = dialog_y + 7;
+    const yes_btn_w: u16 = 9; // "│ Yes │"
+    const no_btn_w: u16 = 8; // "│ No │"
+    const btn_gap: u16 = 4;
+    const total_btn_w = yes_btn_w + btn_gap + no_btn_w;
+    const btn_start_x = content_x + (content_w -| total_btn_w) / 2;
+
+    // Yes button
+    const yes_style = _Style{ .fg = if (is_force) .red else .green, .modifier = _Modifier{ .bold = true } };
+    buf.setString(btn_start_x, button_y, "[", dim_style);
+    buf.setString(btn_start_x + 1, button_y, "Y", yes_style);
+    buf.setString(btn_start_x + 2, button_y, "]", dim_style);
+    buf.setString(btn_start_x + 3, button_y, " Yes", content_style);
+
+    // No button
+    const no_x = btn_start_x + yes_btn_w + btn_gap;
+    buf.setString(no_x, button_y, "[", dim_style);
+    buf.setString(no_x + 1, button_y, "N", _Style{ .fg = .cyan, .modifier = _Modifier{ .bold = true } });
+    buf.setString(no_x + 2, button_y, "]", dim_style);
+    buf.setString(no_x + 3, button_y, " No", content_style);
+
+    // Hint text at bottom
+    const hint = "Enter=Yes  Esc=Cancel";
+    const hint_len: u16 = @intCast(hint.len);
+    const hint_x = content_x + (content_w -| hint_len) / 2;
+    buf.setString(hint_x, dialog_y + box_height - 2, hint, dim_style);
 }

@@ -224,6 +224,36 @@ pub const ToastLevel = enum { info, success, warning, err };
 
 pub const CpuOverlayMode = enum { cores, aggregate };
 pub const TempUnit = enum { celsius, fahrenheit };
+pub const StorageDetailMode = enum { compact, full, with_swap };
+pub const MountFilter = enum { user_only, all };
+
+pub const ConfirmAction = enum {
+    kill_term,
+    kill_force,
+};
+
+pub const ConfirmDialog = struct {
+    title_buf: [64]u8 = [_]u8{0} ** 64,
+    title_len: usize = 0,
+    message_buf: [128]u8 = [_]u8{0} ** 128,
+    message_len: usize = 0,
+    action: ConfirmAction = .kill_term,
+    target_pid: model.pid_t = 0,
+    target_name_buf: [64]u8 = [_]u8{0} ** 64,
+    target_name_len: usize = 0,
+
+    pub fn getTitle(self: *const ConfirmDialog) []const u8 {
+        return self.title_buf[0..self.title_len];
+    }
+
+    pub fn getMessage(self: *const ConfirmDialog) []const u8 {
+        return self.message_buf[0..self.message_len];
+    }
+
+    pub fn getTargetName(self: *const ConfirmDialog) []const u8 {
+        return self.target_name_buf[0..self.target_name_len];
+    }
+};
 
 pub const Toast = struct {
     message_buf: [128]u8 = [_]u8{0} ** 128,
@@ -262,6 +292,9 @@ pub const AppState = struct {
     system: SystemState = .{},
     cpu_overlay_mode: CpuOverlayMode = .cores,
     temp_unit: TempUnit = .celsius,
+    storage_detail_mode: StorageDetailMode = .with_swap,
+    mount_filter: MountFilter = .all,
+    confirm_dialog: ?ConfirmDialog = null,
 
     pub const DetailFocus = enum { left, right };
 
@@ -299,6 +332,34 @@ pub const AppState = struct {
             toast.message_len = fallback.len;
         }
         self.active_toast = toast;
+    }
+
+    pub fn showConfirmDialog(self: *AppState, title: []const u8, message: []const u8, action: ConfirmAction, pid: model.pid_t, name: []const u8) void {
+        var dialog = ConfirmDialog{};
+
+        const title_len = @min(title.len, dialog.title_buf.len);
+        @memcpy(dialog.title_buf[0..title_len], title[0..title_len]);
+        dialog.title_len = title_len;
+
+        const msg_len = @min(message.len, dialog.message_buf.len);
+        @memcpy(dialog.message_buf[0..msg_len], message[0..msg_len]);
+        dialog.message_len = msg_len;
+
+        const name_len = @min(name.len, dialog.target_name_buf.len);
+        @memcpy(dialog.target_name_buf[0..name_len], name[0..name_len]);
+        dialog.target_name_len = name_len;
+
+        dialog.action = action;
+        dialog.target_pid = pid;
+
+        self.confirm_dialog = dialog;
+        self.previous_mode = self.mode;
+        self.mode = .confirm_dialog;
+    }
+
+    pub fn closeConfirmDialog(self: *AppState) void {
+        self.confirm_dialog = null;
+        self.mode = self.previous_mode;
     }
 
     pub fn setSort(self: *AppState, column: SortColumn) void {
