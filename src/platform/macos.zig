@@ -175,34 +175,77 @@ fn fourCharCode(s: *const [4]u8) u32 {
 }
 
 /// Read CPU temperature from SMC. Returns 0 if unavailable.
-fn readSmcCpuTemp() f32 {
+const CpuTempResult = struct {
+    average: f32 = 0,
+    cluster_temps: [12]f32 = [_]f32{0} ** 12,
+    cluster_count: u8 = 0,
+};
+
+fn readSmcCpuTemps() CpuTempResult {
+    var result = CpuTempResult{};
+
     // Open connection to AppleSMC
     const matching = c.IOServiceMatching("AppleSMC");
-    if (matching == null) return 0;
+    if (matching == null) return result;
 
     const service = c.IOServiceGetMatchingService(c.kIOMainPortDefault, matching);
-    if (service == 0) return 0;
+    if (service == 0) return result;
     defer _ = c.IOObjectRelease(service);
 
     var conn: c.io_connect_t = 0;
-    if (c.IOServiceOpen(service, c.mach_task_self(), 0, &conn) != c.KERN_SUCCESS) return 0;
+    if (c.IOServiceOpen(service, c.mach_task_self(), 0, &conn) != c.KERN_SUCCESS) return result;
     defer _ = c.IOServiceClose(conn);
 
-    // Try CPU temperature keys - Intel and Apple Silicon variants
-    // Intel: TC0P (proximity), TC0D (die), TC0E, TC0F
-    // Apple Silicon: Tp09, Tp0T, Tp01, Tp05, Tp0P (various package sensors)
-    const keys = [_]*const [4]u8{
-        // Apple Silicon keys (try first as more common now)
-        "Tp09", "Tp0T", "Tp01", "Tp05", "Tp0P", "Tp0C",
-        // Intel keys
-        "TC0P", "TC0D", "TC0E", "TC0F", "TCXC",
+    // Apple Silicon thermal sensors - comprehensive list
+    // Tp0C = Die/Package, Tp01/05/09/0D/0H/0L/0P/0X/0b = various thermal zones
+    const apple_keys = [_]*const [4]u8{
+        "Tp0C", // Package/Die
+        "Tp09", // Cluster
+        "Tp01", // Cluster
+        "Tp05", // Cluster
+        "Tp0D", // Additional thermal zone
+        "Tp0H", // Additional thermal zone
+        "Tp0L", // Additional thermal zone
+        "Tp0P", // Additional thermal zone
+        "Tp0X", // Additional thermal zone
+        "Tp0b", // Additional thermal zone
+        "Tp0j", // Additional thermal zone
+        "Tp0n", // Additional thermal zone
     };
-    for (keys) |key| {
+    for (apple_keys) |key| {
         const temp = readSmcKey(conn, key);
-        if (temp > 0 and temp < 150) return temp; // Valid temperature range
+        if (temp > 0 and temp < 150) {
+            if (result.cluster_count < 12) {
+                result.cluster_temps[result.cluster_count] = temp;
+                result.cluster_count += 1;
+            }
+        }
     }
 
-    return 0;
+    // Use first cluster temp as average, or try Intel keys
+    if (result.cluster_count > 0) {
+        result.average = result.cluster_temps[0];
+    } else {
+        // Intel keys as fallback (per-core temps: TC0C-TC7C for up to 8 cores)
+        const intel_keys = [_]*const [4]u8{
+            "TC0C", "TC1C", "TC2C", "TC3C", "TC4C", "TC5C", "TC6C", "TC7C", // Per-core
+            "TC0P", "TC0D", "TC0E", "TC0F", // Package fallbacks
+        };
+        for (intel_keys) |key| {
+            const temp = readSmcKey(conn, key);
+            if (temp > 0 and temp < 150) {
+                if (result.cluster_count < 12) {
+                    result.cluster_temps[result.cluster_count] = temp;
+                    result.cluster_count += 1;
+                }
+            }
+        }
+        if (result.cluster_count > 0) {
+            result.average = result.cluster_temps[0];
+        }
+    }
+
+    return result;
 }
 
 /// Derive max P-core frequency from Apple Silicon brand string.
@@ -242,9 +285,18 @@ fn readSmcKey(conn: c.io_connect_t, key: *const [4]u8) f32 {
         &output_size,
     ) != c.KERN_SUCCESS) return 0;
 
+    // Check for error result (132 = key not found)
+    if (output.result != 0) return 0;
+
+    const data_size = output.keyInfo.dataSize;
+    const data_type = output.keyInfo.dataType;
+    if (data_size == 0) return 0;
+
     // Now read the value
-    input.keyInfo.dataSize = output.keyInfo.dataSize;
+    input.keyInfo = output.keyInfo;
     input.data8 = SMC_CMD_READ_BYTES;
+    output = SMCKeyData{};
+    output_size = @sizeOf(SMCKeyData);
 
     if (c.IOConnectCallStructMethod(
         conn,
@@ -255,9 +307,23 @@ fn readSmcKey(conn: c.io_connect_t, key: *const [4]u8) f32 {
         &output_size,
     ) != c.KERN_SUCCESS) return 0;
 
-    // Parse SP78 format (signed 7.8 fixed point) - common for temperatures
-    // bytes[0] = integer part, bytes[1] = fractional part (1/256)
-    if (output.keyInfo.dataSize >= 2) {
+    // Parse based on data type
+    // "flt " (0x666c7420) = 32-bit float (Apple Silicon)
+    // "sp78" (0x73703738) = signed 7.8 fixed point (Intel)
+    const FLT_TYPE: u32 = 0x666c7420; // "flt "
+    const SP78_TYPE: u32 = 0x73703738; // "sp78"
+
+    if (data_type == FLT_TYPE and data_size >= 4) {
+        // Apple Silicon: 32-bit float
+        const bytes = output.bytes[0..4];
+        return @bitCast(bytes.*);
+    } else if (data_type == SP78_TYPE and data_size >= 2) {
+        // Intel: signed 7.8 fixed point
+        const int_part: f32 = @floatFromInt(@as(i8, @bitCast(output.bytes[0])));
+        const frac_part: f32 = @as(f32, @floatFromInt(output.bytes[1])) / 256.0;
+        return int_part + frac_part;
+    } else if (data_size >= 2) {
+        // Fallback: try sp78 interpretation
         const int_part: f32 = @floatFromInt(@as(i8, @bitCast(output.bytes[0])));
         const frac_part: f32 = @as(f32, @floatFromInt(output.bytes[1])) / 256.0;
         return int_part + frac_part;
@@ -308,7 +374,10 @@ pub fn collectSystemMetrics() model.SystemMetrics {
     }
 
     // CPU temperature via IOKit SMC (AppleSMC)
-    metrics.cpu_temp_celsius = readSmcCpuTemp();
+    const temps = readSmcCpuTemps();
+    metrics.cpu_temp_celsius = temps.average;
+    metrics.cpu_cluster_temps = temps.cluster_temps;
+    metrics.cpu_cluster_temp_count = temps.cluster_count;
 
     // Per-core CPU ticks via host_processor_info()
     {

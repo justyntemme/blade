@@ -71,7 +71,9 @@ pub const SystemState = struct {
     cpu_brand: [64]u8 = [_]u8{0} ** 64,
     cpu_brand_len: u8 = 0,
     cpu_freq_mhz: u32 = 0, // 0 = unavailable/dynamic
-    cpu_temp_celsius: f32 = 0, // 0 = unavailable
+    cpu_temp_celsius: f32 = 0, // 0 = unavailable (average/package)
+    cpu_cluster_temps: [12]f32 = [_]f32{0} ** 12,
+    cpu_cluster_temp_count: u8 = 0,
 
     prev_metrics: ?model.SystemMetrics = null,
     has_data: bool = false,
@@ -90,6 +92,8 @@ pub const SystemState = struct {
         }
         self.cpu_freq_mhz = metrics.cpu_freq_mhz;
         self.cpu_temp_celsius = metrics.cpu_temp_celsius;
+        self.cpu_cluster_temps = metrics.cpu_cluster_temps;
+        self.cpu_cluster_temp_count = metrics.cpu_cluster_temp_count;
 
         // Detailed memory
         self.mem_available = metrics.mem_detail.available;
@@ -219,6 +223,7 @@ pub const SystemState = struct {
 pub const ToastLevel = enum { info, success, warning, err };
 
 pub const CpuOverlayMode = enum { cores, aggregate };
+pub const TempUnit = enum { celsius, fahrenheit };
 
 pub const Toast = struct {
     message_buf: [128]u8 = [_]u8{0} ** 128,
@@ -256,6 +261,7 @@ pub const AppState = struct {
     procs: procs.Store,
     system: SystemState = .{},
     cpu_overlay_mode: CpuOverlayMode = .cores,
+    temp_unit: TempUnit = .celsius,
 
     pub const DetailFocus = enum { left, right };
 

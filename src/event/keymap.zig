@@ -63,6 +63,7 @@ pub const keymap = [_]KeyBinding{
 
     // CPU Overlay
     .{ .key = .{ .char = 'c' }, .action = .toggle_cpu_overlay, .modes = &.{ .normal, .search_view }, .description = "cores overlay", .category = "Display" },
+    .{ .key = .{ .char = 't' }, .action = .toggle_temp_unit, .modes = &.{ .normal, .search_view }, .description = "temp °C/°F", .category = "Display" },
 
     // Application
     .{ .key = .{ .char = 'q' }, .action = .quit, .modes = &.{ .normal, .search_view }, .description = "quit", .category = "General" },

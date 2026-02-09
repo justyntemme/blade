@@ -197,7 +197,10 @@ pub const SystemMetrics = struct {
     cpu_brand: [64]u8 = [_]u8{0} ** 64,
     cpu_brand_len: u8 = 0,
     cpu_freq_mhz: u32 = 0, // 0 = unavailable/dynamic
-    cpu_temp_celsius: f32 = 0, // 0 = unavailable
+    cpu_temp_celsius: f32 = 0, // 0 = unavailable (average/package)
+    // Per-cluster temps (Apple Silicon: Tp0C=package, Tp09/Tp01/Tp05=clusters)
+    cpu_cluster_temps: [12]f32 = [_]f32{0} ** 12,
+    cpu_cluster_temp_count: u8 = 0,
 };
 
 pub const CPU_HISTORY_LEN = 300;

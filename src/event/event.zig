@@ -148,6 +148,9 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
         .toggle_cpu_overlay => {
             app.cpu_overlay_mode = if (app.cpu_overlay_mode == .cores) .aggregate else .cores;
         },
+        .toggle_temp_unit => {
+            app.temp_unit = if (app.temp_unit == .celsius) .fahrenheit else .celsius;
+        },
     }
 }
 

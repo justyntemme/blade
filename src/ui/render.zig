@@ -244,7 +244,7 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
 
     // ── Render content into each pane ─────────────────────────────
     renderCpuGraphBraille(buf, cpu_graph_rect, &app.system);
-    renderCpuOverlay(buf, cpu_full_rect, &app.system, app.cpu_overlay_mode);
+    renderCpuOverlay(buf, cpu_full_rect, &app.system, app.cpu_overlay_mode, app.temp_unit);
     renderDiskIO(buf, disk_io_chart_rect, &app.system);
     renderStorageOverlay(buf, disk_io_full_rect, &app.system); // Combined Memory + Disks overlay
     renderNetworkCombined(buf, network_rect, &app.system);
@@ -715,7 +715,7 @@ fn renderCpuGraphBraille(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const
 /// Floating overlay box showing CPU cores and stats (bpytop style)
 /// Positioned bottom-right of CPU pane, 50% width, full height
 /// Cores fill the space with multi-row braille graphs, stats anchored to bottom
-fn renderCpuOverlay(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state.SystemState, mode: state.CpuOverlayMode) void {
+fn renderCpuOverlay(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state.SystemState, mode: state.CpuOverlayMode, temp_unit: state.TempUnit) void {
     _ = mode; // We now show everything at once, no toggle needed
 
     if (!sys.has_data) return;
@@ -742,29 +742,21 @@ fn renderCpuOverlay(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const stat
     buf.setChar(box_x, box_y + box_h - 1, BD_RBL, dim_border); // ╰
     buf.setChar(box_x + box_w - 1, box_y + box_h - 1, BD_RBR, dim_border); // ╯
 
-    // Top edge with CPU brand (left) and freq/temp (right)
+    // Top edge with CPU brand (left) and freq (right, gray like IP)
     buf.setChar(box_x + 1, box_y, BD_HOR, dim_border);
 
-    // Build right-side info: frequency and/or temperature
-    var right_buf: [24]u8 = undefined;
+    // Build right-side info: frequency only (temp moved to stats)
+    var right_buf: [16]u8 = undefined;
     var right_len: u16 = 0;
     const has_freq = sys.cpu_freq_mhz > 0;
-    const has_temp = sys.cpu_temp_celsius > 0;
 
-    if (has_freq and has_temp) {
-        const freq_ghz = @as(f32, @floatFromInt(sys.cpu_freq_mhz)) / 1000.0;
-        const slice = std.fmt.bufPrint(&right_buf, "{d:.1} GHz  {d:.0}°C", .{ freq_ghz, sys.cpu_temp_celsius }) catch "";
-        right_len = @intCast(slice.len);
-    } else if (has_freq) {
+    if (has_freq) {
         const freq_ghz = @as(f32, @floatFromInt(sys.cpu_freq_mhz)) / 1000.0;
         const slice = std.fmt.bufPrint(&right_buf, "{d:.1} GHz", .{freq_ghz}) catch "";
         right_len = @intCast(slice.len);
-    } else if (has_temp) {
-        const slice = std.fmt.bufPrint(&right_buf, "{d:.0}°C", .{sys.cpu_temp_celsius}) catch "";
-        right_len = @intCast(slice.len);
     }
 
-    // CPU brand name (truncated to fit, leaving room for right info)
+    // CPU brand name (truncated to fit, leaving room for freq)
     const brand_slice = sys.cpu_brand[0..sys.cpu_brand_len];
     const reserved_right: u16 = if (right_len > 0) right_len + 4 else 2;
     const max_brand_w = box_w -| reserved_right;
@@ -772,17 +764,13 @@ fn renderCpuOverlay(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const stat
     buf.setString(box_x + 2, box_y, brand_display, _Style{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } });
     const brand_end: u16 = box_x + 2 + @as(u16, @intCast(brand_display.len));
 
-    // Right-side info (freq and/or temp)
+    // Frequency on right (gray, like IP address label)
     if (right_len > 0) {
         const right_x = box_x + box_w - 2 - right_len;
-        const right_style: _Style = if (has_temp)
-            .{ .fg = cpuTempColor(sys.cpu_temp_celsius), .modifier = _Modifier{ .bold = true } }
-        else
-            .{ .fg = .gray };
-        buf.setString(right_x, box_y, right_buf[0..right_len], right_style);
+        buf.setString(right_x, box_y, right_buf[0..right_len], _Style{ .fg = .gray });
     }
 
-    // Fill horizontal line between brand and right info
+    // Fill horizontal line between brand and freq
     {
         const fill_end = if (right_len > 0) box_x + box_w - 3 - right_len else box_x + box_w - 1;
         var x: u16 = brand_end;
@@ -790,6 +778,18 @@ fn renderCpuOverlay(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const stat
             buf.setChar(x, box_y, BD_HOR, dim_border);
         }
     }
+
+    // Helper to format temperature with unit
+    const formatTemp = struct {
+        fn f(temp: f32, unit: state.TempUnit, out_buf: []u8) []const u8 {
+            if (unit == .fahrenheit) {
+                const temp_f = temp * 9.0 / 5.0 + 32.0;
+                return std.fmt.bufPrint(out_buf, "{d:.0}F", .{temp_f}) catch "";
+            } else {
+                return std.fmt.bufPrint(out_buf, "{d:.0}C", .{temp}) catch "";
+            }
+        }
+    }.f;
 
     // Bottom edge
     {
@@ -826,7 +826,7 @@ fn renderCpuOverlay(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const stat
     const inner_h = box_h -| 2; // borders
 
     // Reserve bottom rows for stats (anchored to bottom)
-    const stats_rows: u16 = 2; // CPU/User/Sys line + Load/Uptime line
+    const stats_rows: u16 = 2; // CPU/User/Sys + Load/Uptime (temps on right of row 2)
     const cores_area_h = if (inner_h > stats_rows + 1) inner_h -| stats_rows -| 1 else inner_h / 2;
 
     // Dynamic column layout based on available space
@@ -905,31 +905,68 @@ fn renderCpuOverlay(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const stat
     // Stats section - ANCHORED TO BOTTOM of popout
     const stats_y = content_y + inner_h -| stats_rows;
 
-    // Line 1: CPU/User/Sys percentages + Temperature
+    // Temp labels: first 4 have names, rest are numbered
+    const named_labels = [_][]const u8{ "Pkg:", "C0:", "C1:", "E:" };
+    const total_temps = sys.cpu_cluster_temp_count;
+
+    // Left column content widths (CPU stats ~36 chars, Load/Up ~34 chars)
+    const left_col_w: u16 = 38;
+    const temp_col_x: u16 = content_x + left_col_w;
+    const temp_col_w: u16 = if (inner_w > left_col_w) inner_w - left_col_w else 0;
+
+    // Calculate if temps fit on one row (~7 chars per temp + 7 for [t]emp. prefix)
+    const chars_per_temp: u16 = 7;
+    const temp_prefix_w: u16 = 7;
+    const total_temp_chars = temp_prefix_w + @as(u16, @intCast(total_temps)) * chars_per_temp;
+    const use_two_rows = total_temp_chars > temp_col_w and total_temps > 1;
+    const temps_row1 = if (use_two_rows) (total_temps + 1) / 2 else total_temps;
+
+    // Line 1: CPU/User/Sys (left) + temps row 1 (right, if using two rows)
     {
-        var cpu_buf: [56]u8 = undefined;
-        const cpu_str = if (sys.cpu_temp_celsius > 0)
-            std.fmt.bufPrint(&cpu_buf, "CPU {d:>4.1}%  User {d:>4.1}%  Sys {d:>4.1}%  {d:.0}°C", .{
-                sys.total_cpu_percent, sys.total_user_percent, sys.total_system_percent, sys.cpu_temp_celsius,
-            }) catch "CPU ???%"
-        else
-            std.fmt.bufPrint(&cpu_buf, "CPU {d:>4.1}%  User {d:>4.1}%  Sys {d:>4.1}%", .{
-                sys.total_cpu_percent, sys.total_user_percent, sys.total_system_percent,
-            }) catch "CPU ???%";
-        const show_len = @min(cpu_str.len, inner_w);
+        var cpu_buf: [48]u8 = undefined;
+        const cpu_str = std.fmt.bufPrint(&cpu_buf, "CPU {d:>4.1}%  User {d:>4.1}%  Sys {d:>4.1}%", .{
+            sys.total_cpu_percent, sys.total_user_percent, sys.total_system_percent,
+        }) catch "CPU ???%";
+        const show_len = @min(cpu_str.len, left_col_w -| 2);
         buf.setString(content_x, stats_y, cpu_str[0..show_len], _Style{ .fg = cpuColor(sys.total_cpu_percent) });
+
+        // Right side: temps (first half if two rows, otherwise empty - all temps go on row 2)
+        if (use_two_rows and total_temps > 0 and temp_col_w > 0) {
+            buf.setString(temp_col_x, stats_y, "[", _Style{ .fg = .gray });
+            buf.setString(temp_col_x + 1, stats_y, "t", _Style{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } });
+            buf.setString(temp_col_x + 2, stats_y, "]emp.", _Style{ .fg = .gray });
+
+            var temp_x: u16 = temp_col_x + 7; // "[t]emp." = 7 chars
+            for (0..temps_row1) |i| {
+                const cluster_temp = sys.cpu_cluster_temps[i];
+                if (cluster_temp > 0 and temp_x < content_x + inner_w - 5) {
+                    var label_buf: [4]u8 = undefined;
+                    const label = if (i < named_labels.len)
+                        named_labels[i]
+                    else
+                        std.fmt.bufPrint(&label_buf, "T{d}:", .{i}) catch "T?:";
+
+                    buf.setString(temp_x, stats_y, label, _Style{ .fg = .gray });
+                    temp_x += @as(u16, @intCast(label.len));
+
+                    var single_temp: [8]u8 = undefined;
+                    const t_str = formatTemp(cluster_temp, temp_unit, &single_temp);
+                    buf.setString(temp_x, stats_y, t_str, _Style{ .fg = cpuTempColor(cluster_temp) });
+                    temp_x += @as(u16, @intCast(t_str.len)) + 1;
+                }
+            }
+        }
     }
 
-    // Line 2: Load averages + Uptime (bottom line)
+    // Line 2: Load/Uptime (left) + temps (right - all if single row, or second half if two rows)
     if (stats_y + 1 < content_y + inner_h) {
-        // Load averages
+        // Left side: Load averages + Uptime
         var load_buf: [24]u8 = undefined;
         const load_str = std.fmt.bufPrint(&load_buf, "Load: {d:.2} {d:.2} {d:.2}", .{
             sys.load_avg[0], sys.load_avg[1], sys.load_avg[2],
         }) catch "Load: ???";
         buf.setString(content_x, stats_y + 1, load_str, _Style{ .fg = .gray });
 
-        // Uptime after load averages
         const up_s = sys.uptime_seconds;
         const days = up_s / 86400;
         const hours = (up_s % 86400) / 3600;
@@ -942,8 +979,39 @@ fn renderCpuOverlay(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const stat
             std.fmt.bufPrint(&up_buf, "  Up: {d}h {d}m", .{ hours, minutes }) catch "  Up: ???";
 
         const load_len: u16 = @intCast(load_str.len);
-        if (content_x + load_len + up_str.len <= content_x + inner_w) {
-            buf.setString(content_x + load_len, stats_y + 1, up_str, _Style{ .fg = .gray });
+        buf.setString(content_x + load_len, stats_y + 1, up_str, _Style{ .fg = .gray });
+
+        // Right side: temps
+        if (total_temps > 0 and temp_col_w > 0) {
+            var temp_x: u16 = temp_col_x;
+            const start_idx: usize = if (use_two_rows) temps_row1 else 0;
+
+            // Show [t] prefix only if not already shown on row 1
+            if (!use_two_rows) {
+                buf.setString(temp_x, stats_y + 1, "[", _Style{ .fg = .gray });
+                buf.setString(temp_x + 1, stats_y + 1, "t", _Style{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } });
+                buf.setString(temp_x + 2, stats_y + 1, "]emp.", _Style{ .fg = .gray });
+                temp_x += 7; // "[t]emp." = 7 chars
+            }
+
+            for (start_idx..total_temps) |i| {
+                const cluster_temp = sys.cpu_cluster_temps[i];
+                if (cluster_temp > 0 and temp_x < content_x + inner_w - 5) {
+                    var label_buf: [4]u8 = undefined;
+                    const label = if (i < named_labels.len)
+                        named_labels[i]
+                    else
+                        std.fmt.bufPrint(&label_buf, "T{d}:", .{i}) catch "T?:";
+
+                    buf.setString(temp_x, stats_y + 1, label, _Style{ .fg = .gray });
+                    temp_x += @as(u16, @intCast(label.len));
+
+                    var single_temp: [8]u8 = undefined;
+                    const t_str = formatTemp(cluster_temp, temp_unit, &single_temp);
+                    buf.setString(temp_x, stats_y + 1, t_str, _Style{ .fg = cpuTempColor(cluster_temp) });
+                    temp_x += @as(u16, @intCast(t_str.len)) + 1;
+                }
+            }
         }
     }
 }
