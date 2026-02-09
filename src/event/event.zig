@@ -116,7 +116,14 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
                 app.help_scroll = ~@as(usize, 0);
             } else app.jumpBottom();
         },
-        .quit => app.running = false,
+        .quit => {
+            // If selections exist in normal mode, Esc clears them first
+            if (app.mode == .normal and app.getSelectedCount() > 0) {
+                app.clearSelections();
+            } else {
+                app.running = false;
+            }
+        },
         .start_search => app.mode = .search_edit,
         .clear_search => {
             app.search_len = 0;
@@ -165,12 +172,49 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
         .confirm_dialog_yes => {
             if (app.confirm_dialog) |dialog| {
                 const force = dialog.action == .kill_force;
-                executeKill(app, dialog.target_pid, force);
+                // Kill all selected processes or just the target
+                if (app.getSelectedCount() > 0) {
+                    var it = app.pinned_pids.keyIterator();
+                    while (it.next()) |id| {
+                        executeKill(app, id.pid, force);
+                    }
+                    app.clearSelections();
+                } else {
+                    executeKill(app, dialog.target_pid, force);
+                }
             }
             app.closeConfirmDialog();
         },
         .confirm_dialog_no => {
             app.closeConfirmDialog();
+        },
+        .toggle_select => {
+            const rows = app.procs.render_rows.items;
+            if (rows.len == 0) return;
+            const idx = @min(app.selected_item, rows.len - 1);
+            const row = rows[idx];
+            // Get start_time from the hot data
+            const hot = app.procs.hot.slice();
+            if (row.data_idx < hot.items(.start_time_ns).len) {
+                const start_time = hot.items(.start_time_ns)[row.data_idx];
+                const was_pinned = app.isSelected(row.pid, start_time);
+                // Pass row position for pinning
+                app.toggleSelection(row.pid, start_time, idx);
+
+                // If unpinning in search view, refresh immediately to remove non-matching items
+                if (was_pinned and app.mode == .search_view) {
+                    app.refreshFilter();
+                } else {
+                    app.reorderPinnedRows();
+                }
+            }
+        },
+        .clear_selections => {
+            app.clearSelections();
+            // Refresh to remove unpinned items that don't match search
+            if (app.mode == .search_view) {
+                app.refreshFilter();
+            }
         },
     }
 }
@@ -181,18 +225,35 @@ fn showKillConfirm(app: *state.AppState, force: bool) void {
         app.showToast("No Process Selected", .err);
         return;
     }
-    const idx = @min(app.selected_item, rows.len - 1);
-    const row = rows[idx];
-    const pid = row.pid;
-    const name = row.name;
 
     const action: state.ConfirmAction = if (force) .kill_force else .kill_term;
-    const title = if (force) "Force Kill Process?" else "Kill Process?";
+    const selected_count = app.getSelectedCount();
 
     var msg_buf: [128]u8 = undefined;
-    const message = std.fmt.bufPrint(&msg_buf, "PID {d}: {s}", .{ pid, name }) catch "Unknown process";
+    var title_buf: [64]u8 = undefined;
 
-    app.showConfirmDialog(title, message, action, pid, name);
+    if (selected_count > 0) {
+        // Multiple selected - batch kill
+        const title = if (force)
+            std.fmt.bufPrint(&title_buf, "Force Kill {d} Processes?", .{selected_count}) catch "Force Kill Processes?"
+        else
+            std.fmt.bufPrint(&title_buf, "Kill {d} Processes?", .{selected_count}) catch "Kill Processes?";
+
+        const message = std.fmt.bufPrint(&msg_buf, "{d} selected processes will be terminated", .{selected_count}) catch "Multiple processes";
+
+        app.showConfirmDialog(title, message, action, 0, "multiple");
+    } else {
+        // Single process - current highlighted row
+        const idx = @min(app.selected_item, rows.len - 1);
+        const row = rows[idx];
+        const pid = row.pid;
+        const name = row.name;
+
+        const title = if (force) "Force Kill Process?" else "Kill Process?";
+        const message = std.fmt.bufPrint(&msg_buf, "PID {d}: {s}", .{ pid, name }) catch "Unknown process";
+
+        app.showConfirmDialog(title, message, action, pid, name);
+    }
 }
 
 fn executeKill(app: *state.AppState, pid: std.posix.pid_t, force: bool) void {

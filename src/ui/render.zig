@@ -321,14 +321,22 @@ fn renderProcessPane(
         if (y >= list_rect.y + list_rect.height) break;
 
         const row = rows[idx];
-        const is_selected = idx == app.selected_item;
+        const is_highlighted = idx == app.selected_item;
         const is_alt = (idx % 2) == 1;
 
-        const row_bg: _Color = if (is_selected) .blue else if (is_alt) alt_row_bg else .reset;
+        // Check if this row is pinned/selected
+        const hot = app.procs.hot.slice();
+        const start_time = if (row.data_idx < hot.items(.start_time_ns).len)
+            hot.items(.start_time_ns)[row.data_idx]
+        else
+            0;
+        const is_pinned = app.isSelected(row.pid, start_time);
 
-        const name_style: _Style = if (is_selected) .{ .bg = .blue, .fg = .white, .modifier = _Modifier{ .bold = true } } else .{ .bg = if (is_alt) alt_row_bg else .reset, .fg = .light_cyan };
-        const secondary_style: _Style = if (is_selected) .{ .bg = .blue, .fg = .light_cyan } else .{ .bg = if (is_alt) alt_row_bg else .reset, .fg = .gray, .modifier = _Modifier{ .dim = true } };
-        const prefix_style: _Style = if (is_selected) .{ .bg = .blue, .fg = .light_cyan } else .{ .bg = if (is_alt) alt_row_bg else .reset, .fg = .gray };
+        const row_bg: _Color = if (is_highlighted) .blue else if (is_pinned) .{ .rgb = .{ .r = 50, .g = 40, .b = 60 } } else if (is_alt) alt_row_bg else .reset;
+
+        const name_style: _Style = if (is_highlighted) .{ .bg = .blue, .fg = .white, .modifier = _Modifier{ .bold = true } } else if (is_pinned) .{ .bg = row_bg, .fg = .light_magenta, .modifier = _Modifier{ .bold = true } } else .{ .bg = if (is_alt) alt_row_bg else .reset, .fg = .light_cyan };
+        const secondary_style: _Style = if (is_highlighted) .{ .bg = .blue, .fg = .light_cyan } else .{ .bg = row_bg, .fg = .gray, .modifier = _Modifier{ .dim = true } };
+        const prefix_style: _Style = if (is_highlighted) .{ .bg = .blue, .fg = .light_cyan } else .{ .bg = row_bg, .fg = .gray };
 
         const cpu_fg = cpuColor(row.cpu_percent);
         const cpu_fg_sel: _Color = switch (cpu_fg) {
@@ -337,7 +345,7 @@ fn renderProcessPane(
             .red => .light_red,
             else => .white,
         };
-        const cpu_style: _Style = if (is_selected) .{ .bg = .blue, .fg = cpu_fg_sel, .modifier = _Modifier{ .bold = true } } else .{ .bg = if (is_alt) alt_row_bg else .reset, .fg = cpu_fg };
+        const cpu_style: _Style = if (is_highlighted) .{ .bg = .blue, .fg = cpu_fg_sel, .modifier = _Modifier{ .bold = true } } else .{ .bg = row_bg, .fg = cpu_fg };
 
         const mem_fg = memColor(row.mem_rss);
         const mem_fg_sel: _Color = switch (mem_fg) {
@@ -346,18 +354,25 @@ fn renderProcessPane(
             .red => .light_red,
             else => .white,
         };
-        const mem_style: _Style = if (is_selected) .{ .bg = .blue, .fg = mem_fg_sel, .modifier = _Modifier{ .bold = true } } else .{ .bg = if (is_alt) alt_row_bg else .reset, .fg = mem_fg };
+        const mem_style: _Style = if (is_highlighted) .{ .bg = .blue, .fg = mem_fg_sel, .modifier = _Modifier{ .bold = true } } else .{ .bg = row_bg, .fg = mem_fg };
 
         // Fill entire row with background color
-        if (is_selected or is_alt) {
+        if (is_highlighted or is_pinned or is_alt) {
             var fill_x: u16 = list_rect.x;
             while (fill_x < list_rect.x + list_rect.width) : (fill_x += 1) {
                 buf.setChar(fill_x, y, ' ', _Style{ .bg = row_bg });
             }
         }
 
+        // Show pin indicator for selected/pinned rows
+        if (is_pinned) {
+            const pin_style = _Style{ .fg = .light_magenta, .bg = row_bg, .modifier = _Modifier{ .bold = true } };
+            buf.setChar(pid_col.x, y, 0x25CF, pin_style); // ● filled circle
+        }
+
         var pid_buf: [8]u8 = undefined;
         const pid_str = std.fmt.bufPrint(&pid_buf, "{d:<7}", .{row.pid}) catch "err";
+        const pid_x: u16 = if (is_pinned) pid_col.x + 2 else pid_col.x;
         var cpu_buf: [7]u8 = undefined;
         const cpu_str = std.fmt.bufPrint(&cpu_buf, "{d:>5.1}%", .{row.cpu_percent}) catch "err";
 
@@ -372,7 +387,7 @@ fn renderProcessPane(
         const name_display = row.name[0..@min(row.name.len, @as(usize, @intCast(name_width)))];
         const path_display = row.path[0..@min(row.path.len, path_col.width)];
 
-        buf.setString(pid_col.x, y, pid_str, secondary_style);
+        buf.setString(pid_x, y, pid_str, secondary_style);
         if (name_width > 0) {
             buf.setString(name_x, y, name_display, name_style);
         }
@@ -829,7 +844,10 @@ fn renderCpuOverlay(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const stat
     const inner_h = box_h -| 2; // borders
 
     // Reserve bottom rows for stats (anchored to bottom)
-    const stats_rows: u16 = 2; // CPU/User/Sys + Load/Uptime (temps on right of row 2)
+    // Row 1: CPU/User/Sys + [t]emp header
+    // Row 2: Load/Uptime + temp values
+    // Row 3 (if needed): temp overflow
+    const stats_rows: u16 = 3;
     const cores_area_h = if (inner_h > stats_rows + 1) inner_h -| stats_rows -| 1 else inner_h / 2;
 
     // Dynamic column layout based on available space
@@ -917,87 +935,51 @@ fn renderCpuOverlay(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const stat
     const temp_col_x: u16 = content_x + left_col_w;
     const temp_col_w: u16 = if (inner_w > left_col_w) inner_w - left_col_w else 0;
 
-    // Calculate if temps fit on one row (~7 chars per temp + 7 for [t]emp. prefix)
+    // Calculate if temps fit on one row (~7 chars per temp)
     const chars_per_temp: u16 = 7;
-    const temp_prefix_w: u16 = 7;
-    const total_temp_chars = temp_prefix_w + @as(u16, @intCast(total_temps)) * chars_per_temp;
-    const use_two_rows = total_temp_chars > temp_col_w and total_temps > 1;
-    const temps_row1 = if (use_two_rows) (total_temps + 1) / 2 else total_temps;
+    const total_temp_chars = @as(u16, @intCast(total_temps)) * chars_per_temp;
+    const use_two_temp_rows = total_temp_chars > temp_col_w and total_temps > 1;
+    const temps_row1_count = if (use_two_temp_rows) (total_temps + 1) / 2 else total_temps;
 
-    // Line 1: CPU/User/Sys (left) + temps row 1 (right, if using two rows)
+    const dim_line_style = _Style{ .fg = .gray, .modifier = _Modifier{ .dim = true } };
+    const DASH: u21 = 0x2500; // ─
+
+    // Line 1: Separator with "Load" label (left) + [t]emp header (right)
     {
-        var cpu_buf: [48]u8 = undefined;
-        const cpu_str = std.fmt.bufPrint(&cpu_buf, "CPU {d:>4.1}%  User {d:>4.1}%  Sys {d:>4.1}%", .{
-            sys.total_cpu_percent, sys.total_user_percent, sys.total_system_percent,
-        }) catch "CPU ???%";
-        const show_len = @min(cpu_str.len, left_col_w -| 2);
-        buf.setString(content_x, stats_y, cpu_str[0..show_len], _Style{ .fg = cpuColor(sys.total_cpu_percent) });
+        // Left side: "Load" label with dashes
+        buf.setString(content_x, stats_y, "Load", _Style{ .fg = .gray });
+        var dx: u16 = content_x + 5;
+        while (dx < temp_col_x -| 1) : (dx += 1) {
+            buf.setChar(dx, stats_y, DASH, dim_line_style);
+        }
 
-        // Right side: temps (first half if two rows, otherwise empty - all temps go on row 2)
-        if (use_two_rows and total_temps > 0 and temp_col_w > 0) {
+        // Right side: [t]emp header label with dashes
+        if (total_temps > 0 and temp_col_w > 0) {
             buf.setString(temp_col_x, stats_y, "[", _Style{ .fg = .gray });
             buf.setString(temp_col_x + 1, stats_y, "t", _Style{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } });
-            buf.setString(temp_col_x + 2, stats_y, "]emp.", _Style{ .fg = .gray });
+            buf.setString(temp_col_x + 2, stats_y, "]emp", _Style{ .fg = .gray });
 
-            var temp_x: u16 = temp_col_x + 7; // "[t]emp." = 7 chars
-            for (0..temps_row1) |i| {
-                const cluster_temp = sys.cpu_cluster_temps[i];
-                if (cluster_temp > 0 and temp_x < content_x + inner_w - 5) {
-                    var label_buf: [4]u8 = undefined;
-                    const label = if (i < named_labels.len)
-                        named_labels[i]
-                    else
-                        std.fmt.bufPrint(&label_buf, "T{d}:", .{i}) catch "T?:";
-
-                    buf.setString(temp_x, stats_y, label, _Style{ .fg = .gray });
-                    temp_x += @as(u16, @intCast(label.len));
-
-                    var single_temp: [8]u8 = undefined;
-                    const t_str = formatTemp(cluster_temp, temp_unit, &single_temp);
-                    buf.setString(temp_x, stats_y, t_str, _Style{ .fg = cpuTempColor(cluster_temp) });
-                    temp_x += @as(u16, @intCast(t_str.len)) + 1;
-                }
+            dx = temp_col_x + 6;
+            while (dx < content_x + inner_w) : (dx += 1) {
+                buf.setChar(dx, stats_y, DASH, dim_line_style);
             }
         }
     }
 
-    // Line 2: Load/Uptime (left) + temps (right - all if single row, or second half if two rows)
+    // Line 2: CPU/User/Sys values (left) + temp values row 1 (right)
     if (stats_y + 1 < content_y + inner_h) {
-        // Left side: Load averages + Uptime
-        var load_buf: [24]u8 = undefined;
-        const load_str = std.fmt.bufPrint(&load_buf, "Load: {d:.2} {d:.2} {d:.2}", .{
-            sys.load_avg[0], sys.load_avg[1], sys.load_avg[2],
-        }) catch "Load: ???";
-        buf.setString(content_x, stats_y + 1, load_str, _Style{ .fg = .gray });
+        var cpu_buf: [48]u8 = undefined;
+        const cpu_str = std.fmt.bufPrint(&cpu_buf, "CPU {d:>5.1}%  User {d:>5.1}%  Sys {d:>5.1}%", .{
+            sys.total_cpu_percent, sys.total_user_percent, sys.total_system_percent,
+        }) catch "CPU ???%";
+        const show_len = @min(cpu_str.len, left_col_w -| 2);
+        buf.setString(content_x, stats_y + 1, cpu_str[0..show_len], _Style{ .fg = cpuColor(sys.total_cpu_percent) });
 
-        const up_s = sys.uptime_seconds;
-        const days = up_s / 86400;
-        const hours = (up_s % 86400) / 3600;
-        const minutes = (up_s % 3600) / 60;
-
-        var up_buf: [16]u8 = undefined;
-        const up_str = if (days > 0)
-            std.fmt.bufPrint(&up_buf, "  Up: {d}d {d}h", .{ days, hours }) catch "  Up: ???"
-        else
-            std.fmt.bufPrint(&up_buf, "  Up: {d}h {d}m", .{ hours, minutes }) catch "  Up: ???";
-
-        const load_len: u16 = @intCast(load_str.len);
-        buf.setString(content_x + load_len, stats_y + 1, up_str, _Style{ .fg = .gray });
-
-        // Right side: temps
+        // Right side: temp values (first row or all if single row)
         if (total_temps > 0 and temp_col_w > 0) {
             var temp_x: u16 = temp_col_x;
-            const start_idx: usize = if (use_two_rows) temps_row1 else 0;
 
-            // Show [t] prefix only if not already shown on row 1
-            if (!use_two_rows) {
-                buf.setString(temp_x, stats_y + 1, "[", _Style{ .fg = .gray });
-                buf.setString(temp_x + 1, stats_y + 1, "t", _Style{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } });
-                buf.setString(temp_x + 2, stats_y + 1, "]emp.", _Style{ .fg = .gray });
-                temp_x += 7; // "[t]emp." = 7 chars
-            }
-
-            for (start_idx..total_temps) |i| {
+            for (0..temps_row1_count) |i| {
                 const cluster_temp = sys.cpu_cluster_temps[i];
                 if (cluster_temp > 0 and temp_x < content_x + inner_w - 5) {
                     var label_buf: [4]u8 = undefined;
@@ -1012,6 +994,54 @@ fn renderCpuOverlay(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const stat
                     var single_temp: [8]u8 = undefined;
                     const t_str = formatTemp(cluster_temp, temp_unit, &single_temp);
                     buf.setString(temp_x, stats_y + 1, t_str, _Style{ .fg = cpuTempColor(cluster_temp) });
+                    temp_x += @as(u16, @intCast(t_str.len)) + 1;
+                }
+            }
+        }
+    }
+
+    // Line 3: Load/Uptime (left) + temp values row 2 if needed (right)
+    if (stats_y + 2 < content_y + inner_h) {
+        // Left side: Load averages + Uptime (no "Load:" prefix since header says "Load")
+        var load_buf: [24]u8 = undefined;
+        const load_str = std.fmt.bufPrint(&load_buf, "{d:.2}  {d:.2}  {d:.2}", .{
+            sys.load_avg[0], sys.load_avg[1], sys.load_avg[2],
+        }) catch "???";
+        buf.setString(content_x, stats_y + 2, load_str, _Style{ .fg = .gray });
+
+        const up_s = sys.uptime_seconds;
+        const days = up_s / 86400;
+        const hours = (up_s % 86400) / 3600;
+        const minutes = (up_s % 3600) / 60;
+
+        var up_buf: [16]u8 = undefined;
+        const up_str = if (days > 0)
+            std.fmt.bufPrint(&up_buf, "  Up: {d}d {d}h", .{ days, hours }) catch "  Up: ???"
+        else
+            std.fmt.bufPrint(&up_buf, "  Up: {d}h {d}m", .{ hours, minutes }) catch "  Up: ???";
+
+        const load_len: u16 = @intCast(load_str.len);
+        buf.setString(content_x + load_len, stats_y + 2, up_str, _Style{ .fg = .gray });
+
+        // Right side: temp values row 2 (if needed)
+        if (use_two_temp_rows and total_temps > temps_row1_count and temp_col_w > 0) {
+            var temp_x: u16 = temp_col_x;
+
+            for (temps_row1_count..total_temps) |i| {
+                const cluster_temp = sys.cpu_cluster_temps[i];
+                if (cluster_temp > 0 and temp_x < content_x + inner_w - 5) {
+                    var label_buf: [4]u8 = undefined;
+                    const label = if (i < named_labels.len)
+                        named_labels[i]
+                    else
+                        std.fmt.bufPrint(&label_buf, "T{d}:", .{i}) catch "T?:";
+
+                    buf.setString(temp_x, stats_y + 2, label, _Style{ .fg = .gray });
+                    temp_x += @as(u16, @intCast(label.len));
+
+                    var single_temp: [8]u8 = undefined;
+                    const t_str = formatTemp(cluster_temp, temp_unit, &single_temp);
+                    buf.setString(temp_x, stats_y + 2, t_str, _Style{ .fg = cpuTempColor(cluster_temp) });
                     temp_x += @as(u16, @intCast(t_str.len)) + 1;
                 }
             }

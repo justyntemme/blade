@@ -43,8 +43,11 @@ pub const keymap = [_]KeyBinding{
 
     // Tree expand/collapse
     .{ .key = .{ .special = .tab }, .action = .toggle_expand, .modes = &.{ .normal, .search_view }, .description = "toggle expand", .category = "Tree" },
-    .{ .key = .{ .char = ' ' }, .action = .toggle_expand, .modes = &.{ .normal, .search_view }, .description = "" },
     .{ .key = .{ .char = '*' }, .action = .toggle_expand_all, .modes = &.{ .normal, .search_view }, .description = "Expand all", .category = "Tree" },
+
+    // Selection
+    .{ .key = .{ .char = ' ' }, .action = .toggle_select, .modes = &.{ .normal, .search_view }, .description = "select/pin", .category = "Selection" },
+    .{ .key = .{ .char = 'c' }, .action = .clear_selections, .modes = &.{ .normal, .search_view }, .description = "clear selections", .category = "Selection" },
 
     // Process
     .{ .key = .{ .special = .enter }, .action = .open_detail, .modes = &.{ .normal, .search_view }, .description = "details", .category = "Process" },
@@ -62,7 +65,6 @@ pub const keymap = [_]KeyBinding{
     .{ .key = .{ .char = 'M' }, .action = .sort_by_mem, .modes = &.{ .normal, .search_view }, .description = "sort mem", .category = "Sorting" },
 
     // CPU Overlay
-    .{ .key = .{ .char = 'c' }, .action = .toggle_cpu_overlay, .modes = &.{ .normal, .search_view }, .description = "cores overlay", .category = "Display" },
     .{ .key = .{ .char = 't' }, .action = .toggle_temp_unit, .modes = &.{ .normal, .search_view }, .description = "temp °C/°F", .category = "Display" },
 
     // Storage Overlay

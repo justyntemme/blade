@@ -295,6 +295,9 @@ pub const AppState = struct {
     storage_detail_mode: StorageDetailMode = .with_swap,
     mount_filter: MountFilter = .all,
     confirm_dialog: ?ConfirmDialog = null,
+    /// Maps pinned process identity to its pinned row position
+    pinned_pids: std.AutoHashMap(model.ProcIdentity, usize) = undefined,
+    pinned_pids_initialized: bool = false,
 
     pub const DetailFocus = enum { left, right };
 
@@ -302,12 +305,214 @@ pub const AppState = struct {
         return .{
             .gpa = gpa,
             .procs = procs.Store.init(gpa),
+            .pinned_pids = std.AutoHashMap(model.ProcIdentity, usize).init(gpa),
+            .pinned_pids_initialized = true,
         };
     }
 
     pub fn deinit(self: *AppState) void {
         self.closeDetail();
         self.procs.deinit();
+        if (self.pinned_pids_initialized) {
+            self.pinned_pids.deinit();
+        }
+    }
+
+    /// Toggle pinning a process at its current row position
+    pub fn toggleSelection(self: *AppState, pid: model.pid_t, start_time_ns: i128, row_position: usize) void {
+        const id = model.ProcIdentity{ .pid = pid, .start_time_ns = start_time_ns };
+        if (self.pinned_pids.contains(id)) {
+            _ = self.pinned_pids.remove(id);
+        } else {
+            self.pinned_pids.put(id, row_position) catch {};
+        }
+    }
+
+    pub fn isSelected(self: *const AppState, pid: model.pid_t, start_time_ns: i128) bool {
+        const id = model.ProcIdentity{ .pid = pid, .start_time_ns = start_time_ns };
+        return self.pinned_pids.contains(id);
+    }
+
+    pub fn clearSelections(self: *AppState) void {
+        self.pinned_pids.clearRetainingCapacity();
+    }
+
+    pub fn getSelectedCount(self: *const AppState) usize {
+        return self.pinned_pids.count();
+    }
+
+    /// Ensure pinned processes are visible and at their stored positions.
+    /// In search view: pinned processes appear at the TOP (not at stored positions).
+    /// In normal view: pinned processes stay at their stored positions.
+    pub fn reorderPinnedRows(self: *AppState) void {
+        if (self.pinned_pids.count() == 0) return;
+
+        const in_search = (self.mode == .search_view or self.mode == .search_edit);
+
+        const hot = self.procs.hot.slice();
+        const pids = hot.items(.pid);
+        const start_times = hot.items(.start_time_ns);
+        const cpu_percents = hot.items(.cpu_percent);
+        const mem_rsss = hot.items(.mem_rss);
+        const cold = self.procs.cold.slice();
+        const names = cold.items(.name);
+        const paths = cold.items(.path);
+
+        // First, find which pinned processes are missing from render_rows
+        var missing_rows: [64]model.RenderRow = undefined;
+        var missing_count: usize = 0;
+
+        var pinned_iter = self.pinned_pids.iterator();
+        while (pinned_iter.next()) |entry| {
+            const identity = entry.key_ptr.*;
+
+            // Check if this pinned process is already in render_rows
+            var found = false;
+            const rows = self.procs.render_rows.items;
+            for (rows) |row| {
+                if (row.data_idx < start_times.len) {
+                    if (pids[row.data_idx] == identity.pid and
+                        start_times[row.data_idx] == identity.start_time_ns)
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!found and missing_count < 64) {
+                // Find this process in hot/cold data
+                for (0..pids.len) |data_idx| {
+                    if (pids[data_idx] == identity.pid and
+                        start_times[data_idx] == identity.start_time_ns)
+                    {
+                        // Create a RenderRow for this missing pinned process
+                        missing_rows[missing_count] = .{
+                            .pid = pids[data_idx],
+                            .cpu_percent = cpu_percents[data_idx],
+                            .mem_rss = mem_rsss[data_idx],
+                            .name = names[data_idx],
+                            .path = paths[data_idx],
+                            .depth = 0, // Pinned processes show at root level
+                            .has_children = false,
+                            .is_last = true,
+                            .is_expanded = false,
+                            .data_idx = @intCast(data_idx),
+                        };
+                        missing_count += 1;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // In search view: insert missing pinned rows at the TOP
+        if (in_search and missing_count > 0) {
+            self.procs.render_rows.ensureUnusedCapacity(self.gpa, missing_count) catch return;
+            // Shift existing rows down and insert pinned at top
+            const rows = self.procs.render_rows.items;
+            const new_len = rows.len + missing_count;
+            self.procs.render_rows.resize(self.gpa, new_len) catch return;
+            const new_rows = self.procs.render_rows.items;
+            // Shift existing items to make room at the beginning
+            var i: usize = rows.len;
+            while (i > 0) {
+                i -= 1;
+                new_rows[i + missing_count] = new_rows[i];
+            }
+            // Insert missing pinned rows at the top
+            for (0..missing_count) |j| {
+                new_rows[j] = missing_rows[j];
+            }
+            return; // Don't do position-based reordering in search view
+        }
+
+        // Add missing pinned rows to render_rows (for normal view)
+        if (missing_count > 0) {
+            self.procs.render_rows.ensureUnusedCapacity(self.gpa, missing_count) catch return;
+            for (0..missing_count) |i| {
+                self.procs.render_rows.appendAssumeCapacity(missing_rows[i]);
+            }
+        }
+
+        // In search view, don't reorder by stored positions - just keep natural order
+        if (in_search) return;
+
+        // Normal view: reorder all rows to place pinned ones at their stored positions
+        const rows = self.procs.render_rows.items;
+        if (rows.len == 0) return;
+
+        // Collect all pinned rows with their target positions
+        const PinnedEntry = struct { target_pos: usize, current_idx: usize };
+        var pinned_entries: [64]PinnedEntry = undefined;
+        var pinned_count: usize = 0;
+
+        for (rows, 0..) |row, idx| {
+            if (row.data_idx < start_times.len) {
+                const identity = model.ProcIdentity{
+                    .pid = row.pid,
+                    .start_time_ns = start_times[row.data_idx],
+                };
+                if (self.pinned_pids.get(identity)) |target_pos| {
+                    if (pinned_count < 64) {
+                        pinned_entries[pinned_count] = .{
+                            .target_pos = target_pos,
+                            .current_idx = idx,
+                        };
+                        pinned_count += 1;
+                    }
+                }
+            }
+        }
+
+        if (pinned_count == 0) return;
+
+        // Allocate temp buffer
+        var temp = self.gpa.alloc(model.RenderRow, rows.len) catch return;
+        defer self.gpa.free(temp);
+
+        // Mark which positions are reserved for pinned items
+        var reserved = self.gpa.alloc(bool, rows.len) catch return;
+        defer self.gpa.free(reserved);
+        @memset(reserved, false);
+
+        // First pass: place pinned items at their target positions (clamped)
+        for (pinned_entries[0..pinned_count]) |entry| {
+            const target = @min(entry.target_pos, rows.len - 1);
+            var pos = target;
+            // Find nearest free slot
+            while (pos < rows.len and reserved[pos]) : (pos += 1) {}
+            if (pos >= rows.len) {
+                pos = target;
+                while (pos > 0 and reserved[pos]) : (pos -= 1) {}
+            }
+            if (!reserved[pos]) {
+                temp[pos] = rows[entry.current_idx];
+                reserved[pos] = true;
+            }
+        }
+
+        // Second pass: fill remaining slots with non-pinned items
+        var write_idx: usize = 0;
+        for (rows, 0..) |row, idx| {
+            var is_pinned = false;
+            for (pinned_entries[0..pinned_count]) |entry| {
+                if (entry.current_idx == idx) {
+                    is_pinned = true;
+                    break;
+                }
+            }
+            if (!is_pinned) {
+                while (write_idx < rows.len and reserved[write_idx]) : (write_idx += 1) {}
+                if (write_idx < rows.len) {
+                    temp[write_idx] = row;
+                    write_idx += 1;
+                }
+            }
+        }
+
+        // Copy back
+        @memcpy(rows, temp[0..rows.len]);
     }
 
     pub fn showToast(self: *AppState, message: []const u8, level: ToastLevel) void {
@@ -373,6 +578,7 @@ pub const AppState = struct {
             self.showToastFmt("buildView failed: {}", .{err}, .err);
             return;
         };
+        self.reorderPinnedRows();
         self.restoreAndClamp(prev);
     }
 
@@ -382,6 +588,7 @@ pub const AppState = struct {
             self.showToastFmt("sortView failed: {}", .{err}, .err);
             return;
         };
+        self.reorderPinnedRows();
         self.restoreAndClamp(prev);
     }
 
@@ -391,6 +598,7 @@ pub const AppState = struct {
             self.showToastFmt("refreshFilter failed: {}", .{err}, .err);
             return;
         };
+        self.reorderPinnedRows();
         self.restoreAndClamp(prev);
     }
 
@@ -404,6 +612,7 @@ pub const AppState = struct {
             self.showToastFmt("Rebuild failed: {}", .{err}, .err);
             return;
         };
+        self.reorderPinnedRows();
         self.restoreAndClamp(prev);
     }
 
@@ -428,6 +637,7 @@ pub const AppState = struct {
             self.showToastFmt("Rebuild failed: {}", .{err}, .err);
             return;
         };
+        self.reorderPinnedRows();
         self.restoreAndClamp(prev);
     }
 
@@ -470,6 +680,10 @@ pub const AppState = struct {
 
     fn restoreSelection(self: *AppState, prev_identity: ?model.ProcIdentity) void {
         if (prev_identity) |identity| {
+            // Don't follow pinned processes - keep cursor at same row position
+            if (self.pinned_pids.contains(identity)) {
+                return;
+            }
             if (self.procs.findIdentity(identity)) |found_idx| {
                 self.selected_item = found_idx;
             }
