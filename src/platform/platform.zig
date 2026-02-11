@@ -44,3 +44,11 @@ pub fn collectSystemMetrics() model.SystemMetrics {
 pub fn collectMountInfo() model.MountSnapshot {
     return backend.collectMountInfo();
 }
+
+pub fn collectThreads(pid: std.posix.pid_t, arena: std.mem.Allocator) PlatformError![]model.ThreadInfo {
+    return backend.collectThreads(pid, arena);
+}
+
+pub fn collectOpenFiles(pid: std.posix.pid_t, arena: std.mem.Allocator) PlatformError![]model.OpenFile {
+    return backend.collectOpenFiles(pid, arena);
+}

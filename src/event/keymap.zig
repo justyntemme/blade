@@ -51,8 +51,8 @@ pub const keymap = [_]KeyBinding{
 
     // Process
     .{ .key = .{ .special = .enter }, .action = .open_detail, .modes = &.{ .normal, .search_view }, .description = "details", .category = "Process" },
-    .{ .key = .{ .char = 'x' }, .action = .kill_term, .modes = &.{ .normal, .search_view }, .description = "kill", .category = "Process" },
-    .{ .key = .{ .char = 'X' }, .action = .kill_force, .modes = &.{ .normal, .search_view }, .description = "kill -9", .category = "Process" },
+    .{ .key = .{ .char = 'x' }, .action = .kill_term, .modes = &.{ .normal, .search_view, .detail }, .description = "kill", .category = "Process" },
+    .{ .key = .{ .char = 'X' }, .action = .kill_force, .modes = &.{ .normal, .search_view, .detail }, .description = "kill -9", .category = "Process" },
 
     // Search
     .{ .key = .{ .char = '/' }, .action = .start_search, .modes = &.{ .normal, .search_view }, .description = "search", .category = "Search" },

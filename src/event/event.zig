@@ -220,17 +220,29 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
 }
 
 fn showKillConfirm(app: *state.AppState, force: bool) void {
+    const action: state.ConfirmAction = if (force) .kill_force else .kill_term;
+    var msg_buf: [128]u8 = undefined;
+    var title_buf: [64]u8 = undefined;
+
+    // In detail mode, kill the process being viewed
+    if (app.mode == .detail) {
+        if (app.detail_pid) |pid| {
+            const title = if (force) "Force Kill Process?" else "Kill Process?";
+            // Try to get the process name from the detail data
+            const name = if (app.detail_data) |data| data.name else "Unknown";
+            const message = std.fmt.bufPrint(&msg_buf, "PID {d}: {s}", .{ pid, name }) catch "Unknown process";
+            app.showConfirmDialog(title, message, action, pid, name);
+        }
+        return;
+    }
+
     const rows = app.procs.render_rows.items;
     if (rows.len == 0) {
         app.showToast("No Process Selected", .err);
         return;
     }
 
-    const action: state.ConfirmAction = if (force) .kill_force else .kill_term;
     const selected_count = app.getSelectedCount();
-
-    var msg_buf: [128]u8 = undefined;
-    var title_buf: [64]u8 = undefined;
 
     if (selected_count > 0) {
         // Multiple selected - batch kill

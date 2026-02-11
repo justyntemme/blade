@@ -287,6 +287,7 @@ pub const AppState = struct {
     detail_scroll: usize = 0,
     detail_right_scroll: usize = 0,
     detail_focus: DetailFocus = .left,
+    detail_open_files: ?[]const model.OpenFile = null,
     help_scroll: usize = 0,
     procs: procs.Store,
     system: SystemState = .{},
@@ -790,6 +791,11 @@ pub const AppState = struct {
                 if (self.detail_arena) |*old| old.deinit();
                 self.detail_arena = result.arena;
                 self.detail_data = result.data;
+                // Also collect open files now that we have the arena
+                if (self.detail_arena) |*arena| {
+                    const platform = @import("platform");
+                    self.detail_open_files = platform.collectOpenFiles(current_pid, arena.allocator()) catch null;
+                }
                 return;
             }
         }
@@ -809,10 +815,12 @@ pub const AppState = struct {
         self.detail_arena = null;
         self.detail_data = null;
         self.detail_pid = null;
+        self.detail_open_files = null;
         if (self.mode == .detail) {
             self.mode = self.previous_mode;
         }
     }
+
     pub fn detailScrollUp(self: *AppState) void {
         if (self.detail_scroll > 0) self.detail_scroll -= 1;
     }

@@ -968,12 +968,31 @@ fn renderCpuOverlay(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const stat
 
     // Line 2: CPU/User/Sys values (left) + temp values row 1 (right)
     if (stats_y + 1 < content_y + inner_h) {
-        var cpu_buf: [48]u8 = undefined;
-        const cpu_str = std.fmt.bufPrint(&cpu_buf, "CPU {d:>5.1}%  User {d:>5.1}%  Sys {d:>5.1}%", .{
-            sys.total_cpu_percent, sys.total_user_percent, sys.total_system_percent,
-        }) catch "CPU ???%";
-        const show_len = @min(cpu_str.len, left_col_w -| 2);
-        buf.setString(content_x, stats_y + 1, cpu_str[0..show_len], _Style{ .fg = cpuColor(sys.total_cpu_percent) });
+        // Draw each value with its own color
+        var x_pos: u16 = content_x;
+        const label_style = _Style{ .fg = .gray };
+
+        // CPU label and value
+        buf.setString(x_pos, stats_y + 1, "CPU ", label_style);
+        x_pos += 4;
+        var cpu_val_buf: [8]u8 = undefined;
+        const cpu_val = std.fmt.bufPrint(&cpu_val_buf, "{d:>5.1}%", .{sys.total_cpu_percent}) catch "???%";
+        buf.setString(x_pos, stats_y + 1, cpu_val, _Style{ .fg = cpuColor(sys.total_cpu_percent) });
+        x_pos += @intCast(cpu_val.len);
+
+        // User label and value
+        buf.setString(x_pos, stats_y + 1, "  User ", label_style);
+        x_pos += 7;
+        var user_val_buf: [8]u8 = undefined;
+        const user_val = std.fmt.bufPrint(&user_val_buf, "{d:>5.1}%", .{sys.total_user_percent}) catch "???%";
+        buf.setString(x_pos, stats_y + 1, user_val, _Style{ .fg = cpuColor(sys.total_user_percent) });
+        x_pos += @intCast(user_val.len);
+
+        // Sys label and value
+        buf.setString(x_pos, stats_y + 1, "  Sys ", label_style);
+        var sys_val_buf: [8]u8 = undefined;
+        const sys_val = std.fmt.bufPrint(&sys_val_buf, "{d:>5.1}%", .{sys.total_system_percent}) catch "???%";
+        buf.setString(x_pos + 6, stats_y + 1, sys_val, _Style{ .fg = cpuColor(sys.total_system_percent) });
 
         // Right side: temp values (first row or all if single row)
         if (total_temps > 0 and temp_col_w > 0) {
@@ -2749,33 +2768,33 @@ fn renderDetailView(buf: *tui.render.Buffer, area: tui.render.Rect, app: *state.
         app.detail_scroll = 0;
     }
 
-    // Split right pane: static stats on top, scrollable tree below
+    // Split right pane: static stats on top, scrollable content below
     const right_rects = layout.calculate(detail_right_layout, right_rect);
 
     const stats_rect = right_rects[0];
-    const tree_rect = right_rects[1];
+    const content_rect = right_rects[1];
 
     const left_focused = app.detail_focus == .left;
 
     // Render static live stats (always visible, never scrolls)
     renderDetailStats(buf, stats_rect, detail, live_cpu, live_mem, !left_focused);
 
-    // Measure tree content, auto-scroll to show selected process, then render
-    const tree_info = renderDetailTree(buf, tree_rect, detail, app, true, false);
-    const tree_content_lines = tree_info.total_lines;
-    const tree_visible: usize = @intCast(tree_rect.height);
+    // Measure combined content: proc tree + separator + open files
+    const tree_info = renderDetailTreeAndFiles(buf, content_rect, detail, app, true, false);
+    const right_content_lines = tree_info.total_lines;
+    const right_visible: usize = @intCast(content_rect.height);
+
     // Auto-center on first open (scroll still at 0 and selected proc not visible)
-    if (app.detail_right_scroll == 0 and tree_info.self_line >= tree_visible and tree_content_lines > tree_visible) {
-        // Center the selected process in the visible area
-        const half = tree_visible / 2;
+    if (app.detail_right_scroll == 0 and tree_info.self_line >= right_visible and right_content_lines > right_visible) {
+        const half = right_visible / 2;
         app.detail_right_scroll = if (tree_info.self_line > half) tree_info.self_line - half else 0;
     }
-    if (tree_content_lines > tree_visible) {
-        app.detail_right_scroll = @min(app.detail_right_scroll, tree_content_lines - tree_visible);
+    if (right_content_lines > right_visible) {
+        app.detail_right_scroll = @min(app.detail_right_scroll, right_content_lines - right_visible);
     } else {
         app.detail_right_scroll = 0;
     }
-    _ = renderDetailTree(buf, tree_rect, detail, app, false, !left_focused);
+    _ = renderDetailTreeAndFiles(buf, content_rect, detail, app, false, !left_focused);
 
     // Render left pane
     renderDetailLeftPane(buf, left_rect, detail, app.detail_scroll, left_focused);
@@ -2793,18 +2812,18 @@ fn renderDetailView(buf: *tui.render.Buffer, area: tui.render.Rect, app: *state.
         }
     } else {
         if (app.detail_right_scroll > 0) {
-            const arrow_x = tree_rect.x + tree_rect.width -| 1;
-            buf.setString(arrow_x, tree_rect.y, "^", _Style{ .fg = .cyan });
+            const arrow_x = content_rect.x + content_rect.width -| 1;
+            buf.setString(arrow_x, content_rect.y, "^", _Style{ .fg = .cyan });
         }
-        if (tree_content_lines > tree_visible and app.detail_right_scroll + tree_visible < tree_content_lines) {
-            const arrow_x = tree_rect.x + tree_rect.width -| 1;
-            const arrow_y = tree_rect.y + tree_rect.height -| 1;
+        if (right_content_lines > right_visible and app.detail_right_scroll + right_visible < right_content_lines) {
+            const arrow_x = content_rect.x + content_rect.width -| 1;
+            const arrow_y = content_rect.y + content_rect.height -| 1;
             buf.setString(arrow_x, arrow_y, "v", _Style{ .fg = .cyan });
         }
     }
 
     // --- Footer keybinds ---
-    const footer_hint = "esc:close  h/l:pane  j/k:scroll  u/d:page  g/G:top/bottom";
+    const footer_hint = "esc:close  h/l:pane  j/k:scroll  u/d:page  x:kill";
     buf.setString(footer_rect.x, footer_rect.y, footer_hint, _Style{ .fg = .gray });
 }
 
@@ -3108,6 +3127,367 @@ fn renderDetailTree(buf: *tui.render.Buffer, rect: layout.Rect, detail: model.Pr
     }
 
     return .{ .total_lines = ln, .self_line = self_ln };
+}
+
+/// Combined render function that shows process tree followed by open files
+fn renderDetailTreeAndFiles(buf: *tui.render.Buffer, rect: layout.Rect, detail: model.ProcessDetail, app: *state.AppState, measure_only: bool, focused: bool) TreeInfo {
+    const sec: _Style = if (focused) .{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } } else .{ .fg = .gray };
+    const lbl = _Style{ .fg = .gray };
+    const val = _Style{ .fg = .light_white };
+    const rx: u16 = rect.x + 1;
+    const max_w: usize = @intCast(rect.width -| 1);
+
+    const scroll = app.detail_right_scroll;
+    const vis_start = scroll;
+    const vis_end = scroll + @as(usize, rect.height);
+
+    var ln: usize = 0;
+
+    // === PROCESS TREE SECTION ===
+    // Header
+    if (!measure_only and ln >= vis_start and ln < vis_end) {
+        const y = rect.y + @as(u16, @intCast(ln - vis_start));
+        buf.setString(rx, y, "Process Tree", sec);
+    }
+    ln += 1;
+
+    const pids = app.procs.hot.items(.pid);
+    const cold_names = app.procs.cold.items(.name);
+    const cold_ppids = app.procs.cold.items(.ppid);
+    const cold_len = app.procs.cold.len;
+
+    // Walk full ancestor chain
+    const max_ancestors = 64;
+    var ancestor_pids: [max_ancestors]model.pid_t = undefined;
+    var ancestor_names: [max_ancestors][]const u8 = undefined;
+    var ancestor_count: usize = 0;
+    var walk_pid = detail.ppid;
+    while (ancestor_count < max_ancestors) {
+        if (walk_pid <= 0) break;
+        if (app.procs.pid_to_index.get(walk_pid)) |idx| {
+            const i: usize = @intCast(idx);
+            if (i >= cold_len) break;
+            ancestor_pids[ancestor_count] = walk_pid;
+            ancestor_names[ancestor_count] = cold_names[i];
+            ancestor_count += 1;
+            const next_ppid = cold_ppids[i];
+            if (next_ppid == walk_pid) break;
+            walk_pid = next_ppid;
+        } else break;
+    }
+
+    // Ancestors top-down (reverse the stack)
+    var ai: usize = ancestor_count;
+    while (ai > 0) {
+        ai -= 1;
+        if (!measure_only and ln >= vis_start and ln < vis_end) {
+            const y = rect.y + @as(u16, @intCast(ln - vis_start));
+            const indent = ancestor_count - 1 - ai;
+            var anc_buf: [80]u8 = [_]u8{' '} ** 80;
+            const pad: usize = 2 + indent * 2;
+            var fmt_buf: [64]u8 = undefined;
+            const label = std.fmt.bufPrint(&fmt_buf, "{s} ({d})", .{ ancestor_names[ai], ancestor_pids[ai] }) catch "???";
+            const start = @min(pad, anc_buf.len);
+            const end = @min(start + label.len, anc_buf.len);
+            @memcpy(anc_buf[start..end], label[0 .. end - start]);
+            buf.setString(rx, y, anc_buf[0..@min(end, max_w)], lbl);
+        }
+        ln += 1;
+    }
+
+    // Current process (highlighted)
+    const self_ln = ln;
+    if (!measure_only and ln >= vis_start and ln < vis_end) {
+        const y = rect.y + @as(u16, @intCast(ln - vis_start));
+        const indent = ancestor_count * 2 + 2;
+        var cur_buf: [80]u8 = [_]u8{' '} ** 80;
+        var fmt_buf: [64]u8 = undefined;
+        const label = std.fmt.bufPrint(&fmt_buf, "{s} ({d})", .{ detail.name, detail.pid }) catch "???";
+        const start = @min(indent, cur_buf.len);
+        const end = @min(start + label.len, cur_buf.len);
+        @memcpy(cur_buf[start..end], label[0 .. end - start]);
+        buf.setString(rx, y, cur_buf[0..@min(end, max_w)], _Style{ .fg = .light_yellow, .modifier = _Modifier{ .bold = true } });
+    }
+    ln += 1;
+
+    // Children
+    const child_indent = ancestor_count * 2 + 4;
+    var child_count: u16 = 0;
+    for (cold_ppids, cold_names, 0..) |ppid, name, i| {
+        if (i >= pids.len) break;
+        if (ppid == detail.pid) {
+            if (!measure_only and ln >= vis_start and ln < vis_end) {
+                const y = rect.y + @as(u16, @intCast(ln - vis_start));
+                var child_line: [80]u8 = [_]u8{' '} ** 80;
+                var fmt_buf: [64]u8 = undefined;
+                const label = std.fmt.bufPrint(&fmt_buf, "{s} ({d})", .{ name, pids[i] }) catch "???";
+                const start = @min(child_indent, child_line.len);
+                const end = @min(start + label.len, child_line.len);
+                @memcpy(child_line[start..end], label[0 .. end - start]);
+                buf.setString(rx, y, child_line[0..@min(end, max_w)], val);
+            }
+            ln += 1;
+            child_count += 1;
+        }
+    }
+    if (child_count == 0) {
+        if (!measure_only and ln >= vis_start and ln < vis_end) {
+            const y = rect.y + @as(u16, @intCast(ln - vis_start));
+            var no_child: [80]u8 = [_]u8{' '} ** 80;
+            const msg = "(no children)";
+            const start = @min(child_indent, no_child.len);
+            const end = @min(start + msg.len, no_child.len);
+            @memcpy(no_child[start..end], msg);
+            buf.setString(rx, y, no_child[0..@min(end, max_w)], lbl);
+        }
+        ln += 1;
+    }
+
+    // === SEPARATOR ===
+    ln += 1; // blank line
+
+    // === OPEN FILES SECTION ===
+    // Header
+    if (!measure_only and ln >= vis_start and ln < vis_end) {
+        const y = rect.y + @as(u16, @intCast(ln - vis_start));
+        var file_count_buf: [32]u8 = undefined;
+        const file_count = if (app.detail_open_files) |files| files.len else 0;
+        const header = std.fmt.bufPrint(&file_count_buf, "Open Files ({d})", .{file_count}) catch "Open Files";
+        buf.setString(rx, y, header, sec);
+    }
+    ln += 1;
+
+    // Column headers
+    if (!measure_only and ln >= vis_start and ln < vis_end) {
+        const y = rect.y + @as(u16, @intCast(ln - vis_start));
+        buf.setString(rx, y, "FD", lbl);
+        buf.setString(rx + 5, y, "Type", lbl);
+        buf.setString(rx + 14, y, "Path / Address", lbl);
+    }
+    ln += 1;
+
+    // File rows
+    if (app.detail_open_files) |files| {
+        for (files) |file| {
+            if (!measure_only and ln >= vis_start and ln < vis_end) {
+                const y = rect.y + @as(u16, @intCast(ln - vis_start));
+
+                // FD number
+                var fd_buf: [5]u8 = undefined;
+                const fd_str = std.fmt.bufPrint(&fd_buf, "{d:>3}", .{file.fd}) catch "???";
+                buf.setString(rx, y, fd_str, val);
+
+                // Type with color
+                const type_str = switch (file.fd_type) {
+                    .file => "file",
+                    .socket_tcp => "tcp",
+                    .socket_udp => "udp",
+                    .socket_unix => "unix",
+                    .pipe => "pipe",
+                    .kqueue => "kqueue",
+                    .other => "other",
+                };
+                const type_color: _Color = switch (file.fd_type) {
+                    .file => .white,
+                    .socket_tcp => .green,
+                    .socket_udp => .yellow,
+                    .socket_unix => .cyan,
+                    .pipe => .magenta,
+                    .kqueue => .blue,
+                    .other => .gray,
+                };
+                buf.setString(rx + 5, y, type_str, _Style{ .fg = type_color });
+
+                // Path or address
+                const path_x = rx + 14;
+                const path_max: usize = if (max_w > 14) max_w - 14 else 0;
+
+                if (file.fd_type == .socket_tcp or file.fd_type == .socket_udp) {
+                    var addr_buf: [80]u8 = undefined;
+                    const addr_str = std.fmt.bufPrint(&addr_buf, "{s} -> {s}", .{
+                        if (file.local_addr.len > 0) file.local_addr else "?",
+                        if (file.remote_addr.len > 0) file.remote_addr else "?",
+                    }) catch "???";
+                    const show_len = @min(addr_str.len, path_max);
+                    buf.setString(path_x, y, addr_str[0..show_len], _Style{ .fg = .light_cyan });
+                } else if (file.path.len > 0) {
+                    const show_len = @min(file.path.len, path_max);
+                    buf.setString(path_x, y, file.path[0..show_len], _Style{ .fg = .light_cyan });
+                }
+            }
+            ln += 1;
+        }
+    } else {
+        if (!measure_only and ln >= vis_start and ln < vis_end) {
+            const y = rect.y + @as(u16, @intCast(ln - vis_start));
+            buf.setString(rx + 2, y, "(unable to read file descriptors)", lbl);
+        }
+        ln += 1;
+    }
+
+    return .{ .total_lines = ln, .self_line = self_ln };
+}
+
+fn renderDetailThreads(buf: *tui.render.Buffer, rect: layout.Rect, threads: ?[]const model.ThreadInfo, scroll: usize, focused: bool) usize {
+    const header_style = _Style{ .fg = .cyan, .modifier = _Modifier{ .bold = true } };
+    const val_style = _Style{ .fg = if (focused) .white else .gray };
+    const dim_style = _Style{ .fg = .gray };
+
+    if (threads == null or threads.?.len == 0) {
+        buf.setString(rect.x, rect.y, "No thread data available", dim_style);
+        buf.setString(rect.x, rect.y + 1, "(may require elevated privileges)", dim_style);
+        return 2;
+    }
+
+    const thread_list = threads.?;
+    var ln: usize = 0;
+    const vis_start = scroll;
+    const vis_end = scroll + @as(usize, @intCast(rect.height));
+
+    // Header
+    if (ln >= vis_start and ln < vis_end) {
+        const y = rect.y + @as(u16, @intCast(ln - vis_start));
+        buf.setString(rect.x, y, "TID", header_style);
+        buf.setString(rect.x + 12, y, "CPU%", header_style);
+        buf.setString(rect.x + 20, y, "State", header_style);
+        buf.setString(rect.x + 32, y, "User Time", header_style);
+        buf.setString(rect.x + 44, y, "Sys Time", header_style);
+    }
+    ln += 1;
+
+    // Thread rows
+    for (thread_list) |thread| {
+        if (ln >= vis_start and ln < vis_end) {
+            const y = rect.y + @as(u16, @intCast(ln - vis_start));
+
+            // TID
+            var tid_buf: [12]u8 = undefined;
+            const tid_str = std.fmt.bufPrint(&tid_buf, "0x{x:0>8}", .{thread.tid}) catch "???";
+            buf.setString(rect.x, y, tid_str, val_style);
+
+            // CPU%
+            var cpu_buf: [8]u8 = undefined;
+            const cpu_str = std.fmt.bufPrint(&cpu_buf, "{d:>5.1}%", .{thread.cpu_percent}) catch "???";
+            buf.setString(rect.x + 12, y, cpu_str, _Style{ .fg = cpuColor(thread.cpu_percent) });
+
+            // State
+            const state_str = switch (thread.state) {
+                .running => "Running",
+                .waiting => "Waiting",
+                .stopped => "Stopped",
+                .halted => "Halted",
+                .unknown => "Unknown",
+            };
+            const state_color: _Color = switch (thread.state) {
+                .running => .green,
+                .waiting => .yellow,
+                .stopped => .red,
+                .halted => .red,
+                .unknown => .gray,
+            };
+            buf.setString(rect.x + 20, y, state_str, _Style{ .fg = state_color });
+
+            // User time
+            var user_buf: [12]u8 = undefined;
+            const user_sec = @as(f64, @floatFromInt(thread.user_time_us)) / 1_000_000.0;
+            const user_str = std.fmt.bufPrint(&user_buf, "{d:>7.2}s", .{user_sec}) catch "???";
+            buf.setString(rect.x + 32, y, user_str, dim_style);
+
+            // System time
+            var sys_buf: [12]u8 = undefined;
+            const sys_sec = @as(f64, @floatFromInt(thread.system_time_us)) / 1_000_000.0;
+            const sys_str = std.fmt.bufPrint(&sys_buf, "{d:>7.2}s", .{sys_sec}) catch "???";
+            buf.setString(rect.x + 44, y, sys_str, dim_style);
+        }
+        ln += 1;
+    }
+
+    return ln;
+}
+
+fn renderDetailOpenFiles(buf: *tui.render.Buffer, rect: layout.Rect, files: ?[]const model.OpenFile, scroll: usize, focused: bool) usize {
+    const header_style = _Style{ .fg = .cyan, .modifier = _Modifier{ .bold = true } };
+    const val_style = _Style{ .fg = if (focused) .white else .gray };
+    const dim_style = _Style{ .fg = .gray };
+    const path_style = _Style{ .fg = .light_cyan };
+
+    if (files == null or files.?.len == 0) {
+        buf.setString(rect.x, rect.y, "No open file data available", dim_style);
+        buf.setString(rect.x, rect.y + 1, "(may require elevated privileges)", dim_style);
+        return 2;
+    }
+
+    const file_list = files.?;
+    var ln: usize = 0;
+    const vis_start = scroll;
+    const vis_end = scroll + @as(usize, @intCast(rect.height));
+    const max_w: usize = @intCast(rect.width);
+
+    // Header
+    if (ln >= vis_start and ln < vis_end) {
+        const y = rect.y + @as(u16, @intCast(ln - vis_start));
+        buf.setString(rect.x, y, "FD", header_style);
+        buf.setString(rect.x + 5, y, "Type", header_style);
+        buf.setString(rect.x + 16, y, "Path / Address", header_style);
+    }
+    ln += 1;
+
+    // File rows
+    for (file_list) |file| {
+        if (ln >= vis_start and ln < vis_end) {
+            const y = rect.y + @as(u16, @intCast(ln - vis_start));
+
+            // FD number
+            var fd_buf: [5]u8 = undefined;
+            const fd_str = std.fmt.bufPrint(&fd_buf, "{d:>3}", .{file.fd}) catch "???";
+            buf.setString(rect.x, y, fd_str, val_style);
+
+            // Type
+            const type_str = switch (file.fd_type) {
+                .file => "file",
+                .socket_tcp => "tcp",
+                .socket_udp => "udp",
+                .socket_unix => "unix",
+                .pipe => "pipe",
+                .kqueue => "kqueue",
+                .other => "other",
+            };
+            const type_color: _Color = switch (file.fd_type) {
+                .file => .white,
+                .socket_tcp => .green,
+                .socket_udp => .yellow,
+                .socket_unix => .cyan,
+                .pipe => .magenta,
+                .kqueue => .blue,
+                .other => .gray,
+            };
+            buf.setString(rect.x + 5, y, type_str, _Style{ .fg = type_color });
+
+            // Path or address
+            const path_x = rect.x + 16;
+            const path_max: usize = if (max_w > 16) max_w - 16 else 0;
+
+            if (file.fd_type == .socket_tcp or file.fd_type == .socket_udp) {
+                // Show local -> remote for sockets
+                var addr_buf: [80]u8 = undefined;
+                const addr_str = std.fmt.bufPrint(&addr_buf, "{s} -> {s}", .{
+                    if (file.local_addr.len > 0) file.local_addr else "?",
+                    if (file.remote_addr.len > 0) file.remote_addr else "?",
+                }) catch "???";
+                const show_len = @min(addr_str.len, path_max);
+                buf.setString(path_x, y, addr_str[0..show_len], path_style);
+            } else {
+                // Show path
+                const show_len = @min(file.path.len, path_max);
+                if (show_len > 0) {
+                    buf.setString(path_x, y, file.path[0..show_len], path_style);
+                }
+            }
+        }
+        ln += 1;
+    }
+
+    return ln;
 }
 
 fn renderToast(buf: *tui.render.Buffer, toast: *const state.Toast, area: tui.render.Rect) void {

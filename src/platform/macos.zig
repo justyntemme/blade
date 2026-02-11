@@ -839,3 +839,207 @@ pub fn collectProcessDetail(pid: pid_t, arena: std.mem.Allocator) PlatformError!
         .environ = environ,
     };
 }
+
+pub fn collectThreads(pid: std.posix.pid_t, arena: std.mem.Allocator) PlatformError![]model.ThreadInfo {
+    // Get task port for the process
+    var task_port: c.mach_port_t = 0;
+    const kr = c.task_for_pid(c.mach_task_self(), pid, &task_port);
+    if (kr != c.KERN_SUCCESS) {
+        // Permission denied or process not found - return empty list
+        return arena.alloc(model.ThreadInfo, 0) catch return error.OutOfMemory;
+    }
+    defer _ = c.mach_port_deallocate(c.mach_task_self(), task_port);
+
+    // Get thread list
+    var thread_list: c.thread_act_array_t = undefined;
+    var thread_count: c.mach_msg_type_number_t = 0;
+    const threads_kr = c.task_threads(task_port, &thread_list, &thread_count);
+    if (threads_kr != c.KERN_SUCCESS) {
+        return arena.alloc(model.ThreadInfo, 0) catch return error.OutOfMemory;
+    }
+    defer {
+        // Deallocate thread ports
+        for (thread_list[0..thread_count]) |thread| {
+            _ = c.mach_port_deallocate(c.mach_task_self(), thread);
+        }
+        // Deallocate the thread list memory
+        _ = c.vm_deallocate(c.mach_task_self(), @intFromPtr(thread_list), thread_count * @sizeOf(c.thread_act_t));
+    }
+
+    var threads = arena.alloc(model.ThreadInfo, thread_count) catch return error.OutOfMemory;
+    var valid_count: usize = 0;
+
+    for (thread_list[0..thread_count]) |thread| {
+        var basic_info: c.thread_basic_info_data_t = undefined;
+        var info_count: c.mach_msg_type_number_t = c.THREAD_BASIC_INFO_COUNT;
+
+        const info_kr = c.thread_info(
+            thread,
+            c.THREAD_BASIC_INFO,
+            @ptrCast(&basic_info),
+            &info_count,
+        );
+
+        if (info_kr == c.KERN_SUCCESS) {
+            const state: model.ThreadState = switch (basic_info.run_state) {
+                c.TH_STATE_RUNNING => .running,
+                c.TH_STATE_STOPPED => .stopped,
+                c.TH_STATE_WAITING => .waiting,
+                c.TH_STATE_HALTED => .halted,
+                else => .unknown,
+            };
+
+            // Calculate CPU percentage from user+system time
+            const user_time_us: u64 = @as(u64, @intCast(basic_info.user_time.seconds)) * 1_000_000 +
+                @as(u64, @intCast(basic_info.user_time.microseconds));
+            const system_time_us: u64 = @as(u64, @intCast(basic_info.system_time.seconds)) * 1_000_000 +
+                @as(u64, @intCast(basic_info.system_time.microseconds));
+
+            // cpu_usage is in TH_USAGE_SCALE (1000 = 100%)
+            const cpu_percent: f32 = @as(f32, @floatFromInt(basic_info.cpu_usage)) / 10.0;
+
+            threads[valid_count] = .{
+                .tid = @intCast(thread),
+                .cpu_percent = cpu_percent,
+                .user_time_us = user_time_us,
+                .system_time_us = system_time_us,
+                .state = state,
+                .name = "", // Thread names require additional API calls
+            };
+            valid_count += 1;
+        }
+    }
+
+    return threads[0..valid_count];
+}
+
+pub fn collectOpenFiles(pid: std.posix.pid_t, arena: std.mem.Allocator) PlatformError![]model.OpenFile {
+    // Get the number of file descriptors
+    const buf_size = c.proc_pidinfo(pid, c.PROC_PIDLISTFDS, 0, null, 0);
+    if (buf_size <= 0) {
+        return arena.alloc(model.OpenFile, 0) catch return error.OutOfMemory;
+    }
+
+    const fd_count: usize = @intCast(@divExact(buf_size, @sizeOf(c.proc_fdinfo)));
+    var fd_buffer = arena.alloc(c.proc_fdinfo, fd_count) catch return error.OutOfMemory;
+
+    const actual_size = c.proc_pidinfo(
+        pid,
+        c.PROC_PIDLISTFDS,
+        0,
+        fd_buffer.ptr,
+        buf_size,
+    );
+
+    if (actual_size <= 0) {
+        return arena.alloc(model.OpenFile, 0) catch return error.OutOfMemory;
+    }
+
+    const actual_count: usize = @intCast(@divExact(actual_size, @sizeOf(c.proc_fdinfo)));
+    var files = arena.alloc(model.OpenFile, actual_count) catch return error.OutOfMemory;
+    var valid_count: usize = 0;
+
+    for (fd_buffer[0..actual_count]) |fd_info| {
+        var path: []const u8 = "";
+        var fd_type: model.FdType = .other;
+        var local_addr: []const u8 = "";
+        var remote_addr: []const u8 = "";
+
+        switch (fd_info.proc_fdtype) {
+            c.PROX_FDTYPE_VNODE => {
+                // Regular file
+                var vnode_info: c.vnode_fdinfowithpath = undefined;
+                const vn_size = c.proc_pidfdinfo(
+                    pid,
+                    fd_info.proc_fd,
+                    c.PROC_PIDFDVNODEPATHINFO,
+                    &vnode_info,
+                    @sizeOf(c.vnode_fdinfowithpath),
+                );
+                if (vn_size > 0) {
+                    const path_slice = std.mem.sliceTo(&vnode_info.pvip.vip_path, 0);
+                    path = arena.dupe(u8, path_slice) catch "";
+                    fd_type = .file;
+                }
+            },
+            c.PROX_FDTYPE_SOCKET => {
+                // Socket
+                var socket_info: c.socket_fdinfo = undefined;
+                const sock_size = c.proc_pidfdinfo(
+                    pid,
+                    fd_info.proc_fd,
+                    c.PROC_PIDFDSOCKETINFO,
+                    &socket_info,
+                    @sizeOf(c.socket_fdinfo),
+                );
+                if (sock_size > 0) {
+                    const family = socket_info.psi.soi_family;
+                    const sock_type = socket_info.psi.soi_type;
+
+                    if (family == c.AF_INET or family == c.AF_INET6) {
+                        if (sock_type == c.SOCK_STREAM) {
+                            fd_type = .socket_tcp;
+                        } else if (sock_type == c.SOCK_DGRAM) {
+                            fd_type = .socket_udp;
+                        }
+
+                        // Format addresses
+                        if (family == c.AF_INET) {
+                            const inp = &socket_info.psi.soi_proto.pri_tcp.tcpsi_ini;
+                            var local_buf: [64]u8 = undefined;
+                            var remote_buf: [64]u8 = undefined;
+
+                            const local_str = std.fmt.bufPrint(&local_buf, "{d}.{d}.{d}.{d}:{d}", .{
+                                (inp.insi_laddr.ina_46.i46a_addr4.s_addr >> 0) & 0xFF,
+                                (inp.insi_laddr.ina_46.i46a_addr4.s_addr >> 8) & 0xFF,
+                                (inp.insi_laddr.ina_46.i46a_addr4.s_addr >> 16) & 0xFF,
+                                (inp.insi_laddr.ina_46.i46a_addr4.s_addr >> 24) & 0xFF,
+                                @byteSwap(inp.insi_lport),
+                            }) catch "";
+                            local_addr = arena.dupe(u8, local_str) catch "";
+
+                            const remote_str = std.fmt.bufPrint(&remote_buf, "{d}.{d}.{d}.{d}:{d}", .{
+                                (inp.insi_faddr.ina_46.i46a_addr4.s_addr >> 0) & 0xFF,
+                                (inp.insi_faddr.ina_46.i46a_addr4.s_addr >> 8) & 0xFF,
+                                (inp.insi_faddr.ina_46.i46a_addr4.s_addr >> 16) & 0xFF,
+                                (inp.insi_faddr.ina_46.i46a_addr4.s_addr >> 24) & 0xFF,
+                                @byteSwap(inp.insi_fport),
+                            }) catch "";
+                            remote_addr = arena.dupe(u8, remote_str) catch "";
+                        }
+                    } else if (family == c.AF_UNIX) {
+                        fd_type = .socket_unix;
+                        // Unix socket path
+                        const unp = &socket_info.psi.soi_proto.pri_un;
+                        const path_slice = std.mem.sliceTo(&unp.unsi_addr.ua_sun.sun_path, 0);
+                        if (path_slice.len > 0) {
+                            path = arena.dupe(u8, path_slice) catch "";
+                        }
+                    }
+                }
+            },
+            c.PROX_FDTYPE_PIPE => {
+                fd_type = .pipe;
+                path = arena.dupe(u8, "(pipe)") catch "";
+            },
+            c.PROX_FDTYPE_KQUEUE => {
+                fd_type = .kqueue;
+                path = arena.dupe(u8, "(kqueue)") catch "";
+            },
+            else => {
+                fd_type = .other;
+            },
+        }
+
+        files[valid_count] = .{
+            .fd = fd_info.proc_fd,
+            .fd_type = fd_type,
+            .path = path,
+            .local_addr = local_addr,
+            .remote_addr = remote_addr,
+        };
+        valid_count += 1;
+    }
+
+    return files[0..valid_count];
+}

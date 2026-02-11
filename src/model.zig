@@ -95,6 +95,42 @@ pub const ProcessDetail = struct {
     environ: []const []const u8,
 };
 
+pub const ThreadState = enum {
+    running,
+    waiting,
+    stopped,
+    halted,
+    unknown,
+};
+
+pub const ThreadInfo = struct {
+    tid: u64,
+    cpu_percent: f32,
+    user_time_us: u64,
+    system_time_us: u64,
+    state: ThreadState,
+    name: []const u8,
+};
+
+pub const FdType = enum {
+    file,
+    socket_tcp,
+    socket_udp,
+    socket_unix,
+    pipe,
+    kqueue,
+    other,
+};
+
+pub const OpenFile = struct {
+    fd: i32,
+    fd_type: FdType,
+    path: []const u8,
+    // For sockets
+    local_addr: []const u8,
+    remote_addr: []const u8,
+};
+
 pub const RenderRow = struct {
     pid: pid_t,
     cpu_percent: f32,
