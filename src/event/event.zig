@@ -168,7 +168,8 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
                         app.showToastFmt("Suspend failed: {}", .{err}, .err);
                         return;
                     };
-                    app.showToast("Process suspended (SIGSTOP)", .info);
+                    // Refresh detail to show updated state
+                    app.refreshDetail();
                 }
             }
         },
@@ -179,7 +180,8 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
                         app.showToastFmt("Resume failed: {}", .{err}, .err);
                         return;
                     };
-                    app.showToast("Process resumed (SIGCONT)", .info);
+                    // Refresh detail to show updated state
+                    app.refreshDetail();
                 }
             }
         },

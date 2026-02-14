@@ -1556,6 +1556,16 @@ pub const AppState = struct {
         self.system.mounts = result.snapshot.mounts;
     }
 
+    /// Refresh the detail view data (e.g., after sending a signal)
+    pub fn refreshDetail(self: *AppState) void {
+        const pid = self.detail_pid orelse return;
+        // Spawn a new collection worker to get fresh data
+        const thread = std.Thread.spawn(.{}, collectDetailWorker, .{ self.detail_queue, pid, self.gpa }) catch {
+            return;
+        };
+        thread.detach();
+    }
+
     pub fn closeDetail(self: *AppState) void {
         if (self.detail_arena) |*arena| {
             arena.deinit();
