@@ -1453,9 +1453,9 @@ pub fn collectTcpConnections(arena: std.mem.Allocator) PlatformError![]model.Tcp
             pid = 0;
             tcp_state = 0;
 
-            // Ports at offset 16/18 (network byte order)
-            foreign_port = std.mem.bigToNative(u16, std.mem.readInt(u16, buf[offset + 16 ..][0..2], .big));
-            local_port = std.mem.bigToNative(u16, std.mem.readInt(u16, buf[offset + 18 ..][0..2], .big));
+            // Ports at offset 16/18 (network byte order - readInt handles conversion)
+            foreign_port = std.mem.readInt(u16, buf[offset + 16 ..][0..2], .big);
+            local_port = std.mem.readInt(u16, buf[offset + 18 ..][0..2], .big);
 
             // Addresses: foreign at offset 48, local at offset 64 (16 bytes each)
             @memcpy(&foreign_addr, buf[offset + 48 ..][0..16]);
