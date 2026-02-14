@@ -383,6 +383,38 @@ pub const NetworkProtocolFilter = enum {
 };
 pub const DetailViewMode = enum { info, network };
 
+/// Preserve log mode for network connection history
+pub const PreserveLog = enum {
+    no, // Only show active connections (default)
+    yes, // Keep all connections forever
+    fade, // Keep connections for 30s after close, then remove
+
+    pub fn next(self: PreserveLog) PreserveLog {
+        return switch (self) {
+            .no => .yes,
+            .yes => .fade,
+            .fade => .no,
+        };
+    }
+
+    pub fn label(self: PreserveLog) []const u8 {
+        return switch (self) {
+            .no => "no",
+            .yes => "yes",
+            .fade => "fade",
+        };
+    }
+};
+
+/// A connection that may be active or historical (closed)
+pub const HistoricalConnection = struct {
+    conn: model.TcpConnection,
+    is_active: bool = true,
+    closed_at_ns: i128 = 0, // Timestamp when connection was marked closed
+
+    pub const FADE_DURATION_NS: i128 = 30 * std.time.ns_per_s; // 30 seconds
+};
+
 pub const ConfirmAction = enum {
     kill_term,
     kill_force,
@@ -466,6 +498,17 @@ pub const AppState = struct {
     pinned_pids: std.AutoHashMap(model.ProcIdentity, usize) = undefined,
     pinned_pids_initialized: bool = false,
 
+    // Visible process tracking for preloading XPC/TCP data
+    visible_pids: [64]model.pid_t = [_]model.pid_t{0} ** 64,
+    visible_pid_count: u8 = 0,
+    last_visible_change_ns: i128 = 0,
+
+    // Network connection history (preserve log feature)
+    preserve_log: PreserveLog = .no,
+    connection_history: [MAX_CONNECTION_HISTORY]HistoricalConnection = undefined,
+    connection_history_count: u16 = 0,
+
+    pub const MAX_CONNECTION_HISTORY = 512;
     pub const DetailFocus = enum { left, right };
 
     pub fn init(gpa: std.mem.Allocator) AppState {
@@ -506,6 +549,127 @@ pub const AppState = struct {
 
     pub fn getSelectedCount(self: *const AppState) usize {
         return self.pinned_pids.count();
+    }
+
+    /// Update the list of visible PIDs (processes currently on screen).
+    /// Called from render loop to track which processes are visible for preloading.
+    pub fn updateVisiblePids(self: *AppState, rows: []const model.RenderRow, first: usize, last: usize) void {
+        var count: u8 = 0;
+        var i = first;
+        while (i <= last and i < rows.len and count < 64) : (i += 1) {
+            self.visible_pids[count] = rows[i].pid;
+            count += 1;
+        }
+        // Detect if visible set changed to update timestamp
+        if (count != self.visible_pid_count or !std.mem.eql(model.pid_t, self.visible_pids[0..count], self.visible_pids[0..self.visible_pid_count])) {
+            self.last_visible_change_ns = std.time.nanoTimestamp();
+        }
+        self.visible_pid_count = count;
+    }
+
+    /// Toggle preserve log mode (cycles: no -> yes -> fade -> no)
+    pub fn togglePreserveLog(self: *AppState) void {
+        self.preserve_log = self.preserve_log.next();
+        // Clear history when switching to 'no' mode
+        if (self.preserve_log == .no) {
+            self.connection_history_count = 0;
+        }
+    }
+
+    /// Update connection history with current TCP connections for a specific PID.
+    /// Called when TCP data is received and preserve_log is enabled.
+    pub fn updateConnectionHistory(self: *AppState, pid: model.pid_t, coalition_id: u64) void {
+        if (self.preserve_log == .no) return;
+
+        const now_ns = std.time.nanoTimestamp();
+        const all_tcp = self.system.tcp_connections[0..self.system.tcp_connection_count];
+
+        // First pass: mark existing history entries as active or closed
+        for (self.connection_history[0..self.connection_history_count]) |*hist| {
+            if (hist.conn.pid != pid and (coalition_id == 0 or hist.conn.coalition_id != coalition_id)) continue;
+
+            // Check if this connection still exists in current data
+            var still_active = false;
+            for (all_tcp) |conn| {
+                if (connectionsMatch(hist.conn, conn)) {
+                    still_active = true;
+                    break;
+                }
+            }
+
+            if (still_active) {
+                hist.is_active = true;
+                hist.closed_at_ns = 0;
+            } else if (hist.is_active) {
+                // Just closed - mark with timestamp
+                hist.is_active = false;
+                hist.closed_at_ns = now_ns;
+            }
+        }
+
+        // Second pass: add new connections not in history
+        for (all_tcp) |conn| {
+            if (conn.pid != pid and (coalition_id == 0 or conn.coalition_id != coalition_id)) continue;
+
+            // Check if already in history
+            var found = false;
+            for (self.connection_history[0..self.connection_history_count]) |hist| {
+                if (connectionsMatch(hist.conn, conn)) {
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found and self.connection_history_count < MAX_CONNECTION_HISTORY) {
+                self.connection_history[self.connection_history_count] = .{
+                    .conn = conn,
+                    .is_active = true,
+                    .closed_at_ns = 0,
+                };
+                self.connection_history_count += 1;
+            }
+        }
+
+        // In fade mode, remove connections that have been closed for too long
+        if (self.preserve_log == .fade) {
+            var write_idx: u16 = 0;
+            for (self.connection_history[0..self.connection_history_count]) |hist| {
+                const dominated_by_pid = hist.conn.pid == pid or (coalition_id != 0 and hist.conn.coalition_id == coalition_id);
+                if (!dominated_by_pid) {
+                    // Keep connections for other PIDs
+                    self.connection_history[write_idx] = hist;
+                    write_idx += 1;
+                } else if (hist.is_active or (now_ns - hist.closed_at_ns) < HistoricalConnection.FADE_DURATION_NS) {
+                    // Keep active or recently closed
+                    self.connection_history[write_idx] = hist;
+                    write_idx += 1;
+                }
+                // else: expired, don't copy (effectively remove)
+            }
+            self.connection_history_count = write_idx;
+        }
+    }
+
+    /// Check if two connections match (same endpoints)
+    fn connectionsMatch(a: model.TcpConnection, b: model.TcpConnection) bool {
+        return a.local_port == b.local_port and
+            a.remote_port == b.remote_port and
+            std.mem.eql(u8, a.local_addr[0..a.local_addr_len], b.local_addr[0..b.local_addr_len]) and
+            std.mem.eql(u8, a.remote_addr[0..a.remote_addr_len], b.remote_addr[0..b.remote_addr_len]);
+    }
+
+    /// Get connections for display, including historical ones based on preserve_log mode.
+    /// Returns the full history slice - caller filters by pid/coalition_id.
+    pub fn getDisplayConnections(self: *const AppState) []const HistoricalConnection {
+        if (self.preserve_log == .no) {
+            return &[_]HistoricalConnection{};
+        }
+        return self.connection_history[0..self.connection_history_count];
+    }
+
+    /// Clear connection history (e.g., when closing detail view)
+    pub fn clearConnectionHistory(self: *AppState) void {
+        self.connection_history_count = 0;
     }
 
     /// Ensure pinned processes are visible and at their stored positions.
@@ -769,6 +933,11 @@ pub const AppState = struct {
         };
         self.reorderPinnedRows();
         self.restoreAndClamp(prev);
+
+        // Trigger TCP refresh on search (at 1 character since collection is cheap ~5-10ms)
+        if (self.search_len >= 1) {
+            self.triggerTcpCollection();
+        }
     }
 
     pub fn toggleExpandAll(self: *AppState) void {
@@ -852,13 +1021,19 @@ pub const AppState = struct {
         }
 
         // TCP connections via sysctl - collect continuously for responsive detail view
-        // Rate: 1 sec in detail mode, 5 sec in list mode (pre-fetch for quick detail open)
+        // Rate: 1 sec in detail mode, 2 sec when actively browsing, 5 sec otherwise
         if (!self.tcp_pending) {
             const tcp_elapsed = now_ns - self.last_tcp_collect_ns;
+            const is_actively_browsing = (now_ns - self.last_visible_change_ns) < 2 * std.time.ns_per_s;
+            const has_search = self.search_len >= 1; // Trigger at 1 char (TCP collection is cheap)
+
             const rate_ns: i128 = if (self.mode == .detail or needs_nettop)
                 1 * std.time.ns_per_s // Fast refresh in detail mode
+            else if (is_actively_browsing or has_search)
+                2 * std.time.ns_per_s // Medium refresh when browsing/searching
             else
                 5 * std.time.ns_per_s; // Background pre-fetch in list mode
+
             if (self.last_tcp_collect_ns == 0 or tcp_elapsed >= rate_ns) {
                 self.tcp_pending = true;
                 const tcp_thread = std.Thread.spawn(.{}, collectTcpConnectionsWorker, .{ self.tcp_connections_queue, self.gpa }) catch {

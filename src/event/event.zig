@@ -181,6 +181,9 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
         .toggle_protocol_filter => {
             app.network_protocol_filter = app.network_protocol_filter.next();
         },
+        .toggle_preserve_log => {
+            app.togglePreserveLog();
+        },
         .confirm_dialog_yes => {
             if (app.confirm_dialog) |dialog| {
                 const force = dialog.action == .kill_force;

@@ -504,6 +504,12 @@ fn renderProcessPane(
 
         y += 1;
     }
+
+    // Track visible processes for preloading XPC/TCP data
+    const first_visible = app.scroll_offset;
+    const last_visible = if (rows.len > 0) @min(app.scroll_offset + visible_rows, rows.len) - 1 else 0;
+    app.updateVisiblePids(rows, first_visible, last_visible);
+
     if (app.mode == .search_edit) {
         renderSearchInput(buf, footer_rect, app);
     } else {
@@ -2156,9 +2162,11 @@ fn renderNetworkByProcess(buf: *tui.render.Buffer, rect: layout.Rect, sys: *cons
     }
 
     if (active_count == 0) {
-        const filter_label = filter.label();
         var msg_buf: [64]u8 = undefined;
-        const msg = std.fmt.bufPrint(&msg_buf, "No active {s} connections", .{filter_label}) catch "No active connections";
+        const msg = if (filter == .all)
+            "No active network connections"
+        else
+            std.fmt.bufPrint(&msg_buf, "No active {s} connections", .{filter.label()}) catch "No active connections";
         buf.setString(rect.x, rect.y, msg, dim_style);
         return;
     }
@@ -3199,7 +3207,35 @@ fn renderStatusBar(buf: *tui.render.Buffer, rect: layout.Rect, app: *const state
         x += @intCast(slice.len);
     } else |_| {}
 
-    // Segment 4 (search_view only): search query + esc hint
+    // Segment 4: selection indicator (when items are pinned/selected)
+    const selected_count = app.getSelectedCount();
+    if (selected_count > 0) {
+        buf.setString(x, rect.y, " | ", _Style{ .fg = .gray, .modifier = _Modifier{ .dim = true } });
+        x += 3;
+
+        // Count with highlight
+        var sel_buf: [16]u8 = undefined;
+        if (std.fmt.bufPrint(&sel_buf, "{d}", .{selected_count})) |slice| {
+            buf.setString(x, rect.y, slice, _Style{ .fg = .light_magenta, .modifier = _Modifier{ .bold = true } });
+            x += @intCast(slice.len);
+        } else |_| {}
+        buf.setString(x, rect.y, " selected ", _Style{ .fg = .light_magenta });
+        x += 10;
+
+        // Clear hint
+        buf.setString(x, rect.y, "[", _Style{ .fg = .gray, .modifier = _Modifier{ .dim = true } });
+        x += 1;
+        buf.setString(x, rect.y, "c", _Style{ .fg = .light_cyan });
+        x += 1;
+        buf.setString(x, rect.y, "/", _Style{ .fg = .gray, .modifier = _Modifier{ .dim = true } });
+        x += 1;
+        buf.setString(x, rect.y, "esc", _Style{ .fg = .light_cyan });
+        x += 3;
+        buf.setString(x, rect.y, ":clear]", _Style{ .fg = .gray, .modifier = _Modifier{ .dim = true } });
+        x += 7;
+    }
+
+    // Segment 5 (search_view only): search query + esc hint
     if (app.mode == .search_view) {
         const query = app.searchSlice();
         if (query.len > 0) {
@@ -3502,6 +3538,11 @@ fn renderDetailView(buf: *tui.render.Buffer, area: tui.render.Rect, app: *state.
     buf.setString(footer_rect.x, footer_rect.y, footer_hint, _Style{ .fg = .gray });
 }
 
+/// Format an address:port string from TcpConnection address data
+fn formatConnAddr(addr: []const u8, port: u16, out: *[64]u8) []const u8 {
+    return std.fmt.bufPrint(out, "{s}:{d}", .{ addr, port }) catch "*:0";
+}
+
 /// Helper to render a single TCP connection row
 fn renderTcpConnection(
     buf: *tui.render.Buffer,
@@ -3576,7 +3617,15 @@ fn renderDetailNetworkView(buf: *tui.render.Buffer, rect: layout.Rect, app: *sta
     const header_style = _Style{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } };
     const dim_style = _Style{ .fg = .gray };
 
+    // Show loading indicator only on first load (no data yet)
+    // Once we have data, keep showing it during background refreshes (no jitter)
+    if (app.tcp_pending and app.last_tcp_collect_ns == 0) {
+        buf.setString(rect.x, rect.y, "Loading network connections...", _Style{ .fg = .yellow });
+        return;
+    }
+
     // Get the detail process's coalition ID for grouping with XPC services
+    // Also update connection history for preserve log feature
     const detail_pid = app.detail_pid orelse 0;
     const detail_coalition_id = blk: {
         if (app.procs.pid_to_index.get(detail_pid)) |idx| {
@@ -3584,6 +3633,9 @@ fn renderDetailNetworkView(buf: *tui.render.Buffer, rect: layout.Rect, app: *sta
         }
         break :blk @as(u64, 0);
     };
+
+    // Update connection history (for preserve log feature)
+    app.updateConnectionHistory(detail_pid, detail_coalition_id);
 
     // Count TCP connections from sysctl data
     const all_tcp = app.system.tcp_connections[0..app.system.tcp_connection_count];
@@ -3642,7 +3694,10 @@ fn renderDetailNetworkView(buf: *tui.render.Buffer, rect: layout.Rect, app: *sta
 
     if (filtered_count == 0) {
         var msg_buf: [64]u8 = undefined;
-        const msg = std.fmt.bufPrint(&msg_buf, "No {s} connections", .{filter.label()}) catch "No connections";
+        const msg = if (filter == .all)
+            "No network connections"
+        else
+            std.fmt.bufPrint(&msg_buf, "No {s} connections", .{filter.label()}) catch "No connections";
         buf.setString(rect.x, rect.y, msg, dim_style);
         buf.setString(rect.x, rect.y + 1, "(process has other file descriptors but no matching sockets)", dim_style);
         if (rect.height > 3) {
@@ -3667,9 +3722,10 @@ fn renderDetailNetworkView(buf: *tui.render.Buffer, rect: layout.Rect, app: *sta
         const source_label = if (use_sysctl_tcp) "(kernel)" else "(+ descendants)";
         const source_style = if (use_sysctl_tcp) _Style{ .fg = .cyan } else _Style{ .fg = .light_magenta };
         buf.setString(rect.x + 20, y, source_label, source_style);
-        // Show counts and filter
-        var count_buf: [48]u8 = undefined;
-        const count_str = std.fmt.bufPrint(&count_buf, " [{s}] {d} TCP, {d} UDP, {d} Unix", .{ filter.label(), tcp_count, udp_count, unix_count }) catch "";
+        // Show counts, filter, and preserve log mode
+        var count_buf: [64]u8 = undefined;
+        const preserve_label = app.preserve_log.label();
+        const count_str = std.fmt.bufPrint(&count_buf, " [{s}] {d} TCP, {d} UDP, {d} Unix  [p]reserve: {s}", .{ filter.label(), tcp_count, udp_count, unix_count, preserve_label }) catch "";
         buf.setString(rect.x + 36, y, count_str, dim_style);
     }
     ln += 1;
@@ -3866,6 +3922,83 @@ fn renderDetailNetworkView(buf: *tui.render.Buffer, rect: layout.Rect, app: *sta
                 }
             }
             ln += 1;
+        }
+    }
+
+    // Historical connections (preserve log feature)
+    if (app.preserve_log != .no) {
+        const history = app.getDisplayConnections();
+        var has_closed = false;
+
+        // Check if there are any closed connections for this pid/coalition
+        for (history) |hist| {
+            if (!hist.is_active) {
+                const dominated_by_pid = hist.conn.pid == detail_pid or
+                    (detail_coalition_id != 0 and hist.conn.coalition_id == detail_coalition_id);
+                if (dominated_by_pid) {
+                    has_closed = true;
+                    break;
+                }
+            }
+        }
+
+        if (has_closed) {
+            // Section header
+            if (ln >= vis_start and ln < vis_end) {
+                const y = rect.y + @as(u16, @intCast(ln - vis_start));
+                buf.setString(rect.x, y, "--- Closed Connections ---", _Style{ .fg = .gray, .modifier = _Modifier{ .dim = true } });
+            }
+            ln += 1;
+
+            // Render closed connections
+            const now_ns = std.time.nanoTimestamp();
+            for (history) |hist| {
+                if (hist.is_active) continue;
+                const dominated_by_pid = hist.conn.pid == detail_pid or
+                    (detail_coalition_id != 0 and hist.conn.coalition_id == detail_coalition_id);
+                if (!dominated_by_pid) continue;
+
+                if (ln >= vis_start and ln < vis_end) {
+                    const y = rect.y + @as(u16, @intCast(ln - vis_start));
+                    const closed_style = _Style{ .fg = .gray, .modifier = _Modifier{ .dim = true } };
+
+                    // Show "x" prefix to indicate closed
+                    buf.setString(rect.x, y, "x", _Style{ .fg = .red, .modifier = _Modifier{ .dim = true } });
+
+                    // Protocol
+                    buf.setString(rect.x + 2, y, "tcp", closed_style);
+
+                    // State (CLOSED)
+                    buf.setString(rect.x + 6, y, "CLOSED", closed_style);
+
+                    // Local address
+                    var local_buf: [64]u8 = undefined;
+                    const local_str = formatConnAddr(hist.conn.local_addr[0..hist.conn.local_addr_len], hist.conn.local_port, &local_buf);
+                    const local_max: usize = 22;
+                    const local_len = @min(local_str.len, local_max);
+                    buf.setString(rect.x + 18, y, local_str[0..local_len], closed_style);
+
+                    // Remote address
+                    var remote_buf: [64]u8 = undefined;
+                    const remote_str = formatConnAddr(hist.conn.remote_addr[0..hist.conn.remote_addr_len], hist.conn.remote_port, &remote_buf);
+                    const remote_max: usize = @min(max_w -| 42, 30);
+                    const remote_len = @min(remote_str.len, remote_max);
+                    buf.setString(rect.x + 42, y, remote_str[0..remote_len], closed_style);
+
+                    // Show time since closed (if in fade mode)
+                    if (app.preserve_log == .fade and hist.closed_at_ns > 0) {
+                        const age_ns = now_ns - hist.closed_at_ns;
+                        const age_s = @as(u32, @intCast(@divFloor(age_ns, std.time.ns_per_s)));
+                        var age_buf: [16]u8 = undefined;
+                        const age_str = std.fmt.bufPrint(&age_buf, " ({d}s)", .{age_s}) catch "";
+                        const age_x = rect.x + 42 + @as(u16, @intCast(remote_len));
+                        if (age_x + age_str.len < rect.x + rect.width) {
+                            buf.setString(age_x, y, age_str, _Style{ .fg = .yellow, .modifier = _Modifier{ .dim = true } });
+                        }
+                    }
+                }
+                ln += 1;
+            }
         }
     }
 

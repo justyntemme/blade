@@ -33,6 +33,7 @@ pub const Action = enum {
     toggle_mount_filter,
     toggle_network_mode,
     toggle_protocol_filter,
+    toggle_preserve_log,
     confirm_dialog_yes,
     confirm_dialog_no,
     toggle_select,

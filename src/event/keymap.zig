@@ -95,6 +95,7 @@ pub const keymap = [_]KeyBinding{
     .{ .key = .{ .char = 'h' }, .action = .focus_left, .modes = &.{.detail}, .description = "" },
     .{ .key = .{ .char = 'l' }, .action = .focus_right, .modes = &.{.detail}, .description = "" },
     .{ .key = .{ .char = 'v' }, .action = .toggle_detail_view, .modes = &.{.detail}, .description = "toggle info/network" },
+    .{ .key = .{ .char = 'p' }, .action = .toggle_preserve_log, .modes = &.{.detail}, .description = "preserve log mode" },
 
     // Confirm dialog mode
     .{ .key = .{ .char = 'y' }, .action = .confirm_dialog_yes, .modes = &.{.confirm_dialog}, .description = "" },
