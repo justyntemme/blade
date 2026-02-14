@@ -851,13 +851,15 @@ pub const AppState = struct {
             }
         }
 
-        // Lazy-load TCP connections via sysctl (for detail view network info)
-        // Rate-limited to every 2 seconds
-        const needs_tcp = self.mode == .detail or needs_nettop;
-        if (needs_tcp and !self.tcp_pending) {
+        // TCP connections via sysctl - collect continuously for responsive detail view
+        // Rate: 1 sec in detail mode, 5 sec in list mode (pre-fetch for quick detail open)
+        if (!self.tcp_pending) {
             const tcp_elapsed = now_ns - self.last_tcp_collect_ns;
-            const two_sec_ns: i128 = 2 * std.time.ns_per_s;
-            if (self.last_tcp_collect_ns == 0 or tcp_elapsed >= two_sec_ns) {
+            const rate_ns: i128 = if (self.mode == .detail or needs_nettop)
+                1 * std.time.ns_per_s // Fast refresh in detail mode
+            else
+                5 * std.time.ns_per_s; // Background pre-fetch in list mode
+            if (self.last_tcp_collect_ns == 0 or tcp_elapsed >= rate_ns) {
                 self.tcp_pending = true;
                 const tcp_thread = std.Thread.spawn(.{}, collectTcpConnectionsWorker, .{ self.tcp_connections_queue, self.gpa }) catch {
                     self.tcp_pending = false;
@@ -967,12 +969,26 @@ pub const AppState = struct {
         self.previous_mode = self.mode;
         self.mode = .detail;
 
+        // Immediately trigger TCP collection (don't wait for next batch)
+        self.triggerTcpCollection();
+
         const thread = std.Thread.spawn(.{}, collectDetailWorker, .{ self.detail_queue, pid, self.gpa }) catch {
             self.showToast("Detail collection failed", .err);
             self.mode = self.previous_mode;
             return;
         };
         thread.detach();
+    }
+
+    /// Trigger TCP connection collection if not already in progress
+    fn triggerTcpCollection(self: *AppState) void {
+        if (self.tcp_pending) return;
+        self.tcp_pending = true;
+        const tcp_thread = std.Thread.spawn(.{}, collectTcpConnectionsWorker, .{ self.tcp_connections_queue, self.gpa }) catch {
+            self.tcp_pending = false;
+            return;
+        };
+        tcp_thread.detach();
     }
 
     fn collectDetailWorker(queue: *channel.DetailQueue, pid: model.pid_t, gpa: std.mem.Allocator) void {
