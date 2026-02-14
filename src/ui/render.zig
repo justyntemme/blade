@@ -207,14 +207,35 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
     // Disk IO title (with Memory+Disks in overlay)
     drawTitle(buf, x0 + 2, y_hd1, "Disk IO");
     drawTitle(buf, x_vdB + 2, y_hd1, "Processes");
-    // Network title with IP address indicator
-    drawTitle(buf, x0 + 2, y_hd2, "Network");
-    if (app.system.ipv4_addr_len > 0) {
-        const ip_str = app.system.ipv4_addr[0..app.system.ipv4_addr_len];
-        const ip_x = x0 + 2 + @as(u16, @intCast("Network".len)) + 3;
-        buf.setChar(ip_x, y_hd2, BD_TR, border_style);
-        buf.setString(ip_x + 1, y_hd2, ip_str, _Style{ .fg = .gray });
-        buf.setChar(ip_x + 1 + @as(u16, @intCast(app.system.ipv4_addr_len)), y_hd2, BD_TL, border_style);
+    // Network title with keybinding indicators "[n]etwork" "[p]rotocol" and mode/IP
+    {
+        const title_x = x0 + 2;
+        buf.setChar(title_x, y_hd2, BD_TR, border_style);
+        buf.setString(title_x + 1, y_hd2, "[", _Style{ .fg = .gray });
+        buf.setString(title_x + 2, y_hd2, "n", _Style{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } });
+        buf.setString(title_x + 3, y_hd2, "]etwork", _Style{ .fg = .gray });
+        // Show current mode indicator
+        const mode_str: []const u8 = if (app.network_display_mode == .by_interface) "iface" else "proc";
+        buf.setString(title_x + 10, y_hd2, " ", _Style{});
+        buf.setString(title_x + 11, y_hd2, mode_str, _Style{ .fg = .light_magenta });
+        var cursor = title_x + 11 + @as(u16, @intCast(mode_str.len));
+
+        // Protocol filter indicator: [p]rotocol --- TCP
+        buf.setString(cursor + 1, y_hd2, " [", _Style{ .fg = .gray });
+        buf.setString(cursor + 3, y_hd2, "p", _Style{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } });
+        buf.setString(cursor + 4, y_hd2, "]rotocol", _Style{ .fg = .gray });
+        buf.setString(cursor + 12, y_hd2, " --- ", _Style{ .fg = .gray });
+        const proto_label = app.network_protocol_filter.label();
+        buf.setString(cursor + 17, y_hd2, proto_label, _Style{ .fg = .light_green });
+        cursor = cursor + 17 + @as(u16, @intCast(proto_label.len));
+
+        // IP address after protocol
+        if (app.system.ipv4_addr_len > 0) {
+            const ip_str = app.system.ipv4_addr[0..app.system.ipv4_addr_len];
+            buf.setChar(cursor + 1, y_hd2, BD_TR, border_style);
+            buf.setString(cursor + 2, y_hd2, ip_str, _Style{ .fg = .gray });
+            buf.setChar(cursor + 2 + @as(u16, @intCast(app.system.ipv4_addr_len)), y_hd2, BD_TL, border_style);
+        }
     }
 
     // ── Content rects (the usable interior of each pane) ──────────
@@ -247,7 +268,7 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
     renderCpuOverlay(buf, cpu_full_rect, &app.system, app.cpu_overlay_mode, app.temp_unit);
     renderDiskIO(buf, disk_io_chart_rect, &app.system);
     renderStorageOverlay(buf, disk_io_full_rect, &app.system, app.storage_detail_mode, app.mount_filter); // Combined Memory + Mounts overlay
-    renderNetworkCombined(buf, network_rect, &app.system);
+    renderNetworkCombined(buf, network_rect, &app.system, app.network_display_mode, app.network_protocol_filter, app.procs.render_rows.items);
 
     // Processes pane: calculate sub-layout within the content rect
     const proc_rects = layout.calculate(proc_inner_layout, proc_rect);
@@ -654,6 +675,58 @@ fn renderRateBrailleChart(buf: *tui.render.Buffer, rect: layout.Rect, history: *
         }
     }
 
+}
+
+/// Single-row braille chart from a SocketHistory (u32 counts) with fixed color.
+/// Auto-scales based on max value in the history.
+fn renderSocketBrailleChart(buf: *tui.render.Buffer, rect: layout.Rect, history: *const model.SocketHistory, color: _Color) void {
+    if (rect.width == 0 or rect.height == 0) return;
+    const width: usize = @intCast(rect.width);
+    const height: usize = @intCast(rect.height);
+    const sample_count = history.count;
+    const capacity = width * 2;
+
+    const filled_cols: usize = if (sample_count >= 2) @min((sample_count + 1) / 2, width) else if (sample_count == 1) 1 else 0;
+    const start_sample: usize = if (sample_count > capacity) sample_count - capacity else 0;
+
+    // Auto-scale based on max in history (minimum 10 for visibility)
+    const raw_max = history.max();
+    const ceiling: f32 = @floatFromInt(@max(raw_max, 10));
+
+    var col: usize = 0;
+    while (col < width) : (col += 1) {
+        if (col < width - filled_cols) continue;
+        const data_col = col - (width - filled_cols);
+        const pair_base = start_sample + data_col * 2;
+
+        const left_raw: u32 = if (pair_base < sample_count) history.get(pair_base) else 0;
+        const right_raw: u32 = if (pair_base + 1 < sample_count) history.get(pair_base + 1) else left_raw;
+
+        // Normalize to 0-100 range
+        const left_val: f32 = @as(f32, @floatFromInt(left_raw)) / ceiling * 100.0;
+        const right_val: f32 = @as(f32, @floatFromInt(right_raw)) / ceiling * 100.0;
+
+        var row: usize = 0;
+        while (row < height) : (row += 1) {
+            const screen_row = height - 1 - row;
+            const band_low: f32 = @as(f32, @floatFromInt(row)) * 100.0 / @as(f32, @floatFromInt(height));
+            const band_high: f32 = @as(f32, @floatFromInt(row + 1)) * 100.0 / @as(f32, @floatFromInt(height));
+
+            const left_level = quantize(left_val, band_low, band_high);
+            const right_level = quantize(right_val, band_low, band_high);
+            const braille_cp = braille_up[@as(usize, left_level) * 5 + @as(usize, right_level)];
+            if (braille_cp == 0x2800) continue;
+
+            var utf8_buf: [4]u8 = undefined;
+            const utf8_len = std.unicode.utf8Encode(braille_cp, &utf8_buf) catch continue;
+            buf.setString(
+                rect.x + @as(u16, @intCast(col)),
+                rect.y + @as(u16, @intCast(screen_row)),
+                utf8_buf[0..utf8_len],
+                _Style{ .fg = color },
+            );
+        }
+    }
 }
 
 fn renderCpuGraphBraille(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state.SystemState) void {
@@ -1550,9 +1623,15 @@ fn renderMultiRateDown(
     }
 }
 
-fn renderNetworkCombined(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state.SystemState) void {
+fn renderNetworkCombined(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state.SystemState, display_mode: state.NetworkDisplayMode, protocol_filter: state.NetworkProtocolFilter, _: []const model.RenderRow) void {
     if (!sys.has_data or rect.height == 0) {
         buf.setString(rect.x, rect.y, "Waiting for data...", _Style{ .fg = .gray });
+        return;
+    }
+
+    // By-process mode: show socket count graphs per process
+    if (display_mode == .by_process) {
+        renderNetworkByProcess(buf, rect, sys, protocol_filter);
         return;
     }
 
@@ -1802,6 +1881,98 @@ fn renderNetworkOverlay(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const 
     var sent_buf: [12]u8 = undefined;
     const sent_str = formatBytes(&sent_buf, sys.net_total_sent);
     buf.setString(box_x + 4, box_y + 2, sent_str, _Style{ .fg = .red });
+}
+
+/// Render network view by process - shows socket count graphs per process
+fn renderNetworkByProcess(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state.SystemState, filter: state.NetworkProtocolFilter) void {
+    const dim_style = _Style{ .fg = .gray };
+
+    // Process colors (same palette as network interfaces)
+    const proc_colors = [_]_Color{ .light_cyan, .light_magenta, .light_green, .light_yellow, .light_blue, .light_red, .cyan, .magenta };
+
+    const tracked_count = sys.tracked_proc_count;
+    if (tracked_count == 0) {
+        buf.setString(rect.x, rect.y, "No socket activity", dim_style);
+        buf.setString(rect.x, rect.y + 1, "(waiting for processes with open sockets)", dim_style);
+        return;
+    }
+
+    // Layout: process labels (left) + braille chart (right)
+    // Each process gets 1 row: colored dot + name (8) + sockets (6) + chart (rest)
+    const label_w: u16 = 16; // "● name     123"
+    const chart_w: u16 = if (rect.width > label_w + 4) rect.width - label_w else 4;
+
+    // Count active processes and determine rows per process
+    var active_procs: [model.MAX_TRACKED_PROCS]usize = undefined;
+    var active_count: usize = 0;
+    for (0..model.MAX_TRACKED_PROCS) |i| {
+        if (sys.tracked_procs[i].active) {
+            // Check if process has sockets matching current filter
+            const tp = &sys.tracked_procs[i];
+            const filtered_count: u32 = switch (filter) {
+                .all => tp.socket_count,
+                .tcp => tp.tcp_count,
+                .udp => tp.udp_count,
+                .unix => tp.unix_count,
+            };
+            if (filtered_count > 0) {
+                active_procs[active_count] = i;
+                active_count += 1;
+            }
+        }
+    }
+
+    if (active_count == 0) {
+        const filter_label = filter.label();
+        var msg_buf: [64]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "No active {s} connections", .{filter_label}) catch "No active connections";
+        buf.setString(rect.x, rect.y, msg, dim_style);
+        return;
+    }
+
+    // Calculate rows per process (at least 1, distribute evenly)
+    const rows_per_proc: u16 = @max(1, rect.height / @as(u16, @intCast(active_count)));
+
+    var y = rect.y;
+    for (0..active_count) |idx| {
+        if (y >= rect.y + rect.height) break;
+
+        const proc_idx = active_procs[idx];
+        const tp = &sys.tracked_procs[proc_idx];
+        const color = proc_colors[idx % proc_colors.len];
+
+        // Row 1: colored dot + name + socket count (filtered by protocol)
+        buf.setString(rect.x, y, "\xe2\x97\x8f", _Style{ .fg = color }); // ● dot
+
+        const name_len: usize = @intCast(tp.name_len);
+        const name_max: usize = 8;
+        const name_display_len = @min(name_len, name_max);
+        buf.setString(rect.x + 2, y, tp.name[0..name_display_len], _Style{ .fg = .white });
+
+        // Socket count - filtered by protocol
+        const display_count: u32 = switch (filter) {
+            .all => tp.socket_count,
+            .tcp => tp.tcp_count,
+            .udp => tp.udp_count,
+            .unix => tp.unix_count,
+        };
+        var count_buf: [8]u8 = undefined;
+        const count_str = std.fmt.bufPrint(&count_buf, "{d:>4}", .{display_count}) catch "???";
+        buf.setString(rect.x + 11, y, count_str, _Style{ .fg = color });
+
+        // Braille chart for socket history (shows total - per-protocol history not tracked)
+        const chart_rows = @min(rows_per_proc, (rect.y + rect.height) -| y);
+        if (chart_w > 0 and chart_rows > 0) {
+            renderSocketBrailleChart(buf, .{
+                .x = rect.x + label_w,
+                .y = y,
+                .width = chart_w,
+                .height = chart_rows,
+            }, &tp.history, color);
+        }
+
+        y += rows_per_proc;
+    }
 }
 
 fn formatBytes(out_buf: *[12]u8, bytes: u64) []const u8 {
@@ -2641,13 +2812,34 @@ fn renderDetailView(buf: *tui.render.Buffer, area: tui.render.Rect, app: *state.
         .height = box_h,
     };
 
-    // Border
+    // Border with view mode indicator
+    const mode_title: []const u8 = if (app.detail_view_mode == .info) "Process Detail - Info" else "Process Detail - Network";
     const block = tui.widgets.Block{
-        .title = "Process Detail",
+        .title = mode_title,
         .borders = tui.widgets.Borders.all(),
         .border_style = _Style{ .fg = .cyan },
     };
     block.render(modal, buf);
+
+    // Add view mode tabs on title bar: [Info] [Network] with current highlighted
+    const tabs_x = modal.x + modal.width -| 22;
+    if (app.detail_view_mode == .info) {
+        // Info is active
+        buf.setString(tabs_x, modal.y, "[", _Style{ .fg = .cyan });
+        buf.setString(tabs_x + 1, modal.y, "Info", _Style{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } });
+        buf.setString(tabs_x + 5, modal.y, "]", _Style{ .fg = .cyan });
+        buf.setString(tabs_x + 7, modal.y, "[", _Style{ .fg = .gray });
+        buf.setString(tabs_x + 8, modal.y, "v", _Style{ .fg = .light_cyan });
+        buf.setString(tabs_x + 9, modal.y, ":Net]", _Style{ .fg = .gray });
+    } else {
+        // Network is active
+        buf.setString(tabs_x, modal.y, "[", _Style{ .fg = .gray });
+        buf.setString(tabs_x + 1, modal.y, "v", _Style{ .fg = .light_cyan });
+        buf.setString(tabs_x + 2, modal.y, ":Info]", _Style{ .fg = .gray });
+        buf.setString(tabs_x + 9, modal.y, "[", _Style{ .fg = .cyan });
+        buf.setString(tabs_x + 10, modal.y, "Net", _Style{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } });
+        buf.setString(tabs_x + 13, modal.y, "]", _Style{ .fg = .cyan });
+    }
 
     // Page layout inside border (2-char horizontal padding, 1-char vertical)
     const pad_x: u16 = 3;
@@ -2744,87 +2936,336 @@ fn renderDetailView(buf: *tui.render.Buffer, area: tui.render.Rect, app: *state.
         buf.setString(header_rect.x, header_rect.y + 3, sep_buf[0..sep_w], _Style{ .fg = .gray });
     }
 
-    // --- Body: two-pane split (3:divider:2 left:right) ---
-    const body_rects = layout.calculate(detail_body_layout, body_rect);
-
-    const left_rect = body_rects[0];
-    const div_rect = body_rects[1];
-    const right_rect = body_rects[2];
-
-    // Render vertical divider between panes
-    {
-        var dy: u16 = div_rect.y;
-        while (dy < div_rect.y + div_rect.height) : (dy += 1) {
-            buf.setString(div_rect.x, dy, "|", _Style{ .fg = .gray });
-        }
-    }
-
-    // Clamp left scroll
-    const left_content_lines: usize = 11 + detail.environ.len;
-    const left_visible: usize = @intCast(left_rect.height);
-    if (left_content_lines > left_visible) {
-        app.detail_scroll = @min(app.detail_scroll, left_content_lines - left_visible);
+    // --- Body rendering depends on view mode ---
+    if (app.detail_view_mode == .network) {
+        // Network view: show only connections in full body area
+        renderDetailNetworkView(buf, body_rect, app);
     } else {
-        app.detail_scroll = 0;
-    }
+        // Info view: two-pane split (3:divider:2 left:right)
+        const body_rects = layout.calculate(detail_body_layout, body_rect);
 
-    // Split right pane: static stats on top, scrollable content below
-    const right_rects = layout.calculate(detail_right_layout, right_rect);
+        const left_rect = body_rects[0];
+        const div_rect = body_rects[1];
+        const right_rect = body_rects[2];
 
-    const stats_rect = right_rects[0];
-    const content_rect = right_rects[1];
-
-    const left_focused = app.detail_focus == .left;
-
-    // Render static live stats (always visible, never scrolls)
-    renderDetailStats(buf, stats_rect, detail, live_cpu, live_mem, !left_focused);
-
-    // Measure combined content: proc tree + separator + open files
-    const tree_info = renderDetailTreeAndFiles(buf, content_rect, detail, app, true, false);
-    const right_content_lines = tree_info.total_lines;
-    const right_visible: usize = @intCast(content_rect.height);
-
-    // Auto-center on first open (scroll still at 0 and selected proc not visible)
-    if (app.detail_right_scroll == 0 and tree_info.self_line >= right_visible and right_content_lines > right_visible) {
-        const half = right_visible / 2;
-        app.detail_right_scroll = if (tree_info.self_line > half) tree_info.self_line - half else 0;
-    }
-    if (right_content_lines > right_visible) {
-        app.detail_right_scroll = @min(app.detail_right_scroll, right_content_lines - right_visible);
-    } else {
-        app.detail_right_scroll = 0;
-    }
-    _ = renderDetailTreeAndFiles(buf, content_rect, detail, app, false, !left_focused);
-
-    // Render left pane
-    renderDetailLeftPane(buf, left_rect, detail, app.detail_scroll, left_focused);
-
-    // --- Scroll arrows for focused pane ---
-    if (left_focused) {
-        if (app.detail_scroll > 0) {
-            const arrow_x = left_rect.x + left_rect.width -| 1;
-            buf.setString(arrow_x, left_rect.y, "^", _Style{ .fg = .cyan });
+        // Render vertical divider between panes
+        {
+            var dy: u16 = div_rect.y;
+            while (dy < div_rect.y + div_rect.height) : (dy += 1) {
+                buf.setString(div_rect.x, dy, "|", _Style{ .fg = .gray });
+            }
         }
-        if (left_content_lines > left_visible and app.detail_scroll + left_visible < left_content_lines) {
-            const arrow_x = left_rect.x + left_rect.width -| 1;
-            const arrow_y = left_rect.y + left_rect.height -| 1;
-            buf.setString(arrow_x, arrow_y, "v", _Style{ .fg = .cyan });
+
+        // Clamp left scroll
+        const left_content_lines: usize = 11 + detail.environ.len;
+        const left_visible: usize = @intCast(left_rect.height);
+        if (left_content_lines > left_visible) {
+            app.detail_scroll = @min(app.detail_scroll, left_content_lines - left_visible);
+        } else {
+            app.detail_scroll = 0;
         }
-    } else {
-        if (app.detail_right_scroll > 0) {
-            const arrow_x = content_rect.x + content_rect.width -| 1;
-            buf.setString(arrow_x, content_rect.y, "^", _Style{ .fg = .cyan });
+
+        // Split right pane: static stats on top, scrollable content below
+        const right_rects = layout.calculate(detail_right_layout, right_rect);
+
+        const stats_rect = right_rects[0];
+        const content_rect = right_rects[1];
+
+        const left_focused = app.detail_focus == .left;
+
+        // Render static live stats (always visible, never scrolls)
+        renderDetailStats(buf, stats_rect, detail, live_cpu, live_mem, !left_focused);
+
+        // Measure combined content: proc tree + separator + open files
+        const tree_info = renderDetailTreeAndFiles(buf, content_rect, detail, app, true, false);
+        const right_content_lines = tree_info.total_lines;
+        const right_visible: usize = @intCast(content_rect.height);
+
+        // Auto-center on first open (scroll still at 0 and selected proc not visible)
+        if (app.detail_right_scroll == 0 and tree_info.self_line >= right_visible and right_content_lines > right_visible) {
+            const half = right_visible / 2;
+            app.detail_right_scroll = if (tree_info.self_line > half) tree_info.self_line - half else 0;
         }
-        if (right_content_lines > right_visible and app.detail_right_scroll + right_visible < right_content_lines) {
-            const arrow_x = content_rect.x + content_rect.width -| 1;
-            const arrow_y = content_rect.y + content_rect.height -| 1;
-            buf.setString(arrow_x, arrow_y, "v", _Style{ .fg = .cyan });
+        if (right_content_lines > right_visible) {
+            app.detail_right_scroll = @min(app.detail_right_scroll, right_content_lines - right_visible);
+        } else {
+            app.detail_right_scroll = 0;
+        }
+        _ = renderDetailTreeAndFiles(buf, content_rect, detail, app, false, !left_focused);
+
+        // Render left pane
+        renderDetailLeftPane(buf, left_rect, detail, app.detail_scroll, left_focused);
+
+        // --- Scroll arrows for focused pane ---
+        if (left_focused) {
+            if (app.detail_scroll > 0) {
+                const arrow_x = left_rect.x + left_rect.width -| 1;
+                buf.setString(arrow_x, left_rect.y, "^", _Style{ .fg = .cyan });
+            }
+            if (left_content_lines > left_visible and app.detail_scroll + left_visible < left_content_lines) {
+                const arrow_x = left_rect.x + left_rect.width -| 1;
+                const arrow_y = left_rect.y + left_rect.height -| 1;
+                buf.setString(arrow_x, arrow_y, "v", _Style{ .fg = .cyan });
+            }
+        } else {
+            if (app.detail_right_scroll > 0) {
+                const arrow_x = content_rect.x + content_rect.width -| 1;
+                buf.setString(arrow_x, content_rect.y, "^", _Style{ .fg = .cyan });
+            }
+            if (right_content_lines > right_visible and app.detail_right_scroll + right_visible < right_content_lines) {
+                const arrow_x = content_rect.x + content_rect.width -| 1;
+                const arrow_y = content_rect.y + content_rect.height -| 1;
+                buf.setString(arrow_x, arrow_y, "v", _Style{ .fg = .cyan });
+            }
         }
     }
 
     // --- Footer keybinds ---
-    const footer_hint = "esc:close  h/l:pane  j/k:scroll  u/d:page  x:kill";
+    const footer_hint = if (app.detail_view_mode == .network)
+        "esc:close  v:info view  j/k:scroll  u/d:page  x:kill"
+    else
+        "esc:close  v:network  h/l:pane  j/k:scroll  u/d:page  x:kill";
     buf.setString(footer_rect.x, footer_rect.y, footer_hint, _Style{ .fg = .gray });
+}
+
+/// Render the network connections view (detail mode, network tab)
+fn renderDetailNetworkView(buf: *tui.render.Buffer, rect: layout.Rect, app: *state.AppState) void {
+    const header_style = _Style{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } };
+    const dim_style = _Style{ .fg = .gray };
+
+    const files = app.detail_open_files;
+    if (files == null or files.?.len == 0) {
+        buf.setString(rect.x, rect.y, "No open file descriptors found", dim_style);
+        buf.setString(rect.x, rect.y + 1, "(checked process + all descendants)", dim_style);
+        if (rect.height > 3) {
+            buf.setString(rect.x, rect.y + 3, "Sandboxed apps (Safari, Mail) delegate networking", _Style{ .fg = .yellow });
+            buf.setString(rect.x, rect.y + 4, "to XPC services. Search for 'WebKit' or 'Network'", _Style{ .fg = .yellow });
+            buf.setString(rect.x, rect.y + 5, "in the process list to find them.", _Style{ .fg = .yellow });
+        }
+        return;
+    }
+
+    // Count sockets by type
+    const file_list = files.?;
+    var tcp_count: usize = 0;
+    var udp_count: usize = 0;
+    var unix_count: usize = 0;
+    for (file_list) |f| {
+        if (f.fd_type == .socket_tcp) tcp_count += 1;
+        if (f.fd_type == .socket_udp) udp_count += 1;
+        if (f.fd_type == .socket_unix) unix_count += 1;
+    }
+
+    // Apply protocol filter to determine what to show
+    const filter = app.network_protocol_filter;
+    const show_tcp = (filter == .all or filter == .tcp);
+    const show_udp = (filter == .all or filter == .udp);
+    const show_unix = (filter == .all or filter == .unix);
+
+    const filtered_count = (if (show_tcp) tcp_count else 0) +
+        (if (show_udp) udp_count else 0) +
+        (if (show_unix) unix_count else 0);
+
+    if (filtered_count == 0) {
+        var msg_buf: [64]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "No {s} connections", .{filter.label()}) catch "No connections";
+        buf.setString(rect.x, rect.y, msg, dim_style);
+        buf.setString(rect.x, rect.y + 1, "(process has other file descriptors but no matching sockets)", dim_style);
+        if (rect.height > 3) {
+            buf.setString(rect.x, rect.y + 3, "Sandboxed apps delegate networking to XPC services.", _Style{ .fg = .yellow });
+            buf.setString(rect.x, rect.y + 4, "Try searching for related service processes.", _Style{ .fg = .yellow });
+        }
+        return;
+    }
+
+    var ln: usize = 0;
+    const vis_start = app.detail_scroll;
+    const vis_end = vis_start + @as(usize, @intCast(rect.height));
+    const max_w: usize = @intCast(rect.width);
+
+    // Header
+    if (ln >= vis_start and ln < vis_end) {
+        const y = rect.y + @as(u16, @intCast(ln - vis_start));
+        buf.setString(rect.x, y, "Network Connections", header_style);
+        buf.setString(rect.x + 20, y, "(+ descendants)", _Style{ .fg = .light_magenta });
+        // Show counts and filter
+        var count_buf: [48]u8 = undefined;
+        const count_str = std.fmt.bufPrint(&count_buf, " [{s}] {d} TCP, {d} UDP, {d} Unix", .{ filter.label(), tcp_count, udp_count, unix_count }) catch "";
+        buf.setString(rect.x + 36, y, count_str, dim_style);
+    }
+    ln += 1;
+
+    // Column headers
+    if (ln >= vis_start and ln < vis_end) {
+        const y = rect.y + @as(u16, @intCast(ln - vis_start));
+        buf.setString(rect.x, y, "Proto", _Style{ .fg = .gray });
+        buf.setString(rect.x + 6, y, "State", _Style{ .fg = .gray });
+        buf.setString(rect.x + 18, y, "Local Address", _Style{ .fg = .gray });
+        buf.setString(rect.x + 42, y, "Remote Address", _Style{ .fg = .gray });
+    }
+    ln += 1;
+
+    // Separator
+    if (ln >= vis_start and ln < vis_end) {
+        const y = rect.y + @as(u16, @intCast(ln - vis_start));
+        var sep_buf: [128]u8 = undefined;
+        const sep_w = @min(max_w, sep_buf.len);
+        @memset(sep_buf[0..sep_w], '-');
+        buf.setString(rect.x, y, sep_buf[0..sep_w], dim_style);
+    }
+    ln += 1;
+
+    // Render TCP connections grouped by state (LISTEN first, then ESTABLISHED, then others)
+    const state_order = [_]model.TcpState{ .listen, .established, .syn_sent, .syn_received, .close_wait, .fin_wait_1, .fin_wait_2, .time_wait, .closing, .last_ack, .closed, .unknown };
+
+    if (show_tcp) {
+        for (state_order) |target_state| {
+            for (file_list) |file| {
+                if (file.fd_type != .socket_tcp) continue;
+                if (file.tcp_state != target_state) continue;
+
+            if (ln >= vis_start and ln < vis_end) {
+                const y = rect.y + @as(u16, @intCast(ln - vis_start));
+
+                // Protocol
+                buf.setString(rect.x, y, "tcp", _Style{ .fg = .green });
+
+                // State with color
+                const state_label = file.tcp_state.label();
+                const state_color: _Color = switch (file.tcp_state) {
+                    .established => .green,
+                    .listen => .cyan,
+                    .time_wait, .fin_wait_1, .fin_wait_2, .closing, .last_ack => .yellow,
+                    .close_wait => .light_red,
+                    .syn_sent, .syn_received => .light_blue,
+                    .closed => .gray,
+                    .unknown => .gray,
+                };
+                buf.setString(rect.x + 6, y, state_label, _Style{ .fg = state_color });
+
+                // Local address
+                const local_max: usize = 22;
+                const local_len = @min(file.local_addr.len, local_max);
+                if (local_len > 0) {
+                    buf.setString(rect.x + 18, y, file.local_addr[0..local_len], _Style{ .fg = .white });
+                }
+
+                // Remote address
+                const remote_max: usize = @min(max_w -| 42, 30);
+                const remote_len = @min(file.remote_addr.len, remote_max);
+                if (remote_len > 0) {
+                    buf.setString(rect.x + 42, y, file.remote_addr[0..remote_len], _Style{ .fg = .light_white });
+                }
+            }
+                ln += 1;
+            }
+        }
+    }
+
+    // UDP sockets (no state)
+    if (show_udp) {
+        for (file_list) |file| {
+            if (file.fd_type != .socket_udp) continue;
+
+        if (ln >= vis_start and ln < vis_end) {
+            const y = rect.y + @as(u16, @intCast(ln - vis_start));
+
+            // Protocol
+            buf.setString(rect.x, y, "udp", _Style{ .fg = .yellow });
+
+            // State placeholder
+            buf.setString(rect.x + 6, y, "-", dim_style);
+
+            // Local address
+            const local_max: usize = 22;
+            const local_len = @min(file.local_addr.len, local_max);
+            if (local_len > 0) {
+                buf.setString(rect.x + 18, y, file.local_addr[0..local_len], _Style{ .fg = .white });
+            }
+
+            // Remote address
+            const remote_max: usize = @min(max_w -| 42, 30);
+            const remote_len = @min(file.remote_addr.len, remote_max);
+            if (remote_len > 0) {
+                buf.setString(rect.x + 42, y, file.remote_addr[0..remote_len], _Style{ .fg = .light_white });
+            }
+            }
+            ln += 1;
+        }
+    }
+
+    // Unix sockets - group by path and show counts
+    if (show_unix) {
+        // First pass: count unique paths
+        const UnixEntry = struct { path: []const u8, count: usize };
+        var unique_paths: [64]UnixEntry = undefined;
+        var unique_count: usize = 0;
+
+        for (file_list) |file| {
+            if (file.fd_type != .socket_unix) continue;
+
+            // Check if path already seen
+            var found = false;
+            for (unique_paths[0..unique_count]) |*entry| {
+                if (std.mem.eql(u8, entry.path, file.path)) {
+                    entry.count += 1;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found and unique_count < 64) {
+                unique_paths[unique_count] = .{ .path = file.path, .count = 1 };
+                unique_count += 1;
+            }
+        }
+
+        // Second pass: render unique paths with counts
+        for (unique_paths[0..unique_count]) |entry| {
+            if (ln >= vis_start and ln < vis_end) {
+                const y = rect.y + @as(u16, @intCast(ln - vis_start));
+
+                // Protocol
+                buf.setString(rect.x, y, "unix", _Style{ .fg = .magenta });
+
+                // Count (if > 1)
+                var count_offset: u16 = 6;
+                if (entry.count > 1) {
+                    var count_buf: [8]u8 = undefined;
+                    const count_str = std.fmt.bufPrint(&count_buf, "({d})", .{entry.count}) catch "(??)";
+                    buf.setString(rect.x + 5, y, count_str, _Style{ .fg = .yellow });
+                    count_offset = 5 + @as(u16, @intCast(count_str.len)) + 1;
+                }
+
+                // Path or (anonymous)
+                const path_x = rect.x + count_offset;
+                const path_max: usize = @min(max_w -| count_offset, 50);
+                if (entry.path.len > 0) {
+                    const path_len = @min(entry.path.len, path_max);
+                    buf.setString(path_x, y, entry.path[0..path_len], _Style{ .fg = .white });
+                } else {
+                    buf.setString(path_x, y, "(anonymous)", _Style{ .fg = .gray });
+                }
+            }
+            ln += 1;
+        }
+    }
+
+    // Clamp scroll
+    const content_lines = ln;
+    const visible: usize = @intCast(rect.height);
+    if (content_lines > visible) {
+        app.detail_scroll = @min(app.detail_scroll, content_lines - visible);
+    } else {
+        app.detail_scroll = 0;
+    }
+
+    // Scroll indicators
+    if (app.detail_scroll > 0) {
+        buf.setString(rect.x + rect.width -| 1, rect.y, "^", _Style{ .fg = .cyan });
+    }
+    if (content_lines > visible and app.detail_scroll + visible < content_lines) {
+        buf.setString(rect.x + rect.width -| 1, rect.y + rect.height -| 1, "v", _Style{ .fg = .cyan });
+    }
 }
 
 /// Render a label + value pair, wrapping the value to continuation lines if it
@@ -3268,7 +3709,53 @@ fn renderDetailTreeAndFiles(buf: *tui.render.Buffer, rect: layout.Rect, detail: 
 
     // File rows
     if (app.detail_open_files) |files| {
+        const path_x = rx + 14;
+        const path_max: usize = if (max_w > 14) max_w - 14 else 1;
+
+        // Count anonymous pipes and kqueues (excluding stdin/stdout/stderr)
+        var pipe_count: usize = 0;
+        var kqueue_count: usize = 0;
+        var other_count: usize = 0;
         for (files) |file| {
+            switch (file.fd_type) {
+                .pipe => {
+                    // Don't count stdin/stdout/stderr
+                    if (file.fd != 0 and file.fd != 1 and file.fd != 2) {
+                        pipe_count += 1;
+                    }
+                },
+                .kqueue => kqueue_count += 1,
+                .other => other_count += 1,
+                else => {},
+            }
+        }
+
+        for (files) |file| {
+            // Skip anonymous pipes (except stdin/stdout/stderr), kqueues, and other - we'll summarize them
+            const is_std_fd = file.fd == 0 or file.fd == 1 or file.fd == 2;
+            if (file.fd_type == .kqueue) continue;
+            if (file.fd_type == .other) continue;
+            if (file.fd_type == .pipe and !is_std_fd) continue;
+
+            // Get the path/address string
+            var addr_buf: [256]u8 = undefined;
+            const path_str: []const u8 = if (file.fd_type == .socket_tcp or file.fd_type == .socket_udp) blk: {
+                const addr_str = std.fmt.bufPrint(&addr_buf, "{s} -> {s}", .{
+                    if (file.local_addr.len > 0) file.local_addr else "?",
+                    if (file.remote_addr.len > 0) file.remote_addr else "?",
+                }) catch "???";
+                break :blk addr_str;
+            } else if (file.fd_type == .pipe and is_std_fd) blk: {
+                // Show stdin/stdout/stderr for FD 0/1/2
+                break :blk switch (file.fd) {
+                    0 => "stdin",
+                    1 => "stdout",
+                    2 => "stderr",
+                    else => "(pipe)",
+                };
+            } else file.path;
+
+            // First line: FD, Type, State (for TCP), and start of path
             if (!measure_only and ln >= vis_start and ln < vis_end) {
                 const y = rect.y + @as(u16, @intCast(ln - vis_start));
 
@@ -3298,22 +3785,84 @@ fn renderDetailTreeAndFiles(buf: *tui.render.Buffer, rect: layout.Rect, detail: 
                 };
                 buf.setString(rx + 5, y, type_str, _Style{ .fg = type_color });
 
-                // Path or address
-                const path_x = rx + 14;
-                const path_max: usize = if (max_w > 14) max_w - 14 else 0;
-
-                if (file.fd_type == .socket_tcp or file.fd_type == .socket_udp) {
-                    var addr_buf: [80]u8 = undefined;
-                    const addr_str = std.fmt.bufPrint(&addr_buf, "{s} -> {s}", .{
-                        if (file.local_addr.len > 0) file.local_addr else "?",
-                        if (file.remote_addr.len > 0) file.remote_addr else "?",
-                    }) catch "???";
-                    const show_len = @min(addr_str.len, path_max);
-                    buf.setString(path_x, y, addr_str[0..show_len], _Style{ .fg = .light_cyan });
-                } else if (file.path.len > 0) {
-                    const show_len = @min(file.path.len, path_max);
-                    buf.setString(path_x, y, file.path[0..show_len], _Style{ .fg = .light_cyan });
+                // For TCP sockets, show the connection state
+                var state_offset: u16 = 0;
+                if (file.fd_type == .socket_tcp) {
+                    const state_label = file.tcp_state.label();
+                    // Color based on state
+                    const state_color: _Color = switch (file.tcp_state) {
+                        .established => .green,
+                        .listen => .cyan,
+                        .time_wait, .fin_wait_1, .fin_wait_2, .closing, .last_ack => .yellow,
+                        .close_wait => .light_red,
+                        .syn_sent, .syn_received => .light_blue,
+                        .closed => .gray,
+                        .unknown => .gray,
+                    };
+                    buf.setString(rx + 9, y, state_label, _Style{ .fg = state_color });
+                    state_offset = @intCast(state_label.len + 1);
                 }
+
+                // First chunk of path (shifted right for TCP state)
+                if (path_str.len > 0) {
+                    const actual_path_x = path_x + state_offset;
+                    const actual_path_max = if (path_max > state_offset) path_max - state_offset else 0;
+                    const first_chunk = path_str[0..@min(path_str.len, actual_path_max)];
+                    buf.setString(actual_path_x, y, first_chunk, _Style{ .fg = .light_cyan });
+                }
+            }
+            ln += 1;
+
+            // Continuation lines for long paths
+            var offset: usize = path_max;
+            while (offset < path_str.len) : (offset += path_max) {
+                if (!measure_only and ln >= vis_start and ln < vis_end) {
+                    const y = rect.y + @as(u16, @intCast(ln - vis_start));
+                    const chunk_end = @min(offset + path_max, path_str.len);
+                    const chunk = path_str[offset..chunk_end];
+                    buf.setString(path_x, y, chunk, _Style{ .fg = .light_cyan });
+                }
+                ln += 1;
+            }
+        }
+
+        // Summary line for grouped anonymous entries
+        if (pipe_count > 0 or kqueue_count > 0 or other_count > 0) {
+            if (!measure_only and ln >= vis_start and ln < vis_end) {
+                const y = rect.y + @as(u16, @intCast(ln - vis_start));
+                var summary_buf: [64]u8 = undefined;
+                var parts: [3][]const u8 = undefined;
+                var part_count: usize = 0;
+                var pipe_buf: [20]u8 = undefined;
+                var kq_buf: [20]u8 = undefined;
+                var other_buf: [20]u8 = undefined;
+
+                if (pipe_count > 0) {
+                    parts[part_count] = std.fmt.bufPrint(&pipe_buf, "{d} pipes", .{pipe_count}) catch "? pipes";
+                    part_count += 1;
+                }
+                if (kqueue_count > 0) {
+                    parts[part_count] = std.fmt.bufPrint(&kq_buf, "{d} kqueues", .{kqueue_count}) catch "? kqueues";
+                    part_count += 1;
+                }
+                if (other_count > 0) {
+                    parts[part_count] = std.fmt.bufPrint(&other_buf, "{d} other", .{other_count}) catch "? other";
+                    part_count += 1;
+                }
+
+                // Build summary string
+                var summary_len: usize = 0;
+                for (parts[0..part_count], 0..) |part, i| {
+                    if (i > 0 and summary_len + 2 < summary_buf.len) {
+                        @memcpy(summary_buf[summary_len..][0..2], ", ");
+                        summary_len += 2;
+                    }
+                    const copy_len = @min(part.len, summary_buf.len - summary_len);
+                    @memcpy(summary_buf[summary_len..][0..copy_len], part[0..copy_len]);
+                    summary_len += copy_len;
+                }
+
+                buf.setString(rx + 2, y, summary_buf[0..summary_len], _Style{ .fg = .gray });
             }
             ln += 1;
         }
@@ -3463,9 +4012,26 @@ fn renderDetailOpenFiles(buf: *tui.render.Buffer, rect: layout.Rect, files: ?[]c
             };
             buf.setString(rect.x + 5, y, type_str, _Style{ .fg = type_color });
 
+            // For TCP sockets, show the connection state
+            var state_offset: u16 = 0;
+            if (file.fd_type == .socket_tcp) {
+                const state_label = file.tcp_state.label();
+                const state_color: _Color = switch (file.tcp_state) {
+                    .established => .green,
+                    .listen => .cyan,
+                    .time_wait, .fin_wait_1, .fin_wait_2, .closing, .last_ack => .yellow,
+                    .close_wait => .light_red,
+                    .syn_sent, .syn_received => .light_blue,
+                    .closed => .gray,
+                    .unknown => .gray,
+                };
+                buf.setString(rect.x + 9, y, state_label, _Style{ .fg = state_color });
+                state_offset = @intCast(state_label.len + 1);
+            }
+
             // Path or address
-            const path_x = rect.x + 16;
-            const path_max: usize = if (max_w > 16) max_w - 16 else 0;
+            const path_x = rect.x + 16 + state_offset;
+            const path_max: usize = if (max_w > 16 + state_offset) max_w - 16 - state_offset else 0;
 
             if (file.fd_type == .socket_tcp or file.fd_type == .socket_udp) {
                 // Show local -> remote for sockets

@@ -120,6 +120,7 @@ pub const Store = struct {
                 .name = proc_ptr.name,
                 .path = proc_ptr.path,
                 .ppid = proc_ptr.ppid,
+                .pgid = proc_ptr.pgid,
             });
             self.hot.appendAssumeCapacity(.{
                 .pid = proc_ptr.pid,

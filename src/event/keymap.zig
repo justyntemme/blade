@@ -71,6 +71,10 @@ pub const keymap = [_]KeyBinding{
     .{ .key = .{ .char = 's' }, .action = .cycle_storage_detail, .modes = &.{ .normal, .search_view }, .description = "storage detail", .category = "Display" },
     .{ .key = .{ .char = 'm' }, .action = .toggle_mount_filter, .modes = &.{ .normal, .search_view }, .description = "mount filter", .category = "Display" },
 
+    // Network
+    .{ .key = .{ .char = 'n' }, .action = .toggle_network_mode, .modes = &.{ .normal, .search_view }, .description = "network mode", .category = "Display" },
+    .{ .key = .{ .char = 'p' }, .action = .toggle_protocol_filter, .modes = &.{ .normal, .search_view }, .description = "protocol filter", .category = "Display" },
+
     // Application
     .{ .key = .{ .char = 'q' }, .action = .quit, .modes = &.{ .normal, .search_view }, .description = "quit", .category = "General" },
     .{ .key = .{ .special = .esc }, .action = .quit, .modes = &.{.normal}, .description = "" },
@@ -79,11 +83,12 @@ pub const keymap = [_]KeyBinding{
     .{ .key = .{ .special = .esc }, .action = .show_help, .modes = &.{.help}, .description = "" },
     .{ .key = .{ .char = 'q' }, .action = .show_help, .modes = &.{.help}, .description = "" },
 
-    // Detail mode (close + pane focus)
+    // Detail mode (close + pane focus + view toggle)
     .{ .key = .{ .special = .esc }, .action = .close_detail, .modes = &.{.detail}, .description = "" },
     .{ .key = .{ .char = 'q' }, .action = .close_detail, .modes = &.{.detail}, .description = "" },
     .{ .key = .{ .char = 'h' }, .action = .focus_left, .modes = &.{.detail}, .description = "" },
     .{ .key = .{ .char = 'l' }, .action = .focus_right, .modes = &.{.detail}, .description = "" },
+    .{ .key = .{ .char = 'v' }, .action = .toggle_detail_view, .modes = &.{.detail}, .description = "toggle info/network" },
 
     // Confirm dialog mode
     .{ .key = .{ .char = 'y' }, .action = .confirm_dialog_yes, .modes = &.{.confirm_dialog}, .description = "" },

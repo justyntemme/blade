@@ -75,6 +75,10 @@ pub const SystemState = struct {
     cpu_cluster_temps: [12]f32 = [_]f32{0} ** 12,
     cpu_cluster_temp_count: u8 = 0,
 
+    // Per-process socket tracking (for network by-process graphs)
+    tracked_procs: [model.MAX_TRACKED_PROCS]model.TrackedProcess = [_]model.TrackedProcess{.{}} ** model.MAX_TRACKED_PROCS,
+    tracked_proc_count: u8 = 0,
+
     prev_metrics: ?model.SystemMetrics = null,
     has_data: bool = false,
 
@@ -218,6 +222,105 @@ pub const SystemState = struct {
         self.prev_metrics = metrics;
         self.has_data = true;
     }
+
+    /// Update per-process socket tracking. Called with current process data.
+    pub fn updateSocketTracking(self: *SystemState, pids: []const model.pid_t, names: []const []const u8) void {
+        const platform = @import("platform");
+
+        // Temporary storage for this frame's socket counts
+        const Entry = struct {
+            pid: model.pid_t,
+            counts: platform.SocketCounts,
+            name_idx: usize,
+        };
+        var entries: [128]Entry = undefined;
+        var entry_count: usize = 0;
+
+        // Collect socket counts by type for all processes
+        for (pids, 0..) |pid, i| {
+            const counts = platform.countSocketsByType(pid);
+            if (counts.total() > 0 and entry_count < 128) {
+                entries[entry_count] = .{ .pid = pid, .counts = counts, .name_idx = i };
+                entry_count += 1;
+            }
+        }
+
+        // Sort by total socket count descending (simple insertion sort for small N)
+        for (1..entry_count) |i| {
+            const key = entries[i];
+            var j: usize = i;
+            while (j > 0 and entries[j - 1].counts.total() < key.counts.total()) {
+                entries[j] = entries[j - 1];
+                j -= 1;
+            }
+            entries[j] = key;
+        }
+
+        // Update tracked processes - keep top N
+        const to_track = @min(entry_count, model.MAX_TRACKED_PROCS);
+
+        // Mark all as inactive first
+        for (&self.tracked_procs) |*tp| {
+            tp.active = false;
+        }
+
+        for (0..to_track) |i| {
+            const entry = entries[i];
+            const name = names[entry.name_idx];
+
+            // Find existing slot for this PID or use new slot
+            var slot: ?usize = null;
+            for (0..model.MAX_TRACKED_PROCS) |j| {
+                if (self.tracked_procs[j].pid == entry.pid) {
+                    slot = j;
+                    break;
+                }
+            }
+            if (slot == null) {
+                // Find an inactive slot
+                for (0..model.MAX_TRACKED_PROCS) |j| {
+                    if (!self.tracked_procs[j].active and self.tracked_procs[j].pid == 0) {
+                        slot = j;
+                        break;
+                    }
+                }
+            }
+            if (slot == null) {
+                // Reuse first inactive slot
+                for (0..model.MAX_TRACKED_PROCS) |j| {
+                    if (!self.tracked_procs[j].active) {
+                        slot = j;
+                        // Reset history when reusing slot
+                        self.tracked_procs[j].history = .{};
+                        break;
+                    }
+                }
+            }
+
+            if (slot) |s| {
+                var tp = &self.tracked_procs[s];
+                tp.pid = entry.pid;
+                tp.socket_count = entry.counts.total();
+                tp.tcp_count = entry.counts.tcp;
+                tp.udp_count = entry.counts.udp;
+                tp.unix_count = entry.counts.unix;
+                tp.active = true;
+                tp.history.push(entry.counts.total());
+
+                // Copy name
+                const name_len = @min(name.len, tp.name.len);
+                @memcpy(tp.name[0..name_len], name[0..name_len]);
+                tp.name_len = @intCast(name_len);
+            }
+        }
+
+        // Count active tracked procs
+        var count: u8 = 0;
+        for (self.tracked_procs) |tp| {
+            if (tp.active) count += 1;
+        }
+        self.tracked_proc_count = count;
+    }
 };
 
 pub const ToastLevel = enum { info, success, warning, err };
@@ -226,6 +329,32 @@ pub const CpuOverlayMode = enum { cores, aggregate };
 pub const TempUnit = enum { celsius, fahrenheit };
 pub const StorageDetailMode = enum { compact, full, with_swap };
 pub const MountFilter = enum { user_only, all };
+pub const NetworkDisplayMode = enum { by_interface, by_process };
+pub const NetworkProtocolFilter = enum {
+    all,
+    tcp,
+    udp,
+    unix,
+
+    pub fn label(self: NetworkProtocolFilter) []const u8 {
+        return switch (self) {
+            .all => "All",
+            .tcp => "TCP",
+            .udp => "UDP",
+            .unix => "Unix",
+        };
+    }
+
+    pub fn next(self: NetworkProtocolFilter) NetworkProtocolFilter {
+        return switch (self) {
+            .all => .tcp,
+            .tcp => .udp,
+            .udp => .unix,
+            .unix => .all,
+        };
+    }
+};
+pub const DetailViewMode = enum { info, network };
 
 pub const ConfirmAction = enum {
     kill_term,
@@ -287,6 +416,7 @@ pub const AppState = struct {
     detail_scroll: usize = 0,
     detail_right_scroll: usize = 0,
     detail_focus: DetailFocus = .left,
+    detail_view_mode: DetailViewMode = .info,
     detail_open_files: ?[]const model.OpenFile = null,
     help_scroll: usize = 0,
     procs: procs.Store,
@@ -295,6 +425,8 @@ pub const AppState = struct {
     temp_unit: TempUnit = .celsius,
     storage_detail_mode: StorageDetailMode = .with_swap,
     mount_filter: MountFilter = .all,
+    network_display_mode: NetworkDisplayMode = .by_interface,
+    network_protocol_filter: NetworkProtocolFilter = .all,
     confirm_dialog: ?ConfirmDialog = null,
     /// Maps pinned process identity to its pinned row position
     pinned_pids: std.AutoHashMap(model.ProcIdentity, usize) = undefined,
@@ -650,6 +782,13 @@ pub const AppState = struct {
         self.procs.receiveBatch(new_batch);
         self.buildView();
 
+        // Update per-process socket tracking for network graphs
+        const hot = self.procs.hot.slice();
+        const cold = self.procs.cold.slice();
+        if (hot.len > 0) {
+            self.system.updateSocketTracking(hot.items(.pid), cold.items(.name));
+        }
+
         // Trigger mount collection every 10 seconds (or on first batch)
         const now_ns = std.time.nanoTimestamp();
         const elapsed_ns = now_ns - self.last_mount_collect_ns;
@@ -666,6 +805,9 @@ pub const AppState = struct {
             if (!exists) {
                 self.showToast("Process exited", .warning);
                 self.closeDetail();
+            } else if (self.mode == .detail) {
+                // Refresh open files/network connections while detail view is open
+                self.refreshDetailOpenFiles();
             }
         }
     }
@@ -753,6 +895,7 @@ pub const AppState = struct {
         self.detail_scroll = 0;
         self.detail_right_scroll = 0;
         self.detail_focus = .left;
+        self.detail_view_mode = .info;
         self.previous_mode = self.mode;
         self.mode = .detail;
 
@@ -791,16 +934,86 @@ pub const AppState = struct {
                 if (self.detail_arena) |*old| old.deinit();
                 self.detail_arena = result.arena;
                 self.detail_data = result.data;
-                // Also collect open files now that we have the arena
-                if (self.detail_arena) |*arena| {
-                    const platform = @import("platform");
-                    self.detail_open_files = platform.collectOpenFiles(current_pid, arena.allocator()) catch null;
-                }
+                // Initial collection of open files
+                self.refreshDetailOpenFiles();
                 return;
             }
         }
         var r = result;
         r.deinit();
+    }
+
+    /// Refresh open files/network connections for the current detail process.
+    /// Called on initial detail open and on each batch update while detail view is active.
+    /// Collects from: main process + all descendants (BFS) + same PGID processes.
+    fn refreshDetailOpenFiles(self: *AppState) void {
+        const current_pid = self.detail_pid orelse return;
+        const arena = if (self.detail_arena) |*a| a else return;
+        const platform = @import("platform");
+        const alloc = arena.allocator();
+
+        var all_files: std.ArrayListUnmanaged(model.OpenFile) = .empty;
+        var collected_pids: std.AutoHashMapUnmanaged(model.pid_t, void) = .empty;
+
+        // Collect from main process
+        if (platform.collectOpenFiles(current_pid, alloc)) |main_files| {
+            all_files.appendSlice(alloc, main_files) catch {};
+        } else |_| {}
+        collected_pids.put(alloc, current_pid, {}) catch {};
+
+        const hot = self.procs.hot.slice();
+        const cold = self.procs.cold.slice();
+        const pids = hot.items(.pid);
+        const ppids = cold.items(.ppid);
+        const pgids = cold.items(.pgid);
+
+        // Find current process's PGID for session-based grouping
+        var current_pgid: ?model.pid_t = null;
+        for (pids, pgids) |pid, pgid| {
+            if (pid == current_pid) {
+                current_pgid = pgid;
+                break;
+            }
+        }
+
+        // Recursive descendant collection using iterative BFS
+        // This catches grandchildren, great-grandchildren, etc.
+        // (e.g., kitty -> zsh -> curl)
+        var queue: std.ArrayListUnmanaged(model.pid_t) = .empty;
+        queue.append(alloc, current_pid) catch {};
+
+        while (queue.items.len > 0) {
+            const parent = queue.pop();
+
+            // Find all children of this parent
+            for (pids, ppids) |child_pid, ppid| {
+                if (ppid == parent and !collected_pids.contains(child_pid)) {
+                    // Collect files from this descendant
+                    if (platform.collectOpenFiles(child_pid, alloc)) |child_files| {
+                        all_files.appendSlice(alloc, child_files) catch {};
+                    } else |_| {}
+                    collected_pids.put(alloc, child_pid, {}) catch {};
+
+                    // Add to queue to process its children
+                    queue.append(alloc, child_pid) catch {};
+                }
+            }
+        }
+
+        // PGID-based collection: also collect from processes in the same process group
+        // This catches related processes that share a session (e.g., pipeline commands)
+        if (current_pgid) |pgid| {
+            for (pids, pgids) |pid, proc_pgid| {
+                if (proc_pgid == pgid and !collected_pids.contains(pid)) {
+                    if (platform.collectOpenFiles(pid, alloc)) |pgid_files| {
+                        all_files.appendSlice(alloc, pgid_files) catch {};
+                    } else |_| {}
+                    collected_pids.put(alloc, pid, {}) catch {};
+                }
+            }
+        }
+
+        self.detail_open_files = all_files.toOwnedSlice(alloc) catch null;
     }
 
     pub fn receiveMounts(self: *AppState, result: channel.MountResult) void {

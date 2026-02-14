@@ -23,6 +23,7 @@ pub const pid_t = std.posix.pid_t;
 pub const Proc = struct {
     pid: pid_t = 0,
     ppid: pid_t = 0,
+    pgid: pid_t = 0, // Process group ID - for session-based grouping
     start_time_ns: i128 = 0,
     name: []const u8 = "",
     path: []const u8 = "",
@@ -65,6 +66,7 @@ pub const ProcCold = struct {
     name: []const u8,
     path: []const u8,
     ppid: std.posix.pid_t,
+    pgid: std.posix.pid_t, // Process group ID
 };
 
 pub const ProcColdList = std.MultiArrayList(ProcCold);
@@ -122,6 +124,38 @@ pub const FdType = enum {
     other,
 };
 
+pub const TcpState = enum {
+    closed,
+    listen,
+    syn_sent,
+    syn_received,
+    established,
+    close_wait,
+    fin_wait_1,
+    closing,
+    last_ack,
+    fin_wait_2,
+    time_wait,
+    unknown,
+
+    pub fn label(self: TcpState) []const u8 {
+        return switch (self) {
+            .closed => "CLOSED",
+            .listen => "LISTEN",
+            .syn_sent => "SYN_SENT",
+            .syn_received => "SYN_RECV",
+            .established => "ESTABLISHED",
+            .close_wait => "CLOSE_WAIT",
+            .fin_wait_1 => "FIN_WAIT_1",
+            .closing => "CLOSING",
+            .last_ack => "LAST_ACK",
+            .fin_wait_2 => "FIN_WAIT_2",
+            .time_wait => "TIME_WAIT",
+            .unknown => "UNKNOWN",
+        };
+    }
+};
+
 pub const OpenFile = struct {
     fd: i32,
     fd_type: FdType,
@@ -129,6 +163,7 @@ pub const OpenFile = struct {
     // For sockets
     local_addr: []const u8,
     remote_addr: []const u8,
+    tcp_state: TcpState,
 };
 
 pub const RenderRow = struct {
@@ -292,4 +327,50 @@ pub const RateHistory = struct {
         }
         return max_val;
     }
+};
+
+// --- Per-process socket tracking for network graphs ---
+
+pub const SOCKET_HISTORY_LEN = 60; // 1 minute at 1 sample/sec
+pub const MAX_TRACKED_PROCS = 8; // Top N processes to track
+
+pub const SocketHistory = struct {
+    samples: [SOCKET_HISTORY_LEN]u32 = [_]u32{0} ** SOCKET_HISTORY_LEN,
+    head: usize = 0,
+    count: usize = 0,
+
+    pub fn push(self: *SocketHistory, value: u32) void {
+        self.samples[self.head] = value;
+        self.head = (self.head + 1) % SOCKET_HISTORY_LEN;
+        if (self.count < SOCKET_HISTORY_LEN) self.count += 1;
+    }
+
+    /// Returns sample at logical index i (0 = oldest).
+    pub fn get(self: *const SocketHistory, i: usize) u32 {
+        if (i >= self.count) return 0;
+        const start = if (self.count < SOCKET_HISTORY_LEN) 0 else self.head;
+        return self.samples[(start + i) % SOCKET_HISTORY_LEN];
+    }
+
+    /// Returns the maximum value in the buffer.
+    pub fn max(self: *const SocketHistory) u32 {
+        var max_val: u32 = 0;
+        for (0..self.count) |i| {
+            const v = self.get(i);
+            if (v > max_val) max_val = v;
+        }
+        return max_val;
+    }
+};
+
+pub const TrackedProcess = struct {
+    pid: pid_t = 0,
+    name: [32]u8 = [_]u8{0} ** 32,
+    name_len: u8 = 0,
+    socket_count: u32 = 0,
+    tcp_count: u32 = 0,
+    udp_count: u32 = 0,
+    unix_count: u32 = 0,
+    history: SocketHistory = .{},
+    active: bool = false,
 };

@@ -52,3 +52,16 @@ pub fn collectThreads(pid: std.posix.pid_t, arena: std.mem.Allocator) PlatformEr
 pub fn collectOpenFiles(pid: std.posix.pid_t, arena: std.mem.Allocator) PlatformError![]model.OpenFile {
     return backend.collectOpenFiles(pid, arena);
 }
+
+/// Socket counts by type
+pub const SocketCounts = backend.SocketCounts;
+
+/// Fast socket count for a process (no allocation)
+pub fn countSockets(pid: std.posix.pid_t) u32 {
+    return backend.countSockets(pid);
+}
+
+/// Count sockets by type (TCP, UDP, Unix)
+pub fn countSocketsByType(pid: std.posix.pid_t) SocketCounts {
+    return backend.countSocketsByType(pid);
+}

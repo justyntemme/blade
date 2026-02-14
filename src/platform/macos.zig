@@ -3,6 +3,7 @@ const c = @cImport({
     @cInclude("libproc.h");
     @cInclude("sys/proc_info.h");
     @cInclude("sys/sysctl.h");
+    @cInclude("sys/resource.h");
     @cInclude("pwd.h");
     @cInclude("mach/mach.h");
     @cInclude("mach/host_info.h");
@@ -15,6 +16,7 @@ const c = @cImport({
     @cInclude("sys/mount.h");
     @cInclude("arpa/inet.h");
     @cInclude("netinet/in.h");
+    @cInclude("netinet/tcp_fsm.h");
 });
 
 const model = @import("model");
@@ -111,6 +113,7 @@ pub fn collectSnapshot(arena: std.mem.Allocator) PlatformError!std.AutoHashMap(p
             const proc = Proc{
                 .pid = pid,
                 .ppid = @intCast(proc_info.pbi_ppid),
+                .pgid = @intCast(proc_info.pbi_pgid),
                 .start_time_ns = start_time_ns,
                 .name = name,
                 .path = path_str,
@@ -944,6 +947,7 @@ pub fn collectOpenFiles(pid: std.posix.pid_t, arena: std.mem.Allocator) Platform
         var fd_type: model.FdType = .other;
         var local_addr: []const u8 = "";
         var remote_addr: []const u8 = "";
+        var tcp_state: model.TcpState = .unknown;
 
         switch (fd_info.proc_fdtype) {
             c.PROX_FDTYPE_VNODE => {
@@ -979,6 +983,22 @@ pub fn collectOpenFiles(pid: std.posix.pid_t, arena: std.mem.Allocator) Platform
                     if (family == c.AF_INET or family == c.AF_INET6) {
                         if (sock_type == c.SOCK_STREAM) {
                             fd_type = .socket_tcp;
+                            // Extract TCP state
+                            const raw_state = socket_info.psi.soi_proto.pri_tcp.tcpsi_state;
+                            tcp_state = switch (raw_state) {
+                                c.TCPS_CLOSED => .closed,
+                                c.TCPS_LISTEN => .listen,
+                                c.TCPS_SYN_SENT => .syn_sent,
+                                c.TCPS_SYN_RECEIVED => .syn_received,
+                                c.TCPS_ESTABLISHED => .established,
+                                c.TCPS_CLOSE_WAIT => .close_wait,
+                                c.TCPS_FIN_WAIT_1 => .fin_wait_1,
+                                c.TCPS_CLOSING => .closing,
+                                c.TCPS_LAST_ACK => .last_ack,
+                                c.TCPS_FIN_WAIT_2 => .fin_wait_2,
+                                c.TCPS_TIME_WAIT => .time_wait,
+                                else => .unknown,
+                            };
                         } else if (sock_type == c.SOCK_DGRAM) {
                             fd_type = .socket_udp;
                         }
@@ -1037,9 +1057,86 @@ pub fn collectOpenFiles(pid: std.posix.pid_t, arena: std.mem.Allocator) Platform
             .path = path,
             .local_addr = local_addr,
             .remote_addr = remote_addr,
+            .tcp_state = tcp_state,
         };
         valid_count += 1;
     }
 
     return files[0..valid_count];
+}
+
+/// Socket counts by type
+pub const SocketCounts = struct {
+    tcp: u32 = 0,
+    udp: u32 = 0,
+    unix: u32 = 0,
+
+    pub fn total(self: SocketCounts) u32 {
+        return self.tcp + self.udp + self.unix;
+    }
+};
+
+/// Count sockets by type (TCP, UDP, Unix) for a process
+pub fn countSocketsByType(pid: std.posix.pid_t) SocketCounts {
+    var counts = SocketCounts{};
+
+    const buf_size = c.proc_pidinfo(pid, c.PROC_PIDLISTFDS, 0, null, 0);
+    if (buf_size <= 0) return counts;
+
+    const fd_count: usize = @intCast(@divExact(buf_size, @sizeOf(c.proc_fdinfo)));
+    if (fd_count == 0) return counts;
+
+    // Use stack buffer for small counts, otherwise skip detailed counting
+    var stack_buf: [256]c.proc_fdinfo = undefined;
+    const fd_buffer: []c.proc_fdinfo = if (fd_count <= stack_buf.len)
+        stack_buf[0..fd_count]
+    else
+        return counts; // Too many FDs, skip to avoid allocation
+
+    const actual_size = c.proc_pidinfo(
+        pid,
+        c.PROC_PIDLISTFDS,
+        0,
+        fd_buffer.ptr,
+        @intCast(fd_count * @sizeOf(c.proc_fdinfo)),
+    );
+
+    if (actual_size <= 0) return counts;
+
+    const actual_count: usize = @intCast(@divExact(actual_size, @sizeOf(c.proc_fdinfo)));
+
+    for (fd_buffer[0..actual_count]) |fd_info| {
+        if (fd_info.proc_fdtype != c.PROX_FDTYPE_SOCKET) continue;
+
+        // Get socket info to determine family
+        var socket_info: c.socket_fdinfo = undefined;
+        const sock_size = c.proc_pidfdinfo(
+            pid,
+            fd_info.proc_fd,
+            c.PROC_PIDFDSOCKETINFO,
+            &socket_info,
+            @sizeOf(c.socket_fdinfo),
+        );
+
+        if (sock_size <= 0) continue;
+
+        const family = socket_info.psi.soi_family;
+        if (family == c.AF_INET or family == c.AF_INET6) {
+            const proto = socket_info.psi.soi_protocol;
+            if (proto == c.IPPROTO_TCP) {
+                counts.tcp += 1;
+            } else if (proto == c.IPPROTO_UDP) {
+                counts.udp += 1;
+            }
+        } else if (family == c.AF_UNIX) {
+            counts.unix += 1;
+        }
+    }
+
+    return counts;
+}
+
+/// Fast socket count - counts all sockets without type distinction
+pub fn countSockets(pid: std.posix.pid_t) u32 {
+    return countSocketsByType(pid).total();
 }

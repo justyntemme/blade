@@ -153,6 +153,10 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
         .close_detail => app.closeDetail(),
         .focus_left => app.detail_focus = .left,
         .focus_right => app.detail_focus = .right,
+        .toggle_detail_view => {
+            app.detail_view_mode = if (app.detail_view_mode == .info) .network else .info;
+            app.detail_scroll = 0; // Reset scroll when switching views
+        },
         .toggle_cpu_overlay => {
             app.cpu_overlay_mode = if (app.cpu_overlay_mode == .cores) .aggregate else .cores;
         },
@@ -168,6 +172,12 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
         },
         .toggle_mount_filter => {
             app.mount_filter = if (app.mount_filter == .user_only) .all else .user_only;
+        },
+        .toggle_network_mode => {
+            app.network_display_mode = if (app.network_display_mode == .by_interface) .by_process else .by_interface;
+        },
+        .toggle_protocol_filter => {
+            app.network_protocol_filter = app.network_protocol_filter.next();
         },
         .confirm_dialog_yes => {
             if (app.confirm_dialog) |dialog| {
