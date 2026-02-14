@@ -35,6 +35,27 @@ pub const PlatformError = error{
     Unexpected,
 };
 
+// Coalition info for grouping apps with their XPC services (not in public headers)
+const PROC_PIDCOALITIONINFO: c_int = 20;
+const COALITION_NUM_TYPES = 2;
+
+const CoalitionInfo = extern struct {
+    coalition_id: [COALITION_NUM_TYPES]u64,
+    reserved1: u64,
+    reserved2: u64,
+    reserved3: u64,
+};
+
+/// Get coalition ID for a process (groups app with its XPC services)
+fn getCoalitionId(pid: pid_t) u64 {
+    var info: CoalitionInfo = std.mem.zeroes(CoalitionInfo);
+    const ret = c.proc_pidinfo(pid, PROC_PIDCOALITIONINFO, 0, &info, @sizeOf(CoalitionInfo));
+    if (ret > 0) {
+        return info.coalition_id[0]; // Resource coalition
+    }
+    return 0;
+}
+
 pub fn collectSnapshot(arena: std.mem.Allocator) PlatformError!std.AutoHashMap(pid_t, Proc) {
     var proc_map: std.AutoHashMap(pid_t, Proc) = .init(arena);
     const bytes = c.proc_listpids(c.PROC_ALL_PIDS, 0, null, 0);
@@ -114,6 +135,7 @@ pub fn collectSnapshot(arena: std.mem.Allocator) PlatformError!std.AutoHashMap(p
                 .pid = pid,
                 .ppid = @intCast(proc_info.pbi_ppid),
                 .pgid = @intCast(proc_info.pbi_pgid),
+                .coalition_id = getCoalitionId(pid),
                 .start_time_ns = start_time_ns,
                 .name = name,
                 .path = path_str,
@@ -1301,9 +1323,10 @@ const xtcpcb_n = extern struct {
 
 /// Collect all TCP connections system-wide using sysctl
 /// Helper to create a TcpConnection with formatted addresses
-fn makeConnection(pid: i32, local_port: u16, foreign_port: u16, local_addr: *const [16]u8, foreign_addr: *const [16]u8, is_ipv6: bool, tcp_state: i32) model.TcpConnection {
+fn makeConnection(pid: i32, coalition_id: u64, local_port: u16, foreign_port: u16, local_addr: *const [16]u8, foreign_addr: *const [16]u8, is_ipv6: bool, tcp_state: i32) model.TcpConnection {
     var conn: model.TcpConnection = .{
         .pid = pid,
+        .coalition_id = coalition_id,
         .local_port = local_port,
         .remote_port = foreign_port,
         .local_addr = [_]u8{0} ** 46,
@@ -1403,6 +1426,7 @@ pub fn collectTcpConnections(arena: std.mem.Allocator) PlatformError![]model.Tcp
     var foreign_addr: [16]u8 = undefined;
     var is_ipv6: bool = false;
     var pid: i32 = 0;
+    var coalition_id: u64 = 0;
     var tcp_state: i32 = 0;
 
     // Parse entries - each connection has multiple sub-entries (INPCB, SOCKET, TCPCB)
@@ -1414,7 +1438,7 @@ pub fn collectTcpConnections(arena: std.mem.Allocator) PlatformError![]model.Tcp
         if (xt_len == xig_len) {
             // Save last connection if pending
             if (have_inpcb and pid > 0) {
-                const conn = makeConnection(pid, local_port, foreign_port, &local_addr, &foreign_addr, is_ipv6, tcp_state);
+                const conn = makeConnection(pid, coalition_id, local_port, foreign_port, &local_addr, &foreign_addr, is_ipv6, tcp_state);
                 connections.append(arena, conn) catch {};
             }
             break;
@@ -1445,7 +1469,7 @@ pub fn collectTcpConnections(arena: std.mem.Allocator) PlatformError![]model.Tcp
         if (xt_kind == XSO_INPCB and xt_len >= 64) {
             // Save previous connection if any
             if (have_inpcb and pid > 0) {
-                const conn = makeConnection(pid, local_port, foreign_port, &local_addr, &foreign_addr, is_ipv6, tcp_state);
+                const conn = makeConnection(pid, coalition_id, local_port, foreign_port, &local_addr, &foreign_addr, is_ipv6, tcp_state);
                 connections.append(arena, conn) catch {};
             }
 
@@ -1468,6 +1492,8 @@ pub fn collectTcpConnections(arena: std.mem.Allocator) PlatformError![]model.Tcp
         // SOCKET (kind=1) - contains UID at offset 64, PID at offset 68
         else if (xt_kind == XSO_SOCKET and xt_len >= 72) {
             pid = std.mem.readInt(i32, buf[offset + 68 ..][0..4], .little);
+            // Get coalition ID for this PID (groups app with XPC services)
+            coalition_id = if (pid > 0) getCoalitionId(pid) else 0;
         }
         // TCPCB (kind=32) - contains state at offset 36
         else if (xt_kind == XSO_TCPCB and xt_len >= 40) {

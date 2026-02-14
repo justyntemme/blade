@@ -3502,18 +3502,105 @@ fn renderDetailView(buf: *tui.render.Buffer, area: tui.render.Rect, app: *state.
     buf.setString(footer_rect.x, footer_rect.y, footer_hint, _Style{ .fg = .gray });
 }
 
+/// Helper to render a single TCP connection row
+fn renderTcpConnection(
+    buf: *tui.render.Buffer,
+    rect: layout.Rect,
+    conn: model.TcpConnection,
+    ln: *usize,
+    vis_start: usize,
+    vis_end: usize,
+    max_w: usize,
+    proc_name: ?[]const u8, // If set, show process name (for XPC service connections)
+) void {
+    if (ln.* >= vis_start and ln.* < vis_end) {
+        const y = rect.y + @as(u16, @intCast(ln.* - vis_start));
+
+        // Protocol
+        buf.setString(rect.x, y, "tcp", _Style{ .fg = .green });
+
+        // State with color
+        const state_label = conn.state.label();
+        const state_color: _Color = switch (conn.state) {
+            .established => .green,
+            .listen => .cyan,
+            .time_wait, .fin_wait_1, .fin_wait_2, .closing, .last_ack => .yellow,
+            .close_wait => .light_red,
+            .syn_sent, .syn_received => .light_blue,
+            .closed => .gray,
+            .unknown => .gray,
+        };
+        buf.setString(rect.x + 6, y, state_label, _Style{ .fg = state_color });
+
+        // Local address (format: addr:port)
+        var local_buf: [64]u8 = undefined;
+        const local_addr_slice = conn.local_addr[0..conn.local_addr_len];
+        const local_str = std.fmt.bufPrint(&local_buf, "{s}:{d}", .{ local_addr_slice, conn.local_port }) catch "";
+        const local_max: usize = 22;
+        const local_len = @min(local_str.len, local_max);
+        if (local_len > 0) {
+            buf.setString(rect.x + 18, y, local_str[0..local_len], _Style{ .fg = .white });
+        }
+
+        // Remote address (format: addr:port) or process name for XPC
+        if (proc_name) |name| {
+            // Show process name for XPC service connections
+            const name_max: usize = @min(max_w -| 42, 25);
+            const name_len = @min(name.len, name_max);
+            if (name_len > 0) {
+                buf.setString(rect.x + 42, y, name[0..name_len], _Style{ .fg = .cyan });
+            }
+            // Show remote after name
+            var remote_buf: [64]u8 = undefined;
+            const remote_addr_slice = conn.remote_addr[0..conn.remote_addr_len];
+            const remote_str = std.fmt.bufPrint(&remote_buf, "{s}:{d}", .{ remote_addr_slice, conn.remote_port }) catch "";
+            const remote_x = rect.x + 42 + @as(u16, @intCast(name_len)) + 1;
+            const remote_max: usize = @min(max_w -| (42 + name_len + 1), 20);
+            const remote_len = @min(remote_str.len, remote_max);
+            if (remote_len > 0 and remote_x < rect.x + rect.width) {
+                buf.setString(remote_x, y, remote_str[0..remote_len], _Style{ .fg = .gray });
+            }
+        } else {
+            // Standard remote address display
+            var remote_buf: [64]u8 = undefined;
+            const remote_addr_slice = conn.remote_addr[0..conn.remote_addr_len];
+            const remote_str = std.fmt.bufPrint(&remote_buf, "{s}:{d}", .{ remote_addr_slice, conn.remote_port }) catch "";
+            const remote_max: usize = @min(max_w -| 42, 30);
+            const remote_len = @min(remote_str.len, remote_max);
+            if (remote_len > 0) {
+                buf.setString(rect.x + 42, y, remote_str[0..remote_len], _Style{ .fg = .light_white });
+            }
+        }
+    }
+    ln.* += 1;
+}
+
 /// Render the network connections view (detail mode, network tab)
 fn renderDetailNetworkView(buf: *tui.render.Buffer, rect: layout.Rect, app: *state.AppState) void {
     const header_style = _Style{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } };
     const dim_style = _Style{ .fg = .gray };
 
-    // Get sysctl TCP connections for the detail PID (works for sandboxed processes)
+    // Get the detail process's coalition ID for grouping with XPC services
     const detail_pid = app.detail_pid orelse 0;
-    var sysctl_tcp_count: usize = 0;
+    const detail_coalition_id = blk: {
+        if (app.procs.pid_to_index.get(detail_pid)) |idx| {
+            break :blk app.procs.cold.items(.coalition_id)[idx];
+        }
+        break :blk @as(u64, 0);
+    };
+
+    // Count TCP connections from sysctl data
     const all_tcp = app.system.tcp_connections[0..app.system.tcp_connection_count];
+    var direct_tcp_count: usize = 0; // This process's connections
+    var coalition_tcp_count: usize = 0; // XPC service connections (same coalition)
     for (all_tcp) |conn| {
-        if (conn.pid == detail_pid) sysctl_tcp_count += 1;
+        if (conn.pid == detail_pid) {
+            direct_tcp_count += 1;
+        } else if (detail_coalition_id != 0 and conn.coalition_id == detail_coalition_id) {
+            coalition_tcp_count += 1;
+        }
     }
+    const sysctl_tcp_count = direct_tcp_count + coalition_tcp_count;
 
     const files = app.detail_open_files;
     const has_files = files != null and files.?.len > 0;
@@ -3617,51 +3704,39 @@ fn renderDetailNetworkView(buf: *tui.render.Buffer, rect: layout.Rect, app: *sta
     if (show_tcp) {
         if (use_sysctl_tcp) {
             // Use sysctl data (works for sandboxed processes like WebKit)
+            // First: render direct connections (pid == detail_pid)
             for (state_order) |target_state| {
                 for (all_tcp) |conn| {
                     if (conn.pid != detail_pid) continue;
                     if (conn.state != target_state) continue;
+                    renderTcpConnection(buf, rect, conn, &ln, vis_start, vis_end, max_w, null);
+                }
+            }
 
-                    if (ln >= vis_start and ln < vis_end) {
-                        const y = rect.y + @as(u16, @intCast(ln - vis_start));
+            // Second: render coalition connections (same coalition, different PID)
+            if (coalition_tcp_count > 0 and detail_coalition_id != 0) {
+                // Add separator label
+                if (ln >= vis_start and ln < vis_end) {
+                    const y = rect.y + @as(u16, @intCast(ln - vis_start));
+                    buf.setString(rect.x, y, "--- via XPC Services ---", _Style{ .fg = .magenta });
+                }
+                ln += 1;
 
-                        // Protocol
-                        buf.setString(rect.x, y, "tcp", _Style{ .fg = .green });
+                for (state_order) |target_state| {
+                    for (all_tcp) |conn| {
+                        if (conn.pid == detail_pid) continue; // Skip direct
+                        if (conn.coalition_id != detail_coalition_id) continue; // Must match coalition
+                        if (conn.state != target_state) continue;
 
-                        // State with color
-                        const conn_state_label = conn.state.label();
-                        const conn_state_color: _Color = switch (conn.state) {
-                            .established => .green,
-                            .listen => .cyan,
-                            .time_wait, .fin_wait_1, .fin_wait_2, .closing, .last_ack => .yellow,
-                            .close_wait => .light_red,
-                            .syn_sent, .syn_received => .light_blue,
-                            .closed => .gray,
-                            .unknown => .gray,
+                        // Get process name for this PID
+                        const proc_name = blk: {
+                            if (app.procs.pid_to_index.get(conn.pid)) |idx| {
+                                break :blk app.procs.cold.items(.name)[idx];
+                            }
+                            break :blk @as([]const u8, "");
                         };
-                        buf.setString(rect.x + 6, y, conn_state_label, _Style{ .fg = conn_state_color });
-
-                        // Local address (format: addr:port)
-                        var local_buf: [64]u8 = undefined;
-                        const local_addr_slice = conn.local_addr[0..conn.local_addr_len];
-                        const local_str = std.fmt.bufPrint(&local_buf, "{s}:{d}", .{ local_addr_slice, conn.local_port }) catch "";
-                        const local_max: usize = 22;
-                        const local_len = @min(local_str.len, local_max);
-                        if (local_len > 0) {
-                            buf.setString(rect.x + 18, y, local_str[0..local_len], _Style{ .fg = .white });
-                        }
-
-                        // Remote address (format: addr:port)
-                        var remote_buf: [64]u8 = undefined;
-                        const remote_addr_slice = conn.remote_addr[0..conn.remote_addr_len];
-                        const remote_str = std.fmt.bufPrint(&remote_buf, "{s}:{d}", .{ remote_addr_slice, conn.remote_port }) catch "";
-                        const remote_max: usize = @min(max_w -| 42, 30);
-                        const remote_len = @min(remote_str.len, remote_max);
-                        if (remote_len > 0) {
-                            buf.setString(rect.x + 42, y, remote_str[0..remote_len], _Style{ .fg = .light_white });
-                        }
+                        renderTcpConnection(buf, rect, conn, &ln, vis_start, vis_end, max_w, proc_name);
                     }
-                    ln += 1;
                 }
             }
         } else {

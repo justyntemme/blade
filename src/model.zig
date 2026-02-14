@@ -24,6 +24,7 @@ pub const Proc = struct {
     pid: pid_t = 0,
     ppid: pid_t = 0,
     pgid: pid_t = 0, // Process group ID - for session-based grouping
+    coalition_id: u64 = 0, // macOS coalition ID - groups app with its XPC services
     start_time_ns: i128 = 0,
     name: []const u8 = "",
     path: []const u8 = "",
@@ -68,6 +69,7 @@ pub const ProcCold = struct {
     path: []const u8,
     ppid: std.posix.pid_t,
     pgid: std.posix.pid_t, // Process group ID
+    coalition_id: u64, // macOS coalition ID - groups app with its XPC services
     nice: i32,
 };
 
@@ -178,6 +180,7 @@ pub const TcpState = enum {
 /// System-wide TCP connection (from kernel sysctl, includes PID)
 pub const TcpConnection = struct {
     pid: pid_t,
+    coalition_id: u64, // For grouping with parent app's XPC services
     local_port: u16,
     remote_port: u16,
     local_addr: [46]u8, // Max IPv6 string length

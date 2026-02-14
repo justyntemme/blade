@@ -121,6 +121,7 @@ pub const Store = struct {
                 .path = proc_ptr.path,
                 .ppid = proc_ptr.ppid,
                 .pgid = proc_ptr.pgid,
+                .coalition_id = proc_ptr.coalition_id,
                 .nice = proc_ptr.nice,
             });
             self.hot.appendAssumeCapacity(.{
