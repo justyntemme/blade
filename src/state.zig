@@ -493,6 +493,14 @@ pub const AppState = struct {
     mount_filter: MountFilter = .all,
     network_display_mode: NetworkDisplayMode = .by_interface,
     network_protocol_filter: NetworkProtocolFilter = .all,
+    // Dashboard pane navigation (h/l to switch, j/k within pane)
+    dashboard_focus: DashboardFocus = .process_list,
+    network_selected: usize = 0,
+    network_scroll: usize = 0,
+    network_entry_count: usize = 0, // Set by render for bounds checking
+    network_entry_pids: [128]model.pid_t = [_]model.pid_t{0} ** 128, // PIDs of network entries (set by render)
+    network_entry_cols: [128]u8 = [_]u8{0} ** 128, // Column of each entry (0=left, 1=right)
+    network_entry_rows: [128]u8 = [_]u8{0} ** 128, // Row within column for each entry
     confirm_dialog: ?ConfirmDialog = null,
     /// Maps pinned process identity to its pinned row position
     pinned_pids: std.AutoHashMap(model.ProcIdentity, usize) = undefined,
@@ -510,6 +518,7 @@ pub const AppState = struct {
 
     pub const MAX_CONNECTION_HISTORY = 512;
     pub const DetailFocus = enum { left, right };
+    pub const DashboardFocus = enum { process_list, network_pane };
 
     pub fn init(gpa: std.mem.Allocator) AppState {
         return .{
@@ -1113,6 +1122,97 @@ pub const AppState = struct {
     pub fn up(self: *AppState) void {
         if (self.selected_item > 0) {
             self.selected_item -= 1;
+        }
+    }
+
+    // Network pane navigation - j/k move within current column
+    pub fn networkUp(self: *AppState) void {
+        if (self.network_entry_count == 0) return;
+        const current_idx = @min(self.network_selected, self.network_entry_count - 1);
+        if (current_idx >= self.network_entry_cols.len) return;
+
+        const current_col = self.network_entry_cols[current_idx];
+        const current_row = self.network_entry_rows[current_idx];
+        if (current_row == 0) return;
+
+        // Find entry in same column, one row up
+        for (0..self.network_entry_count) |idx| {
+            if (idx >= self.network_entry_cols.len) break;
+            if (self.network_entry_cols[idx] == current_col and
+                self.network_entry_rows[idx] == current_row - 1)
+            {
+                self.network_selected = idx;
+                return;
+            }
+        }
+    }
+
+    pub fn networkDown(self: *AppState) void {
+        if (self.network_entry_count == 0) return;
+        const current_idx = @min(self.network_selected, self.network_entry_count - 1);
+        if (current_idx >= self.network_entry_cols.len) return;
+
+        const current_col = self.network_entry_cols[current_idx];
+        const current_row = self.network_entry_rows[current_idx];
+
+        // Find entry in same column, one row down
+        for (0..self.network_entry_count) |idx| {
+            if (idx >= self.network_entry_cols.len) break;
+            if (self.network_entry_cols[idx] == current_col and
+                self.network_entry_rows[idx] == current_row + 1)
+            {
+                self.network_selected = idx;
+                return;
+            }
+        }
+    }
+
+    pub fn getNetworkSelectedPid(self: *const AppState) ?model.pid_t {
+        if (self.network_entry_count == 0) return null;
+        const idx = @min(self.network_selected, self.network_entry_count - 1);
+        if (idx >= self.network_entry_pids.len) return null;
+        const pid = self.network_entry_pids[idx];
+        if (pid == 0) return null;
+        return pid;
+    }
+
+    /// Move to entry in left column at same row (or closest)
+    pub fn networkLeft(self: *AppState) void {
+        if (self.network_entry_count == 0) return;
+        const current_idx = @min(self.network_selected, self.network_entry_count - 1);
+        if (current_idx >= self.network_entry_cols.len) return;
+
+        // Already in left column?
+        if (self.network_entry_cols[current_idx] == 0) return;
+
+        // Find entry in left column at same row
+        const target_row = self.network_entry_rows[current_idx];
+        for (0..self.network_entry_count) |idx| {
+            if (idx >= self.network_entry_cols.len) break;
+            if (self.network_entry_cols[idx] == 0 and self.network_entry_rows[idx] == target_row) {
+                self.network_selected = idx;
+                return;
+            }
+        }
+    }
+
+    /// Move to entry in right column at same row (or closest)
+    pub fn networkRight(self: *AppState) void {
+        if (self.network_entry_count == 0) return;
+        const current_idx = @min(self.network_selected, self.network_entry_count - 1);
+        if (current_idx >= self.network_entry_cols.len) return;
+
+        // Already in right column?
+        if (self.network_entry_cols[current_idx] == 1) return;
+
+        // Find entry in right column at same row
+        const target_row = self.network_entry_rows[current_idx];
+        for (0..self.network_entry_count) |idx| {
+            if (idx >= self.network_entry_cols.len) break;
+            if (self.network_entry_cols[idx] == 1 and self.network_entry_rows[idx] == target_row) {
+                self.network_selected = idx;
+                return;
+            }
         }
     }
 

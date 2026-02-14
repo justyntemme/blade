@@ -223,44 +223,8 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
         buf.setString(title_x + 11, y0, "[2] Mem", mem_style);
         buf.setChar(title_x + 18, y0, BD_TL, border_style);
     }
-    // Disk IO title with keybinding indicators [s]torage and [m]ount
-    {
-        const title_x = x0 + 2;
-        // First island: Disk IO
-        buf.setChar(title_x, y_hd1, BD_TR, border_style);
-        buf.setString(title_x + 1, y_hd1, "Disk IO", pane_title_style);
-        buf.setChar(title_x + 8, y_hd1, BD_TL, border_style);
-
-        // Separator
-        buf.setChar(title_x + 9, y_hd1, BD_HOR, border_style);
-
-        // Second island: [s]torage mode
-        buf.setChar(title_x + 10, y_hd1, BD_TR, border_style);
-        buf.setString(title_x + 11, y_hd1, "[", _Style{ .fg = .gray });
-        buf.setString(title_x + 12, y_hd1, "s", _Style{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } });
-        buf.setString(title_x + 13, y_hd1, "]", _Style{ .fg = .gray });
-        const storage_label: []const u8 = switch (app.storage_detail_mode) {
-            .compact => "compact",
-            .full => "full",
-            .with_swap => "swap",
-        };
-        buf.setString(title_x + 14, y_hd1, storage_label, _Style{ .fg = .light_magenta });
-        const storage_end = title_x + 14 + @as(u16, @intCast(storage_label.len));
-        buf.setChar(storage_end, y_hd1, BD_TL, border_style);
-
-        // Separator
-        buf.setChar(storage_end + 1, y_hd1, BD_HOR, border_style);
-
-        // Third island: [m]ount filter
-        buf.setChar(storage_end + 2, y_hd1, BD_TR, border_style);
-        buf.setString(storage_end + 3, y_hd1, "[", _Style{ .fg = .gray });
-        buf.setString(storage_end + 4, y_hd1, "m", _Style{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } });
-        buf.setString(storage_end + 5, y_hd1, "]", _Style{ .fg = .gray });
-        const mount_label: []const u8 = if (app.mount_filter == .user_only) "user" else "all";
-        buf.setString(storage_end + 6, y_hd1, mount_label, _Style{ .fg = .light_green });
-        const mount_end = storage_end + 6 + @as(u16, @intCast(mount_label.len));
-        buf.setChar(mount_end, y_hd1, BD_TL, border_style);
-    }
+    // Disk IO title
+    drawTitle(buf, x0 + 2, y_hd1, "Disk IO");
     drawTitle(buf, x_vdB + 2, y_hd1, "Processes");
     // Network title with keybinding indicators "[n]etwork" "[p]rotocol" and mode/IP
     {
@@ -338,7 +302,7 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
     renderCpuOverlay(buf, cpu_full_rect, &app.system, app.cpu_overlay_mode, app.temp_unit);
     renderDiskIO(buf, disk_io_chart_rect, &app.system);
     renderStorageOverlay(buf, disk_io_full_rect, &app.system, app.storage_detail_mode, app.mount_filter); // Combined Memory + Mounts overlay
-    renderNetworkCombined(buf, network_rect, &app.system, app.network_display_mode, app.network_protocol_filter, app.procs.render_rows.items);
+    renderNetworkCombined(buf, network_rect, app, app.network_display_mode, app.network_protocol_filter);
 
     // Processes pane: calculate sub-layout within the content rect
     const proc_rects = layout.calculate(proc_inner_layout, proc_rect);
@@ -1841,7 +1805,8 @@ fn renderMultiRateDown(
     }
 }
 
-fn renderNetworkCombined(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state.SystemState, display_mode: state.NetworkDisplayMode, protocol_filter: state.NetworkProtocolFilter, _: []const model.RenderRow) void {
+fn renderNetworkCombined(buf: *tui.render.Buffer, rect: layout.Rect, app: *state.AppState, display_mode: state.NetworkDisplayMode, protocol_filter: state.NetworkProtocolFilter) void {
+    const sys = &app.system;
     if (!sys.has_data or rect.height == 0) {
         buf.setString(rect.x, rect.y, "Waiting for data...", _Style{ .fg = .gray });
         return;
@@ -1849,7 +1814,7 @@ fn renderNetworkCombined(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const
 
     // By-process mode: show socket count graphs per process
     if (display_mode == .by_process) {
-        renderNetworkByProcess(buf, rect, sys, protocol_filter);
+        renderNetworkByProcess(buf, rect, app, protocol_filter);
         return;
     }
 
@@ -2108,60 +2073,196 @@ fn renderNetworkOverlay(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const 
 }
 
 /// Render network view by process - shows socket count graphs per process
-fn renderNetworkByProcess(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state.SystemState, filter: state.NetworkProtocolFilter) void {
+/// Groups processes by coalition_id to show XPC children indented under parent apps
+fn renderNetworkByProcess(buf: *tui.render.Buffer, rect: layout.Rect, app: *state.AppState, filter: state.NetworkProtocolFilter) void {
     const dim_style = _Style{ .fg = .gray };
+    const sys = &app.system;
 
     // Process colors (same palette as network interfaces)
     const proc_colors = [_]_Color{ .light_cyan, .light_magenta, .light_green, .light_yellow, .light_blue, .light_red, .cyan, .magenta };
 
-    const tracked_count = sys.tracked_proc_count;
-    if (tracked_count == 0) {
+    // Get TCP connections
+    const all_tcp = sys.tcp_connections[0..sys.tcp_connection_count];
+    if (all_tcp.len == 0 and sys.tracked_proc_count == 0) {
         buf.setString(rect.x, rect.y, "No socket activity", dim_style);
         buf.setString(rect.x, rect.y + 1, "(waiting for processes with open sockets)", dim_style);
         return;
     }
 
-    // Layout: process labels (left) + braille chart (right)
-    // Each process gets 1 row: colored dot + name (8) + sockets (4) + I/O rates (opt) + chart (rest)
-    const label_w: u16 = 16; // "● name    123" base width
+    // Entry can be either a coalition leader (parent app) or a process with connections
+    const DisplayEntry = struct {
+        pid: model.pid_t,
+        coalition_id: u64,
+        is_leader: bool, // Coalition leader (main app like Safari)
+        is_child: bool, // XPC child within coalition
+        conn_count: u32, // Number of TCP connections
+        name: [16]u8,
+        name_len: u8,
+    };
 
-    // Count active processes and determine rows per process
-    var active_procs: [model.MAX_TRACKED_PROCS]usize = undefined;
-    var active_count: usize = 0;
-    for (0..model.MAX_TRACKED_PROCS) |i| {
-        if (sys.tracked_procs[i].active) {
-            // Check if process has sockets matching current filter
-            const tp = &sys.tracked_procs[i];
-            const filtered_count: u32 = switch (filter) {
-                .all => tp.socket_count,
-                .tcp => tp.tcp_count,
-                .udp => tp.udp_count,
-                .unix => tp.unix_count,
+    var entries: [model.MAX_TRACKED_PROCS * 2]DisplayEntry = undefined;
+    var entry_count: usize = 0;
+
+    // Collect unique coalition IDs from TCP connections
+    var seen_coalitions: [64]u64 = [_]u64{0} ** 64;
+    var seen_coalition_count: usize = 0;
+
+    // First: gather all unique PIDs with their connection counts and coalition IDs
+    const PidInfo = struct {
+        pid: model.pid_t,
+        coalition_id: u64,
+        conn_count: u32,
+    };
+    var pid_infos: [128]PidInfo = undefined;
+    var pid_info_count: usize = 0;
+
+    for (all_tcp) |conn| {
+        // Find or create entry for this PID
+        var found_idx: ?usize = null;
+        for (0..pid_info_count) |pi| {
+            if (pid_infos[pi].pid == conn.pid) {
+                found_idx = pi;
+                break;
+            }
+        }
+        if (found_idx) |idx| {
+            pid_infos[idx].conn_count += 1;
+        } else if (pid_info_count < pid_infos.len) {
+            pid_infos[pid_info_count] = .{
+                .pid = conn.pid,
+                .coalition_id = conn.coalition_id,
+                .conn_count = 1,
             };
-            if (filtered_count > 0) {
-                active_procs[active_count] = i;
-                active_count += 1;
+            pid_info_count += 1;
+        }
+
+        // Track unique coalition IDs (non-zero)
+        if (conn.coalition_id != 0) {
+            var coalition_seen = false;
+            for (seen_coalitions[0..seen_coalition_count]) |c| {
+                if (c == conn.coalition_id) {
+                    coalition_seen = true;
+                    break;
+                }
+            }
+            if (!coalition_seen and seen_coalition_count < seen_coalitions.len) {
+                seen_coalitions[seen_coalition_count] = conn.coalition_id;
+                seen_coalition_count += 1;
             }
         }
     }
 
-    // Sort by network usage (bytes_in_rate + bytes_out_rate) descending
-    if (active_count > 1) {
-        for (1..active_count) |i| {
-            const key = active_procs[i];
-            const key_rate = sys.tracked_procs[key].bytes_in_rate + sys.tracked_procs[key].bytes_out_rate;
-            var j = i;
-            while (j > 0) {
-                const prev_rate = sys.tracked_procs[active_procs[j - 1]].bytes_in_rate + sys.tracked_procs[active_procs[j - 1]].bytes_out_rate;
-                if (prev_rate >= key_rate) break;
-                active_procs[j] = active_procs[j - 1];
-                j -= 1;
+    // For each coalition, find the leader process (main app) from app.procs
+    const cold_slice = app.procs.cold.slice();
+    const hot_slice = app.procs.hot.slice();
+    const coalition_ids = cold_slice.items(.coalition_id);
+    const names = cold_slice.items(.name);
+    const pids = hot_slice.items(.pid);
+
+    for (seen_coalitions[0..seen_coalition_count]) |coalition_id| {
+        if (coalition_id == 0) continue;
+
+        // Find the coalition leader: process in this coalition with shortest name
+        // (XPC services typically have long names like "com.apple.WebKit.Networking")
+        var leader_idx: ?usize = null;
+        var leader_name_len: usize = 999;
+
+        for (0..cold_slice.len) |idx| {
+            if (coalition_ids[idx] == coalition_id) {
+                const name_len = names[idx].len;
+                // Prefer shorter names (main apps) over XPC service names
+                // Also prefer names not containing "com." or "XPC"
+                var score = name_len;
+                if (std.mem.indexOf(u8, names[idx], "com.") != null) score += 50;
+                if (std.mem.indexOf(u8, names[idx], "XPC") != null) score += 50;
+                if (std.mem.indexOf(u8, names[idx], "Helper") != null) score += 30;
+
+                if (score < leader_name_len) {
+                    leader_name_len = score;
+                    leader_idx = idx;
+                }
             }
-            active_procs[j] = key;
+        }
+
+        // Add the coalition leader as a display entry (even if no direct connections)
+        if (leader_idx) |idx| {
+            const leader_pid = pids[idx];
+            // Check if leader already has connections (would be in pid_infos)
+            var leader_has_connections = false;
+            for (0..pid_info_count) |pi| {
+                if (pid_infos[pi].pid == leader_pid) {
+                    leader_has_connections = true;
+                    break;
+                }
+            }
+
+            // Only add leader if it doesn't already have connections (will be added below)
+            if (!leader_has_connections and entry_count < entries.len) {
+                var name_buf: [16]u8 = [_]u8{0} ** 16;
+                const copy_len = @min(names[idx].len, 16);
+                @memcpy(name_buf[0..copy_len], names[idx][0..copy_len]);
+
+                entries[entry_count] = .{
+                    .pid = leader_pid,
+                    .coalition_id = coalition_id,
+                    .is_leader = true,
+                    .is_child = false,
+                    .conn_count = 0,
+                    .name = name_buf,
+                    .name_len = @intCast(copy_len),
+                };
+                entry_count += 1;
+            }
         }
     }
 
-    if (active_count == 0) {
+    // Add all PIDs with connections
+    for (0..pid_info_count) |pi| {
+        if (entry_count >= entries.len) break;
+
+        const info = pid_infos[pi];
+
+        // Get name from procs store or tracked_procs
+        var name_buf: [16]u8 = [_]u8{0} ** 16;
+        var name_len: u8 = 0;
+
+        if (app.procs.pid_to_index.get(info.pid)) |idx| {
+            const name = names[idx];
+            const copy_len = @min(name.len, 16);
+            @memcpy(name_buf[0..copy_len], name[0..copy_len]);
+            name_len = @intCast(copy_len);
+        } else {
+            // Fallback: check tracked_procs
+            for (0..model.MAX_TRACKED_PROCS) |ti| {
+                if (sys.tracked_procs[ti].active and sys.tracked_procs[ti].pid == info.pid) {
+                    const tp = &sys.tracked_procs[ti];
+                    const copy_len: usize = @intCast(tp.name_len);
+                    @memcpy(name_buf[0..copy_len], tp.name[0..copy_len]);
+                    name_len = tp.name_len;
+                    break;
+                }
+            }
+        }
+
+        if (name_len == 0) {
+            // Unknown process, use PID as name
+            const pid_str = std.fmt.bufPrint(&name_buf, "pid:{d}", .{info.pid}) catch "???";
+            name_len = @intCast(pid_str.len);
+        }
+
+        entries[entry_count] = .{
+            .pid = info.pid,
+            .coalition_id = info.coalition_id,
+            .is_leader = false,
+            .is_child = false,
+            .conn_count = info.conn_count,
+            .name = name_buf,
+            .name_len = name_len,
+        };
+        entry_count += 1;
+    }
+
+    if (entry_count == 0) {
         var msg_buf: [64]u8 = undefined;
         const msg = if (filter == .all)
             "No active network connections"
@@ -2171,64 +2272,253 @@ fn renderNetworkByProcess(buf: *tui.render.Buffer, rect: layout.Rect, sys: *cons
         return;
     }
 
-    // Calculate rows per process (at least 1, distribute evenly)
-    const rows_per_proc: u16 = @max(1, rect.height / @as(u16, @intCast(active_count)));
+    // Sort entries by coalition_id, then by is_leader (leaders first), then by conn_count
+    std.mem.sort(DisplayEntry, entries[0..entry_count], {}, struct {
+        fn lessThan(_: void, a: DisplayEntry, b: DisplayEntry) bool {
+            // Coalition 0 means unknown - sort these last
+            const a_has_coalition = a.coalition_id != 0;
+            const b_has_coalition = b.coalition_id != 0;
+            if (a_has_coalition != b_has_coalition) return a_has_coalition;
+            if (a.coalition_id != b.coalition_id) return a.coalition_id < b.coalition_id;
+            // Leaders first within coalition
+            if (a.is_leader != b.is_leader) return a.is_leader;
+            // Then by connection count
+            return a.conn_count > b.conn_count;
+        }
+    }.lessThan);
 
-    var y = rect.y;
-    for (0..active_count) |idx| {
-        if (y >= rect.y + rect.height) break;
+    // Mark XPC children (same coalition as previous, coalition must be non-zero)
+    var prev_coalition: u64 = 0;
+    for (0..entry_count) |idx| {
+        const coalition = entries[idx].coalition_id;
+        if (coalition != 0 and idx > 0 and coalition == prev_coalition and !entries[idx].is_leader) {
+            entries[idx].is_child = true;
+        }
+        prev_coalition = coalition;
+    }
 
-        const proc_idx = active_procs[idx];
-        const tp = &sys.tracked_procs[proc_idx];
-        const color = proc_colors[idx % proc_colors.len];
+    // Store entry PIDs and count for navigation
+    app.network_entry_count = entry_count;
+    const pid_copy_len = @min(entry_count, app.network_entry_pids.len);
+    for (0..pid_copy_len) |idx| {
+        app.network_entry_pids[idx] = entries[idx].pid;
+    }
+    // Clamp selection to valid range
+    if (app.network_selected >= entry_count and entry_count > 0) {
+        app.network_selected = entry_count - 1;
+    }
 
-        // Row 1: colored dot + name + socket count (filtered by protocol)
-        buf.setString(rect.x, y, "\xe2\x97\x8f", _Style{ .fg = color }); // ● dot
+    // Check if network pane is focused for selection highlight
+    const show_selection = (app.dashboard_focus == .network_pane);
 
-        const name_len: usize = @intCast(tp.name_len);
-        const name_max: usize = 8;
-        const name_display_len = @min(name_len, name_max);
-        buf.setString(rect.x + 2, y, tp.name[0..name_display_len], _Style{ .fg = .white });
+    // Count coalition groups for two-column layout
+    // Each coalition group (parent + children) stays together in one column
+    const CoalitionGroup = struct {
+        start_idx: usize,
+        count: usize,
+    };
+    var groups: [model.MAX_TRACKED_PROCS * 2]CoalitionGroup = undefined;
+    var group_count: usize = 0;
+    var i: usize = 0;
+    while (i < entry_count) {
+        const start = i;
+        const coalition = entries[i].coalition_id;
+        i += 1;
+        // Include all children in same group
+        while (i < entry_count and entries[i].coalition_id == coalition and coalition != 0) : (i += 1) {}
+        groups[group_count] = .{ .start_idx = start, .count = i - start };
+        group_count += 1;
+    }
 
-        // Socket count - filtered by protocol
-        const display_count: u32 = switch (filter) {
-            .all => tp.socket_count,
-            .tcp => tp.tcp_count,
-            .udp => tp.udp_count,
-            .unix => tp.unix_count,
-        };
-        var count_buf: [8]u8 = undefined;
-        const count_str = std.fmt.bufPrint(&count_buf, "{d:>3}", .{display_count}) catch "???";
-        buf.setString(rect.x + 11, y, count_str, _Style{ .fg = color });
+    // Two-column layout - distribute groups (not individual entries) evenly
+    const col_gap: u16 = 2;
+    const col_width: u16 = (rect.width -| col_gap) / 2;
+    const col2_x = rect.x + col_width + col_gap;
+    const max_rows: usize = @intCast(rect.height);
 
-        // Network I/O rates (from nettop, if available)
-        var rate_offset: u16 = 14;
-        if (tp.bytes_in_rate > 0 or tp.bytes_out_rate > 0) {
-            // Format: ▼1.2M ▲300K
-            var rate_buf: [24]u8 = undefined;
-            const in_rate = formatRateCompact(tp.bytes_in_rate);
-            const out_rate = formatRateCompact(tp.bytes_out_rate);
-            const rate_str = std.fmt.bufPrint(&rate_buf, "\xe2\x96\xbc{s}\xe2\x96\xb2{s}", .{ in_rate, out_rate }) catch "";
-            if (rate_str.len > 0) {
-                buf.setString(rect.x + rate_offset, y, rate_str, _Style{ .fg = .gray });
-                rate_offset += @as(u16, @intCast(@min(rate_str.len, 16)));
+    // Assign groups to columns, keeping each group together
+    var left_rows: usize = 0;
+    var right_rows: usize = 0;
+    var group_columns: [model.MAX_TRACKED_PROCS * 2]u16 = undefined; // 0=left, 1=right
+    var group_start_rows: [model.MAX_TRACKED_PROCS * 2]usize = undefined;
+
+    for (0..group_count) |gi| {
+        const group_size = groups[gi].count;
+        // Assign to column with fewer rows (balance columns)
+        if (left_rows <= right_rows) {
+            group_columns[gi] = 0;
+            group_start_rows[gi] = left_rows;
+            left_rows += group_size;
+        } else {
+            group_columns[gi] = 1;
+            group_start_rows[gi] = right_rows;
+            right_rows += group_size;
+        }
+    }
+
+    var color_idx: usize = 0;
+    for (0..group_count) |gi| {
+        const group = groups[gi];
+        const col = group_columns[gi];
+        const base_x: u16 = if (col == 0) rect.x else col2_x;
+        const max_x = if (col == 0) col2_x -| 1 else rect.x + rect.width;
+
+        for (0..group.count) |offset| {
+            const row_in_col = group_start_rows[gi] + offset;
+            if (row_in_col >= max_rows) break;
+
+            const idx = group.start_idx + offset;
+            const y: u16 = rect.y + @as(u16, @intCast(row_in_col));
+
+            // Store column and row info for navigation
+            if (idx < app.network_entry_cols.len) {
+                app.network_entry_cols[idx] = @intCast(col);
+                app.network_entry_rows[idx] = @intCast(row_in_col);
+            }
+
+            const entry = entries[idx];
+            const is_selected = show_selection and idx == app.network_selected;
+
+            // XPC children use same color as parent but get indent
+            if (!entry.is_child) {
+                color_idx = gi; // Use group index for color
+            }
+            const color = proc_colors[color_idx % proc_colors.len];
+
+            const name_slice = entry.name[0..entry.name_len];
+
+            // Selection highlight - draw background for selected row
+            if (is_selected) {
+                // Fill row with highlight background
+                for (base_x..max_x) |x| {
+                    buf.setString(@intCast(x), y, " ", _Style{ .bg = .dark_gray });
+                }
+            }
+
+            if (entry.is_child) {
+                // XPC child - show with └ prefix and indent
+                const child_style: _Style = if (is_selected)
+                    .{ .fg = .white, .bg = .dark_gray }
+                else
+                    .{ .fg = .gray };
+                buf.setString(base_x, y, "  \xe2\x94\x94", child_style); // └
+                const name_max: usize = 7;
+                const name_display_len = @min(entry.name_len, name_max);
+                buf.setString(base_x + 4, y, name_slice[0..name_display_len], child_style);
+            } else {
+                // Parent process - colored dot
+                const dot_style: _Style = if (is_selected)
+                    .{ .fg = color, .bg = .dark_gray }
+                else
+                    .{ .fg = color };
+                const name_style: _Style = if (is_selected)
+                    .{ .fg = .white, .bg = .dark_gray, .modifier = _Modifier{ .bold = true } }
+                else
+                    .{ .fg = .white };
+                buf.setString(base_x, y, "\xe2\x97\x8f", dot_style); // ● dot
+                const name_max: usize = 8;
+                const name_display_len = @min(entry.name_len, name_max);
+                buf.setString(base_x + 2, y, name_slice[0..name_display_len], name_style);
+            }
+
+            // Connection count
+            const name_style_color: _Color = if (entry.is_child) .gray else color;
+            const count_style: _Style = if (is_selected)
+                .{ .fg = name_style_color, .bg = .dark_gray }
+            else
+                .{ .fg = name_style_color };
+            var count_buf: [8]u8 = undefined;
+            const count_str = std.fmt.bufPrint(&count_buf, "{d:>3}", .{entry.conn_count}) catch "???";
+            buf.setString(base_x + 11, y, count_str, count_style);
+
+            // Port styles with selection background
+            const listen_style: _Style = if (is_selected) .{ .fg = .cyan, .bg = .dark_gray } else .{ .fg = .cyan };
+            const remote_prefix_style: _Style = if (is_selected) .{ .fg = .yellow, .bg = .dark_gray } else .{ .fg = .yellow };
+            const remote_port_style: _Style = if (is_selected) .{ .fg = .light_yellow, .bg = .dark_gray } else .{ .fg = .light_yellow };
+            const space_style: _Style = if (is_selected) .{ .bg = .dark_gray } else .{};
+
+            // Collect unique ports for this process from TCP connections
+            // Separate listen ports (local) from remote ports (outbound)
+            var listen_ports: [4]u16 = [_]u16{0} ** 4;
+            var listen_count: usize = 0;
+            var remote_ports: [4]u16 = [_]u16{0} ** 4;
+            var remote_count: usize = 0;
+
+            for (all_tcp) |conn| {
+                if (conn.pid != entry.pid) continue;
+
+                if (conn.state == .listen) {
+                    // Listening port - use local port
+                    const port = conn.local_port;
+                    if (port == 0) continue;
+                    var found = false;
+                    for (listen_ports[0..listen_count]) |p| {
+                        if (p == port) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found and listen_count < 4) {
+                        listen_ports[listen_count] = port;
+                        listen_count += 1;
+                    }
+                } else {
+                    // Outbound connection - use remote port
+                    const port = conn.remote_port;
+                    if (port == 0) continue;
+                    var found = false;
+                    for (remote_ports[0..remote_count]) |p| {
+                        if (p == port) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found and remote_count < 4) {
+                        remote_ports[remote_count] = port;
+                        remote_count += 1;
+                    }
+                }
+            }
+
+            // Display ports after count: ":port" for listen, "→port" for remote
+            var x_offset: u16 = 15;
+
+            // Listen ports first (cyan, with : prefix)
+            if (listen_count > 0) {
+                for (0..listen_count) |pi| {
+                    if (base_x + x_offset >= max_x -| 2) break;
+                    buf.setString(base_x + x_offset, y, ":", listen_style);
+                    x_offset += 1;
+                    var port_buf: [6]u8 = undefined;
+                    const port_str = std.fmt.bufPrint(&port_buf, "{d}", .{listen_ports[pi]}) catch "";
+                    buf.setString(base_x + x_offset, y, port_str, listen_style);
+                    x_offset += @as(u16, @intCast(port_str.len));
+                    if (pi < listen_count - 1 or remote_count > 0) {
+                        if (base_x + x_offset < max_x -| 2) {
+                            buf.setString(base_x + x_offset, y, " ", space_style);
+                            x_offset += 1;
+                        }
+                    }
+                }
+            }
+
+            // Remote ports (yellow, with → prefix)
+            if (remote_count > 0) {
+                for (0..remote_count) |pi| {
+                    if (base_x + x_offset >= max_x -| 2) break;
+                    buf.setString(base_x + x_offset, y, "\xe2\x86\x92", remote_prefix_style); // →
+                    x_offset += 1;
+                    var port_buf: [6]u8 = undefined;
+                    const port_str = std.fmt.bufPrint(&port_buf, "{d}", .{remote_ports[pi]}) catch "";
+                    buf.setString(base_x + x_offset, y, port_str, remote_port_style);
+                    x_offset += @as(u16, @intCast(port_str.len));
+                    if (pi < remote_count - 1 and base_x + x_offset < max_x -| 2) {
+                        buf.setString(base_x + x_offset, y, " ", space_style);
+                        x_offset += 1;
+                    }
+                }
             }
         }
-
-        // Braille chart for socket history (shows total - per-protocol history not tracked)
-        const adjusted_label_w = @max(label_w, rate_offset + 1);
-        const adjusted_chart_w: u16 = if (rect.width > adjusted_label_w + 2) rect.width - adjusted_label_w else 2;
-        const chart_rows = @min(rows_per_proc, (rect.y + rect.height) -| y);
-        if (adjusted_chart_w > 0 and chart_rows > 0) {
-            renderSocketBrailleChart(buf, .{
-                .x = rect.x + adjusted_label_w,
-                .y = y,
-                .width = adjusted_chart_w,
-                .height = chart_rows,
-            }, &tp.history, color);
-        }
-
-        y += rows_per_proc;
     }
 }
 
@@ -3532,9 +3822,9 @@ fn renderDetailView(buf: *tui.render.Buffer, area: tui.render.Rect, app: *state.
 
     // --- Footer keybinds ---
     const footer_hint = if (app.detail_view_mode == .network)
-        "esc:close  v:info view  j/k:scroll  u/d:page  x:kill"
+        "esc:close  v:info  j/k:scroll  u/d:page  s:suspend  r:resume  x:kill"
     else
-        "esc:close  v:network  h/l:pane  j/k:scroll  u/d:page  x:kill";
+        "esc:close  v:network  h/l:pane  j/k:scroll  s:suspend  r:resume  x:kill";
     buf.setString(footer_rect.x, footer_rect.y, footer_hint, _Style{ .fg = .gray });
 }
 

@@ -22,6 +22,14 @@ pub fn signal(pid: std.posix.pid_t, force: bool) PlatformError!void {
     return backend.signal(pid, force);
 }
 
+pub fn suspendProcess(pid: std.posix.pid_t) PlatformError!void {
+    return backend.suspendProcess(pid);
+}
+
+pub fn resumeProcess(pid: std.posix.pid_t) PlatformError!void {
+    return backend.resumeProcess(pid);
+}
+
 pub fn renice(pid: std.posix.pid_t, delta: i32) PlatformError!i32 {
     return backend.renice(pid, delta);
 }

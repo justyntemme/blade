@@ -81,6 +81,14 @@ pub const keymap = [_]KeyBinding{
     .{ .key = .{ .char = 'n' }, .action = .toggle_network_mode, .modes = &.{ .normal, .search_view }, .description = "network mode", .category = "Display" },
     .{ .key = .{ .char = 'p' }, .action = .toggle_protocol_filter, .modes = &.{ .normal, .search_view }, .description = "protocol filter", .category = "Display" },
 
+    // Dashboard pane focus (H/L to switch between network pane on left and process list on right)
+    .{ .key = .{ .char = 'H' }, .action = .focus_left, .modes = &.{ .normal, .search_view }, .description = "focus network", .category = "Navigation" },
+    .{ .key = .{ .char = 'L' }, .action = .focus_right, .modes = &.{ .normal, .search_view }, .description = "focus processes", .category = "Navigation" },
+
+    // Network column navigation (h/l when network pane focused)
+    .{ .key = .{ .char = 'h' }, .action = .move_left, .modes = &.{ .normal, .search_view }, .description = "left column", .category = "Navigation" },
+    .{ .key = .{ .char = 'l' }, .action = .move_right, .modes = &.{ .normal, .search_view }, .description = "right column", .category = "Navigation" },
+
     // Application
     .{ .key = .{ .char = 'q' }, .action = .quit, .modes = &.{ .normal, .search_view }, .description = "quit", .category = "General" },
     .{ .key = .{ .special = .esc }, .action = .quit, .modes = &.{.normal}, .description = "" },
@@ -96,6 +104,8 @@ pub const keymap = [_]KeyBinding{
     .{ .key = .{ .char = 'l' }, .action = .focus_right, .modes = &.{.detail}, .description = "" },
     .{ .key = .{ .char = 'v' }, .action = .toggle_detail_view, .modes = &.{.detail}, .description = "toggle info/network" },
     .{ .key = .{ .char = 'p' }, .action = .toggle_preserve_log, .modes = &.{.detail}, .description = "preserve log mode" },
+    .{ .key = .{ .char = 's' }, .action = .pause_process, .modes = &.{.detail}, .description = "suspend" },
+    .{ .key = .{ .char = 'r' }, .action = .resume_process, .modes = &.{.detail}, .description = "resume" },
 
     // Confirm dialog mode
     .{ .key = .{ .char = 'y' }, .action = .confirm_dialog_yes, .modes = &.{.confirm_dialog}, .description = "" },

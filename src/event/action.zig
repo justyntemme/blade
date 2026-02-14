@@ -1,6 +1,8 @@
 pub const Action = enum {
     move_up,
     move_down,
+    move_left,
+    move_right,
     page_up,
     page_down,
 
@@ -11,6 +13,8 @@ pub const Action = enum {
 
     kill_term,
     kill_force,
+    pause_process,
+    resume_process,
 
     sort_by_pid,
     sort_by_name,

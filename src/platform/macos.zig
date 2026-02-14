@@ -164,6 +164,32 @@ pub fn signal(pid: pid_t, force: bool) PlatformError!void {
     }
 }
 
+pub fn suspendProcess(pid: pid_t) PlatformError!void {
+    const SIGSTOP: i32 = 17; // macOS SIGSTOP
+    const result = std.c.kill(pid, SIGSTOP);
+    const e = std.posix.errno(result);
+    if (e != .SUCCESS) {
+        return switch (e) {
+            .PERM => PlatformError.PermissionDenied,
+            .SRCH => PlatformError.ProcessNotFound,
+            else => PlatformError.Unexpected,
+        };
+    }
+}
+
+pub fn resumeProcess(pid: pid_t) PlatformError!void {
+    const SIGCONT: i32 = 19; // macOS SIGCONT
+    const result = std.c.kill(pid, SIGCONT);
+    const e = std.posix.errno(result);
+    if (e != .SUCCESS) {
+        return switch (e) {
+            .PERM => PlatformError.PermissionDenied,
+            .SRCH => PlatformError.ProcessNotFound,
+            else => PlatformError.Unexpected,
+        };
+    }
+}
+
 pub fn renice(pid: pid_t, delta: i32) PlatformError!i32 {
     // Get current priority first
     const PRIO_PROCESS = 0;

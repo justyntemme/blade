@@ -67,6 +67,8 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
                 }
             } else if (app.mode == .help) {
                 if (app.help_scroll > 0) app.help_scroll -= 1;
+            } else if (app.dashboard_focus == .network_pane) {
+                app.networkUp();
             } else app.up();
         },
         .move_down => {
@@ -74,7 +76,21 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
                 if (app.detail_focus == .left) app.detailScrollDown() else app.detail_right_scroll += 1;
             } else if (app.mode == .help) {
                 app.help_scroll += 1;
+            } else if (app.dashboard_focus == .network_pane) {
+                app.networkDown();
             } else app.down();
+        },
+        .move_left => {
+            // Only works when network pane is focused
+            if (app.dashboard_focus == .network_pane) {
+                app.networkLeft();
+            }
+        },
+        .move_right => {
+            // Only works when network pane is focused
+            if (app.dashboard_focus == .network_pane) {
+                app.networkRight();
+            }
         },
         .page_up => {
             if (app.mode == .detail) {
@@ -85,6 +101,8 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
                 }
             } else if (app.mode == .help) {
                 app.help_scroll -|= 10;
+            } else if (app.dashboard_focus == .network_pane) {
+                for (0..5) |_| app.networkUp();
             } else {
                 for (0..5) |_| app.up();
             }
@@ -98,6 +116,8 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
                 }
             } else if (app.mode == .help) {
                 app.help_scroll += 10;
+            } else if (app.dashboard_focus == .network_pane) {
+                for (0..5) |_| app.networkDown();
             } else {
                 for (0..5) |_| app.down();
             }
@@ -107,6 +127,9 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
                 if (app.detail_focus == .left) app.detail_scroll = 0 else app.detail_right_scroll = 0;
             } else if (app.mode == .help) {
                 app.help_scroll = 0;
+            } else if (app.dashboard_focus == .network_pane) {
+                app.network_selected = 0;
+                app.network_scroll = 0;
             } else app.jumpTop();
         },
         .jump_bottom => {
@@ -116,6 +139,10 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
                 if (app.detail_focus == .left) app.detail_scroll = safe_max else app.detail_right_scroll = safe_max;
             } else if (app.mode == .help) {
                 app.help_scroll = ~@as(usize, 0);
+            } else if (app.dashboard_focus == .network_pane) {
+                if (app.network_entry_count > 0) {
+                    app.network_selected = app.network_entry_count - 1;
+                }
             } else app.jumpBottom();
         },
         .quit => {
@@ -134,6 +161,28 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
         },
         .kill_term => showKillConfirm(app, false),
         .kill_force => showKillConfirm(app, true),
+        .pause_process => {
+            if (app.mode == .detail) {
+                if (app.detail_pid) |pid| {
+                    platform.suspendProcess(pid) catch |err| {
+                        app.showToastFmt("Suspend failed: {}", .{err}, .err);
+                        return;
+                    };
+                    app.showToast("Process suspended (SIGSTOP)", .info);
+                }
+            }
+        },
+        .resume_process => {
+            if (app.mode == .detail) {
+                if (app.detail_pid) |pid| {
+                    platform.resumeProcess(pid) catch |err| {
+                        app.showToastFmt("Resume failed: {}", .{err}, .err);
+                        return;
+                    };
+                    app.showToast("Process resumed (SIGCONT)", .info);
+                }
+            }
+        },
         .sort_by_pid => app.setSort(.pid),
         .sort_by_name => app.setSort(.name),
         .sort_by_cpu => app.setSort(.cpu),
@@ -146,15 +195,37 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
             app.mode = .normal;
         },
         .open_detail => {
-            const rows = app.procs.render_rows.items;
-            if (rows.len == 0) return;
-            const idx = @min(app.selected_item, rows.len - 1);
-            const pid = rows[idx].pid;
-            app.openDetail(pid);
+            if (app.dashboard_focus == .network_pane) {
+                // Open detail for selected network entry
+                if (app.getNetworkSelectedPid()) |pid| {
+                    app.openDetail(pid);
+                }
+            } else {
+                const rows = app.procs.render_rows.items;
+                if (rows.len == 0) return;
+                const idx = @min(app.selected_item, rows.len - 1);
+                const pid = rows[idx].pid;
+                app.openDetail(pid);
+            }
         },
         .close_detail => app.closeDetail(),
-        .focus_left => app.detail_focus = .left,
-        .focus_right => app.detail_focus = .right,
+        .focus_left => {
+            if (app.mode == .detail) {
+                app.detail_focus = .left;
+            } else {
+                // Only allow focus on network pane when by_process mode is active
+                if (app.network_display_mode == .by_process) {
+                    app.dashboard_focus = .network_pane;
+                }
+            }
+        },
+        .focus_right => {
+            if (app.mode == .detail) {
+                app.detail_focus = .right;
+            } else {
+                app.dashboard_focus = .process_list;
+            }
+        },
         .toggle_detail_view => {
             app.detail_view_mode = if (app.detail_view_mode == .info) .network else .info;
             app.detail_scroll = 0; // Reset scroll when switching views
@@ -177,6 +248,10 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
         },
         .toggle_network_mode => {
             app.network_display_mode = app.network_display_mode.next();
+            // Reset focus to process list if leaving by_process mode
+            if (app.network_display_mode != .by_process) {
+                app.dashboard_focus = .process_list;
+            }
         },
         .toggle_protocol_filter => {
             app.network_protocol_filter = app.network_protocol_filter.next();

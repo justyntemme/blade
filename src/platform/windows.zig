@@ -19,6 +19,16 @@ pub fn signal(pid: std.posix.pid_t, force: bool) PlatformError!void {
     return error.Unsupported;
 }
 
+pub fn suspendProcess(pid: std.posix.pid_t) PlatformError!void {
+    _ = pid;
+    return error.Unsupported;
+}
+
+pub fn resumeProcess(pid: std.posix.pid_t) PlatformError!void {
+    _ = pid;
+    return error.Unsupported;
+}
+
 pub fn renice(pid: std.posix.pid_t, delta: i32) PlatformError!i32 {
     _ = pid;
     _ = delta;
