@@ -3542,33 +3542,29 @@ fn renderTcpConnection(
             buf.setString(rect.x + 18, y, local_str[0..local_len], _Style{ .fg = .white });
         }
 
-        // Remote address (format: addr:port) or process name for XPC
+        // Remote address - always show the actual endpoint
+        var remote_buf: [64]u8 = undefined;
+        const remote_addr_slice = conn.remote_addr[0..conn.remote_addr_len];
+        const remote_str = std.fmt.bufPrint(&remote_buf, "{s}:{d}", .{ remote_addr_slice, conn.remote_port }) catch "";
+        const remote_max: usize = 22;
+        const remote_len = @min(remote_str.len, remote_max);
+        if (remote_len > 0) {
+            buf.setString(rect.x + 42, y, remote_str[0..remote_len], _Style{ .fg = .light_white });
+        }
+
+        // For XPC service connections, show the owning process name after remote
         if (proc_name) |name| {
-            // Show process name for XPC service connections
-            const name_max: usize = @min(max_w -| 42, 25);
-            const name_len = @min(name.len, name_max);
-            if (name_len > 0) {
-                buf.setString(rect.x + 42, y, name[0..name_len], _Style{ .fg = .cyan });
-            }
-            // Show remote after name
-            var remote_buf: [64]u8 = undefined;
-            const remote_addr_slice = conn.remote_addr[0..conn.remote_addr_len];
-            const remote_str = std.fmt.bufPrint(&remote_buf, "{s}:{d}", .{ remote_addr_slice, conn.remote_port }) catch "";
-            const remote_x = rect.x + 42 + @as(u16, @intCast(name_len)) + 1;
-            const remote_max: usize = @min(max_w -| (42 + name_len + 1), 20);
-            const remote_len = @min(remote_str.len, remote_max);
-            if (remote_len > 0 and remote_x < rect.x + rect.width) {
-                buf.setString(remote_x, y, remote_str[0..remote_len], _Style{ .fg = .gray });
-            }
-        } else {
-            // Standard remote address display
-            var remote_buf: [64]u8 = undefined;
-            const remote_addr_slice = conn.remote_addr[0..conn.remote_addr_len];
-            const remote_str = std.fmt.bufPrint(&remote_buf, "{s}:{d}", .{ remote_addr_slice, conn.remote_port }) catch "";
-            const remote_max: usize = @min(max_w -| 42, 30);
-            const remote_len = @min(remote_str.len, remote_max);
-            if (remote_len > 0) {
-                buf.setString(rect.x + 42, y, remote_str[0..remote_len], _Style{ .fg = .light_white });
+            const col_offset: usize = 42 + @as(usize, remote_len) + 1;
+            const via_x = rect.x +| @as(u16, @intCast(@min(col_offset, 200)));
+            if (via_x + 5 < rect.x + rect.width) {
+                buf.setString(via_x, y, "via", _Style{ .fg = .gray });
+                const name_x = via_x + 4;
+                const remaining = max_w -| (col_offset + 4);
+                const name_max: usize = @min(remaining, 20);
+                const name_len = @min(name.len, name_max);
+                if (name_len > 0 and name_x < rect.x + rect.width) {
+                    buf.setString(name_x, y, name[0..name_len], _Style{ .fg = .cyan });
+                }
             }
         }
     }
