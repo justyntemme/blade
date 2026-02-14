@@ -4748,25 +4748,20 @@ fn renderDetailTreeAndFiles(buf: *tui.render.Buffer, rect: layout.Rect, detail: 
     }.f;
 
     // Helper for section header style
-    // When left pane focused: all headers gray (dimmed)
-    // When right pane focused + accordion: focused section = yellow, others = gray
-    // When right pane focused + no accordion: all headers cyan
+    // When left pane focused: all headers cyan (dimmed)
+    // When right pane focused: selected section = yellow, others = gray
     const getSectionStyle = struct {
         fn f(right_pane_focused: bool, section: state.DetailSection, current_focus: state.DetailSection, show_accordion: bool) _Style {
+            _ = show_accordion; // Always show selection, regardless of accordion state
             if (!right_pane_focused) {
-                // Left pane has focus - dim all section headers
-                return _Style{ .fg = .gray };
+                // Left pane has focus - all headers cyan (visible but not selected)
+                return _Style{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } };
             }
-            // Right pane has focus
-            if (show_accordion) {
-                // Accordion mode: highlight only the focused section
-                if (section == current_focus) {
-                    return _Style{ .fg = .light_yellow, .modifier = _Modifier{ .bold = true } };
-                }
-                return _Style{ .fg = .gray };
+            // Right pane has focus - highlight selected section in yellow
+            if (section == current_focus) {
+                return _Style{ .fg = .light_yellow, .modifier = _Modifier{ .bold = true } };
             }
-            // No accordion needed - all headers cyan to indicate right pane focus
-            return _Style{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } };
+            return _Style{ .fg = .gray };
         }
     }.f;
 
@@ -4875,7 +4870,8 @@ fn renderDetailTreeAndFiles(buf: *tui.render.Buffer, rect: layout.Rect, detail: 
             const start = @min(indent, cur_buf.len);
             const end = @min(start + label.len, cur_buf.len);
             @memcpy(cur_buf[start..end], label[0 .. end - start]);
-            buf.setString(rx, y, cur_buf[0..@min(end, max_w)], _Style{ .fg = .light_yellow, .modifier = _Modifier{ .bold = true } });
+            // Use cyan+bold for "current process being viewed" (not yellow - that's for section selection)
+            buf.setString(rx, y, cur_buf[0..@min(end, max_w)], _Style{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } });
         }
         ln += 1;
 

@@ -104,6 +104,7 @@ pub const keymap = [_]KeyBinding{
     .{ .key = .{ .char = 'l' }, .action = .focus_right, .modes = &.{.detail}, .description = "" },
     .{ .key = .{ .char = 'v' }, .action = .toggle_detail_view, .modes = &.{.detail}, .description = "toggle info/network" },
     .{ .key = .{ .special = .tab }, .action = .toggle_detail_section, .modes = &.{.detail}, .description = "expand/collapse section" },
+    .{ .key = .{ .special = .enter }, .action = .toggle_detail_section, .modes = &.{.detail}, .description = "" },
     .{ .key = .{ .char = 'p' }, .action = .toggle_preserve_log, .modes = &.{.detail}, .description = "preserve log mode" },
     .{ .key = .{ .char = 's' }, .action = .pause_process, .modes = &.{.detail}, .description = "suspend" },
     .{ .key = .{ .char = 'r' }, .action = .resume_process, .modes = &.{.detail}, .description = "resume" },
