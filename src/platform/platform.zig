@@ -21,6 +21,10 @@ pub fn collectSnapshot(arena: std.mem.Allocator) PlatformError!std.AutoHashMap(p
 pub fn signal(pid: std.posix.pid_t, force: bool) PlatformError!void {
     return backend.signal(pid, force);
 }
+
+pub fn renice(pid: std.posix.pid_t, delta: i32) PlatformError!i32 {
+    return backend.renice(pid, delta);
+}
 pub const Capabilities = packed struct {
     can_signal: bool = false,
     has_cpu_time: bool = false,

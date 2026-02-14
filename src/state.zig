@@ -329,7 +329,28 @@ pub const CpuOverlayMode = enum { cores, aggregate };
 pub const TempUnit = enum { celsius, fahrenheit };
 pub const StorageDetailMode = enum { compact, full, with_swap };
 pub const MountFilter = enum { user_only, all };
-pub const NetworkDisplayMode = enum { by_interface, by_process };
+pub const DashboardGraphMode = enum { cpu, memory };
+pub const NetworkDisplayMode = enum {
+    by_interface,
+    by_process, // Socket connection counts with sparklines
+    by_process_detail, // Detailed I/O rates per process (from nettop)
+
+    pub fn next(self: NetworkDisplayMode) NetworkDisplayMode {
+        return switch (self) {
+            .by_interface => .by_process,
+            .by_process => .by_process_detail,
+            .by_process_detail => .by_interface,
+        };
+    }
+
+    pub fn label(self: NetworkDisplayMode) []const u8 {
+        return switch (self) {
+            .by_interface => "iface",
+            .by_process => "connections",
+            .by_process_detail => "process",
+        };
+    }
+};
 pub const NetworkProtocolFilter = enum {
     all,
     tcp,
@@ -409,7 +430,10 @@ pub const AppState = struct {
     last_update_ns: i128 = 0,
     detail_queue: *channel.DetailQueue = undefined,
     mount_queue: *channel.MountQueue = undefined,
+    nettop_queue: *channel.NettopQueue = undefined,
     last_mount_collect_ns: i128 = 0,
+    last_nettop_collect_ns: i128 = 0,
+    nettop_pending: bool = false,
     detail_pid: ?model.pid_t = null,
     detail_data: ?model.ProcessDetail = null,
     detail_arena: ?std.heap.ArenaAllocator = null,
@@ -422,6 +446,7 @@ pub const AppState = struct {
     procs: procs.Store,
     system: SystemState = .{},
     cpu_overlay_mode: CpuOverlayMode = .cores,
+    dashboard_graph_mode: DashboardGraphMode = .cpu,
     temp_unit: TempUnit = .celsius,
     storage_detail_mode: StorageDetailMode = .with_swap,
     mount_filter: MountFilter = .all,
@@ -490,6 +515,7 @@ pub const AppState = struct {
         const cold = self.procs.cold.slice();
         const names = cold.items(.name);
         const paths = cold.items(.path);
+        const nices = cold.items(.nice);
 
         // First, find which pinned processes are missing from render_rows
         var missing_rows: [64]model.RenderRow = undefined;
@@ -526,6 +552,7 @@ pub const AppState = struct {
                             .mem_rss = mem_rsss[data_idx],
                             .name = names[data_idx],
                             .path = paths[data_idx],
+                            .nice = nices[data_idx],
                             .depth = 0, // Pinned processes show at root level
                             .has_children = false,
                             .is_last = true,
@@ -799,6 +826,22 @@ pub const AppState = struct {
             thread.detach();
         }
 
+        // Lazy-load nettop for per-process network I/O (only in by_process or by_process_detail mode)
+        // Rate-limited to every 2 seconds to avoid overhead
+        const needs_nettop = self.network_display_mode == .by_process or self.network_display_mode == .by_process_detail;
+        if (needs_nettop and !self.nettop_pending) {
+            const nettop_elapsed = now_ns - self.last_nettop_collect_ns;
+            const two_sec_ns: i128 = 2 * std.time.ns_per_s;
+            if (self.last_nettop_collect_ns == 0 or nettop_elapsed >= two_sec_ns) {
+                self.nettop_pending = true;
+                const nettop_thread = std.Thread.spawn(.{}, collectNettopWorker, .{ self.nettop_queue, self.gpa }) catch {
+                    self.nettop_pending = false;
+                    return;
+                };
+                nettop_thread.detach();
+            }
+        }
+
         //close detail view if the inspected process exits
         if (self.detail_pid) |dpid| {
             const exists = self.procs.pid_to_index.get(dpid) != null;
@@ -928,6 +971,131 @@ pub const AppState = struct {
         _ = queue.tryPush(.{ .snapshot = snapshot });
     }
 
+    /// Background worker to collect per-process network I/O via nettop
+    fn collectNettopWorker(queue: *channel.NettopQueue, gpa: std.mem.Allocator) void {
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        const alloc = arena.allocator();
+
+        // Run nettop in batch mode to get per-process network stats
+        // -P: show per-process, -L 1: one sample, -x: extended output
+        var child = std.process.Child.init(&.{ "nettop", "-P", "-L", "1", "-x", "-J", "bytes_in,bytes_out" }, alloc);
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Ignore;
+
+        child.spawn() catch {
+            arena.deinit();
+            return;
+        };
+
+        // Read stdout first (before wait, to avoid pipe buffer filling)
+        const stdout = child.stdout orelse {
+            _ = child.wait() catch {};
+            arena.deinit();
+            return;
+        };
+
+        // Read all available data
+        var output_buf: [64 * 1024]u8 = undefined;
+        var read_buf: [4096]u8 = undefined;
+        var total_read: usize = 0;
+
+        while (true) {
+            const n = stdout.read(&read_buf) catch break;
+            if (n == 0) break;
+            if (total_read + n > output_buf.len) break;
+            @memcpy(output_buf[total_read..][0..n], read_buf[0..n]);
+            total_read += n;
+        }
+
+        const output = output_buf[0..total_read];
+
+        // Now wait for child to exit
+        _ = child.wait() catch {};
+
+        // Parse nettop output (CSV format)
+        // Format: process_name.pid,bytes_in,bytes_out,
+        var processes: std.ArrayListUnmanaged(channel.ProcessNetIO) = .empty;
+
+        var lines = std.mem.splitScalar(u8, output, '\n');
+        _ = lines.next(); // Skip header line: ",bytes_in,bytes_out,"
+
+        while (lines.next()) |line| {
+            if (line.len == 0) continue;
+
+            // Parse CSV: "process_name.pid,bytes_in,bytes_out,"
+            var fields = std.mem.splitScalar(u8, line, ',');
+
+            // First field: process_name.pid
+            const proc_field = fields.next() orelse continue;
+            if (proc_field.len == 0) continue;
+
+            // Find last dot to extract pid
+            const dot_idx = std.mem.lastIndexOfScalar(u8, proc_field, '.') orelse continue;
+            if (dot_idx + 1 >= proc_field.len) continue;
+
+            const pid = std.fmt.parseInt(model.pid_t, proc_field[dot_idx + 1 ..], 10) catch continue;
+
+            // Bytes in
+            const bytes_in_str = fields.next() orelse continue;
+            const bytes_in = std.fmt.parseInt(u64, bytes_in_str, 10) catch continue;
+
+            // Bytes out
+            const bytes_out_str = fields.next() orelse continue;
+            const bytes_out = std.fmt.parseInt(u64, bytes_out_str, 10) catch continue;
+
+            processes.append(alloc, .{
+                .pid = pid,
+                .bytes_in = bytes_in,
+                .bytes_out = bytes_out,
+            }) catch continue;
+        }
+
+        const timestamp_ns = std.time.nanoTimestamp();
+
+        if (!queue.tryPush(.{
+            .arena = arena,
+            .processes = processes.toOwnedSlice(alloc) catch &.{},
+            .timestamp_ns = timestamp_ns,
+        })) {
+            arena.deinit();
+        }
+    }
+
+    pub fn receiveNettop(self: *AppState, result: channel.NettopResult) void {
+        self.nettop_pending = false;
+
+        // Calculate time delta for rate computation
+        const dt_ns = result.timestamp_ns - self.last_nettop_collect_ns;
+        const dt_s: f64 = if (dt_ns > 0) @as(f64, @floatFromInt(dt_ns)) / 1_000_000_000.0 else 1.0;
+
+        // Update tracked processes with network I/O data
+        for (result.processes) |proc_io| {
+            // Find matching tracked process
+            for (&self.system.tracked_procs) |*tp| {
+                if (tp.active and tp.pid == proc_io.pid) {
+                    // Calculate rates
+                    if (tp.prev_bytes_in > 0 or tp.prev_bytes_out > 0) {
+                        tp.bytes_in_rate = @as(f64, @floatFromInt(proc_io.bytes_in -| tp.prev_bytes_in)) / dt_s;
+                        tp.bytes_out_rate = @as(f64, @floatFromInt(proc_io.bytes_out -| tp.prev_bytes_out)) / dt_s;
+                        // Push to history for sparklines
+                        tp.in_rate_history.push(tp.bytes_in_rate);
+                        tp.out_rate_history.push(tp.bytes_out_rate);
+                    }
+                    tp.bytes_in = proc_io.bytes_in;
+                    tp.bytes_out = proc_io.bytes_out;
+                    tp.prev_bytes_in = proc_io.bytes_in;
+                    tp.prev_bytes_out = proc_io.bytes_out;
+                    break;
+                }
+            }
+        }
+
+        self.last_nettop_collect_ns = result.timestamp_ns;
+
+        var r = result;
+        r.deinit();
+    }
+
     pub fn receiveDetail(self: *AppState, result: channel.DetailResult) void {
         if (self.detail_pid) |current_pid| {
             if (current_pid == result.pid and self.mode == .detail) {
@@ -1043,7 +1211,8 @@ pub const AppState = struct {
     }
 
     pub fn detailScrollToBottom(self: *AppState) void {
-        self.detail_scroll = std.math.maxInt(usize);
+        // Use a large but safe value that won't overflow in render calculations
+        self.detail_scroll = std.math.maxInt(usize) / 2;
     }
 
     pub fn searchClear(self: *AppState) void {

@@ -111,7 +111,9 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
         },
         .jump_bottom => {
             if (app.mode == .detail) {
-                if (app.detail_focus == .left) app.detailScrollToBottom() else app.detail_right_scroll = ~@as(usize, 0);
+                // Use a large but safe value that won't overflow in render calculations
+                const safe_max: usize = std.math.maxInt(usize) / 2;
+                if (app.detail_focus == .left) app.detail_scroll = safe_max else app.detail_right_scroll = safe_max;
             } else if (app.mode == .help) {
                 app.help_scroll = ~@as(usize, 0);
             } else app.jumpBottom();
@@ -174,7 +176,7 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
             app.mount_filter = if (app.mount_filter == .user_only) .all else .user_only;
         },
         .toggle_network_mode => {
-            app.network_display_mode = if (app.network_display_mode == .by_interface) .by_process else .by_interface;
+            app.network_display_mode = app.network_display_mode.next();
         },
         .toggle_protocol_filter => {
             app.network_protocol_filter = app.network_protocol_filter.next();
@@ -226,6 +228,10 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
                 app.refreshFilter();
             }
         },
+        .nice_up => executeRenice(app, -1),
+        .nice_down => executeRenice(app, 1),
+        .dashboard_cpu => app.dashboard_graph_mode = .cpu,
+        .dashboard_mem => app.dashboard_graph_mode = .memory,
     }
 }
 
@@ -284,6 +290,20 @@ fn executeKill(app: *state.AppState, pid: std.posix.pid_t, force: bool) void {
         return;
     };
     app.buildView();
+}
+
+fn executeRenice(app: *state.AppState, delta: i32) void {
+    const rows = app.procs.render_rows.items;
+    if (rows.len == 0) return;
+
+    const idx = @min(app.selected_item, rows.len - 1);
+    const row = rows[idx];
+    const pid = row.pid;
+
+    _ = platform.renice(pid, delta) catch |err| {
+        app.showToastFmt("Renice failed: {}", .{err}, .err);
+        return;
+    };
 }
 
 // This is special as we may have arbitruary keys that can not map

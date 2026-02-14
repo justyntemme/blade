@@ -121,6 +121,7 @@ pub const Store = struct {
                 .path = proc_ptr.path,
                 .ppid = proc_ptr.ppid,
                 .pgid = proc_ptr.pgid,
+                .nice = proc_ptr.nice,
             });
             self.hot.appendAssumeCapacity(.{
                 .pid = proc_ptr.pid,
@@ -241,6 +242,7 @@ pub const Store = struct {
         const mems = self.hot.items(.mem_rss);
         const names = self.cold.items(.name);
         const paths = self.cold.items(.path);
+        const nices = self.cold.items(.nice);
 
         for (self.visible_nodes.items) |vn| {
             const di: usize = @intCast(vn.data_idx);
@@ -250,6 +252,7 @@ pub const Store = struct {
                 .mem_rss = mems[di],
                 .name = names[di],
                 .path = paths[di],
+                .nice = nices[di],
                 .depth = vn.depth,
                 .has_children = vn.has_children,
                 .is_last = vn.is_last,

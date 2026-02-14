@@ -58,3 +58,24 @@ pub const MountResult = struct {
 };
 
 pub const MountQueue = spsc.SpscQueue(MountResult, false);
+
+/// Per-process network I/O data from nettop
+pub const ProcessNetIO = struct {
+    pid: model.pid_t,
+    bytes_in: u64,
+    bytes_out: u64,
+};
+
+/// NettopResult carries per-process network I/O from worker thread to main.
+/// Uses arena for the process list.
+pub const NettopResult = struct {
+    arena: std.heap.ArenaAllocator,
+    processes: []ProcessNetIO,
+    timestamp_ns: i128,
+
+    pub fn deinit(self: *NettopResult) void {
+        self.arena.deinit();
+    }
+};
+
+pub const NettopQueue = spsc.SpscQueue(NettopResult, false);

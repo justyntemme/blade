@@ -120,6 +120,7 @@ pub fn collectSnapshot(arena: std.mem.Allocator) PlatformError!std.AutoHashMap(p
                 .mem_rss = if (task_size > 0) task_info.pti_resident_size else 0,
                 .total_user = if (task_size > 0) task_info.pti_total_user else 0,
                 .total_system = if (task_size > 0) task_info.pti_total_system else 0,
+                .nice = @intCast(proc_info.pbi_nice),
             };
             proc_map.putAssumeCapacity(pid, proc);
         }
@@ -139,6 +140,39 @@ pub fn signal(pid: pid_t, force: bool) PlatformError!void {
             else => PlatformError.Unexpected,
         };
     }
+}
+
+pub fn renice(pid: pid_t, delta: i32) PlatformError!i32 {
+    // Get current priority first
+    const PRIO_PROCESS = 0;
+    const current = c.getpriority(PRIO_PROCESS, @intCast(pid));
+    const get_errno = std.posix.errno(0);
+    // getpriority can return -1 legitimately, so check errno
+    if (current == -1 and get_errno != .SUCCESS) {
+        return switch (get_errno) {
+            .PERM => PlatformError.PermissionDenied,
+            .SRCH => PlatformError.ProcessNotFound,
+            else => PlatformError.Unexpected,
+        };
+    }
+
+    // Calculate new priority (clamped to -20..20)
+    var new_nice = current + delta;
+    if (new_nice < -20) new_nice = -20;
+    if (new_nice > 20) new_nice = 20;
+
+    // Set new priority
+    const result = c.setpriority(PRIO_PROCESS, @intCast(pid), new_nice);
+    const e = std.posix.errno(result);
+    if (e != .SUCCESS) {
+        return switch (e) {
+            .PERM, .ACCES => PlatformError.PermissionDenied,
+            .SRCH => PlatformError.ProcessNotFound,
+            else => PlatformError.Unexpected,
+        };
+    }
+
+    return new_nice;
 }
 
 pub fn capabilities() platform.Capabilities {

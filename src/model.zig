@@ -30,6 +30,7 @@ pub const Proc = struct {
     mem_rss: u64 = 0,
     total_user: u64 = 0,
     total_system: u64 = 0,
+    nice: i32 = 0,
 };
 
 pub const ProcessSnapshot = struct {
@@ -67,6 +68,7 @@ pub const ProcCold = struct {
     path: []const u8,
     ppid: std.posix.pid_t,
     pgid: std.posix.pid_t, // Process group ID
+    nice: i32,
 };
 
 pub const ProcColdList = std.MultiArrayList(ProcCold);
@@ -172,6 +174,7 @@ pub const RenderRow = struct {
     mem_rss: u64,
     name: []const u8,
     path: []const u8,
+    nice: i32,
     depth: u16,
     has_children: bool,
     is_last: bool,
@@ -373,4 +376,44 @@ pub const TrackedProcess = struct {
     unix_count: u32 = 0,
     history: SocketHistory = .{},
     active: bool = false,
+    // Per-process network I/O (from nettop, lazy-loaded)
+    bytes_in: u64 = 0,
+    bytes_out: u64 = 0,
+    bytes_in_rate: f64 = 0, // bytes/sec
+    bytes_out_rate: f64 = 0, // bytes/sec
+    prev_bytes_in: u64 = 0,
+    prev_bytes_out: u64 = 0,
+    // Rate history for sparklines (60 samples = ~2 min at 2s intervals)
+    in_rate_history: NetRateHistory = .{},
+    out_rate_history: NetRateHistory = .{},
+};
+
+pub const NET_RATE_HISTORY_LEN = 60;
+
+pub const NetRateHistory = struct {
+    samples: [NET_RATE_HISTORY_LEN]f32 = [_]f32{0} ** NET_RATE_HISTORY_LEN,
+    head: usize = 0,
+    count: usize = 0,
+
+    pub fn push(self: *NetRateHistory, value: f64) void {
+        // Store as f32 to save space, clamp to reasonable range
+        self.samples[self.head] = @floatCast(@min(value, 1e12));
+        self.head = (self.head + 1) % NET_RATE_HISTORY_LEN;
+        if (self.count < NET_RATE_HISTORY_LEN) self.count += 1;
+    }
+
+    pub fn get(self: *const NetRateHistory, i: usize) f32 {
+        if (i >= self.count) return 0;
+        const start = if (self.count < NET_RATE_HISTORY_LEN) 0 else self.head;
+        return self.samples[(start + i) % NET_RATE_HISTORY_LEN];
+    }
+
+    pub fn max(self: *const NetRateHistory) f32 {
+        var max_val: f32 = 0;
+        for (0..self.count) |i| {
+            const v = self.get(i);
+            if (v > max_val) max_val = v;
+        }
+        return max_val;
+    }
 };

@@ -53,6 +53,8 @@ pub const keymap = [_]KeyBinding{
     .{ .key = .{ .special = .enter }, .action = .open_detail, .modes = &.{ .normal, .search_view }, .description = "details", .category = "Process" },
     .{ .key = .{ .char = 'x' }, .action = .kill_term, .modes = &.{ .normal, .search_view, .detail }, .description = "kill", .category = "Process" },
     .{ .key = .{ .char = 'X' }, .action = .kill_force, .modes = &.{ .normal, .search_view, .detail }, .description = "kill -9", .category = "Process" },
+    .{ .key = .{ .char = '+' }, .action = .nice_down, .modes = &.{ .normal, .search_view }, .description = "lower priority", .category = "Process" },
+    .{ .key = .{ .char = '-' }, .action = .nice_up, .modes = &.{ .normal, .search_view }, .description = "raise priority", .category = "Process" },
 
     // Search
     .{ .key = .{ .char = '/' }, .action = .start_search, .modes = &.{ .normal, .search_view }, .description = "search", .category = "Search" },
@@ -63,6 +65,10 @@ pub const keymap = [_]KeyBinding{
     .{ .key = .{ .char = 'N' }, .action = .sort_by_name, .modes = &.{ .normal, .search_view }, .description = "sort Name", .category = "Sorting" },
     .{ .key = .{ .char = 'C' }, .action = .sort_by_cpu, .modes = &.{ .normal, .search_view }, .description = "sort CPU", .category = "Sorting" },
     .{ .key = .{ .char = 'M' }, .action = .sort_by_mem, .modes = &.{ .normal, .search_view }, .description = "sort mem", .category = "Sorting" },
+
+    // Dashboard graph toggle
+    .{ .key = .{ .char = '1' }, .action = .dashboard_cpu, .modes = &.{ .normal, .search_view }, .description = "CPU graph", .category = "Display" },
+    .{ .key = .{ .char = '2' }, .action = .dashboard_mem, .modes = &.{ .normal, .search_view }, .description = "Memory graph", .category = "Display" },
 
     // CPU Overlay
     .{ .key = .{ .char = 't' }, .action = .toggle_temp_unit, .modes = &.{ .normal, .search_view }, .description = "temp °C/°F", .category = "Display" },

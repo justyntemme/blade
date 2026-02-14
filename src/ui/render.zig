@@ -80,12 +80,13 @@ const BD_RBR: u21 = 0x256F; // ╯
 const border_style = _Style{ .fg = .cyan };
 const pane_title_style = _Style{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } };
 
-// column_layout: [0]=pid, [1]=name, [2]=cpu, [3]=mem, [4]=path
+// column_layout: [0]=pid, [1]=name, [2]=cpu, [3]=mem, [4]=nice, [5]=path
 const column_layout = layout.Container.row(&[_]layout.Item{
     .{ .sizing = .{ .fixed = 8 } },
     .{ .sizing = .{ .grow = 1.0 } },
     .{ .sizing = .{ .fixed = 7 } },
     .{ .sizing = .{ .fixed = 10 } },
+    .{ .sizing = .{ .fixed = 4 } },
     .{ .sizing = .{ .grow = 2.0 } },
 });
 
@@ -203,38 +204,71 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
     }
 
     // ── Titles on borders / dividers ──────────────────────────────
-    drawTitle(buf, x0 + 2, y0, "CPU");
+    // CPU/Mem selector title: "╮[1] CPU╭╮[2] Mem╭" with active highlighted
+    {
+        const title_x = x0 + 2;
+        const active_style = _Style{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } };
+        const inactive_style = _Style{ .fg = .gray };
+        const cpu_style = if (app.dashboard_graph_mode == .cpu) active_style else inactive_style;
+        const mem_style = if (app.dashboard_graph_mode == .memory) active_style else inactive_style;
+
+        // First island: [1] CPU
+        buf.setChar(title_x, y0, BD_TR, border_style);
+        buf.setString(title_x + 1, y0, "[1] CPU", cpu_style);
+        buf.setChar(title_x + 8, y0, BD_TL, border_style);
+        // Separator
+        buf.setChar(title_x + 9, y0, BD_HOR, border_style);
+        // Second island: [2] Mem
+        buf.setChar(title_x + 10, y0, BD_TR, border_style);
+        buf.setString(title_x + 11, y0, "[2] Mem", mem_style);
+        buf.setChar(title_x + 18, y0, BD_TL, border_style);
+    }
     // Disk IO title (with Memory+Disks in overlay)
     drawTitle(buf, x0 + 2, y_hd1, "Disk IO");
     drawTitle(buf, x_vdB + 2, y_hd1, "Processes");
     // Network title with keybinding indicators "[n]etwork" "[p]rotocol" and mode/IP
     {
         const title_x = x0 + 2;
+        // First island: [n]etwork
         buf.setChar(title_x, y_hd2, BD_TR, border_style);
         buf.setString(title_x + 1, y_hd2, "[", _Style{ .fg = .gray });
         buf.setString(title_x + 2, y_hd2, "n", _Style{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } });
         buf.setString(title_x + 3, y_hd2, "]etwork", _Style{ .fg = .gray });
-        // Show current mode indicator
-        const mode_str: []const u8 = if (app.network_display_mode == .by_interface) "iface" else "proc";
-        buf.setString(title_x + 10, y_hd2, " ", _Style{});
-        buf.setString(title_x + 11, y_hd2, mode_str, _Style{ .fg = .light_magenta });
-        var cursor = title_x + 11 + @as(u16, @intCast(mode_str.len));
+        buf.setChar(title_x + 10, y_hd2, BD_TL, border_style);
 
-        // Protocol filter indicator: [p]rotocol --- TCP
-        buf.setString(cursor + 1, y_hd2, " [", _Style{ .fg = .gray });
-        buf.setString(cursor + 3, y_hd2, "p", _Style{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } });
-        buf.setString(cursor + 4, y_hd2, "]rotocol", _Style{ .fg = .gray });
-        buf.setString(cursor + 12, y_hd2, " --- ", _Style{ .fg = .gray });
-        const proto_label = app.network_protocol_filter.label();
-        buf.setString(cursor + 17, y_hd2, proto_label, _Style{ .fg = .light_green });
-        cursor = cursor + 17 + @as(u16, @intCast(proto_label.len));
+        // Separator
+        buf.setChar(title_x + 11, y_hd2, BD_HOR, border_style);
 
-        // IP address after protocol
+        // Second island: mode label
+        const mode_str = app.network_display_mode.label();
+        buf.setChar(title_x + 12, y_hd2, BD_TR, border_style);
+        buf.setString(title_x + 13, y_hd2, mode_str, _Style{ .fg = .light_magenta });
+        const mode_end = title_x + 13 + @as(u16, @intCast(mode_str.len));
+        buf.setChar(mode_end, y_hd2, BD_TL, border_style);
+        var cursor = mode_end;
+
+        // Third island: [p]rotocol filter (shown in by_process and by_process_detail modes)
+        if (app.network_display_mode != .by_interface) {
+            // Separator
+            buf.setChar(cursor + 1, y_hd2, BD_HOR, border_style);
+            buf.setChar(cursor + 2, y_hd2, BD_TR, border_style);
+            buf.setString(cursor + 3, y_hd2, "[", _Style{ .fg = .gray });
+            buf.setString(cursor + 4, y_hd2, "p", _Style{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } });
+            buf.setString(cursor + 5, y_hd2, "]", _Style{ .fg = .gray });
+            const proto_label = app.network_protocol_filter.label();
+            buf.setString(cursor + 6, y_hd2, proto_label, _Style{ .fg = .light_green });
+            cursor = cursor + 6 + @as(u16, @intCast(proto_label.len));
+            buf.setChar(cursor, y_hd2, BD_TL, border_style);
+        }
+
+        // Fourth island: IP address
         if (app.system.ipv4_addr_len > 0) {
+            // Separator
+            buf.setChar(cursor + 1, y_hd2, BD_HOR, border_style);
             const ip_str = app.system.ipv4_addr[0..app.system.ipv4_addr_len];
-            buf.setChar(cursor + 1, y_hd2, BD_TR, border_style);
-            buf.setString(cursor + 2, y_hd2, ip_str, _Style{ .fg = .gray });
-            buf.setChar(cursor + 2 + @as(u16, @intCast(app.system.ipv4_addr_len)), y_hd2, BD_TL, border_style);
+            buf.setChar(cursor + 2, y_hd2, BD_TR, border_style);
+            buf.setString(cursor + 3, y_hd2, ip_str, _Style{ .fg = .gray });
+            buf.setChar(cursor + 3 + @as(u16, @intCast(app.system.ipv4_addr_len)), y_hd2, BD_TL, border_style);
         }
     }
 
@@ -264,7 +298,7 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
     const proc_rect = layout.Rect{ .x = x_vdB + 1, .y = y_hd1 + 1, .width = proc_w, .height = y1 - y_hd1 - 1 };
 
     // ── Render content into each pane ─────────────────────────────
-    renderCpuGraphBraille(buf, cpu_graph_rect, &app.system);
+    renderDashboardGraph(buf, cpu_graph_rect, &app.system, app.dashboard_graph_mode);
     renderCpuOverlay(buf, cpu_full_rect, &app.system, app.cpu_overlay_mode, app.temp_unit);
     renderDiskIO(buf, disk_io_chart_rect, &app.system);
     renderStorageOverlay(buf, disk_io_full_rect, &app.system, app.storage_detail_mode, app.mount_filter); // Combined Memory + Mounts overlay
@@ -314,7 +348,8 @@ fn renderProcessPane(
     const name_col = col_rects[1];
     const cpu_col = col_rects[2];
     const mem_col = col_rects[3];
-    const path_col = col_rects[4];
+    const nice_col = col_rects[4];
+    const path_col = col_rects[5];
 
     const visible_rows = list_rect.height;
     if (visible_rows > 0) {
@@ -330,6 +365,7 @@ fn renderProcessPane(
     renderColumnHeader(buf, name_col.x, header_rect.y, "Name", app.procs.sort_column == .name, dir_suffix);
     renderColumnHeader(buf, cpu_col.x, header_rect.y, "CPU%", app.procs.sort_column == .cpu, dir_suffix);
     renderColumnHeader(buf, mem_col.x, header_rect.y, "MEM", app.procs.sort_column == .mem, dir_suffix);
+    renderColumnHeader(buf, nice_col.x, header_rect.y, "NI", false, dir_suffix);
     renderColumnHeader(buf, path_col.x, header_rect.y, "Path", app.procs.sort_column == .path, dir_suffix);
 
     const alt_row_bg = _Color{ .rgb = .{ .r = 35, .g = 35, .b = 40 } };
@@ -415,6 +451,14 @@ fn renderProcessPane(
 
         buf.setString(cpu_col.x, y, cpu_str, cpu_style);
         buf.setString(mem_col.x, y, mem_str, mem_style);
+
+        // Nice value - color based on priority (negative = higher priority)
+        var nice_buf: [4]u8 = undefined;
+        const nice_str = std.fmt.bufPrint(&nice_buf, "{d:>3}", .{row.nice}) catch "err";
+        const nice_fg: _Color = if (row.nice < 0) .light_red else if (row.nice > 0) .light_green else .gray;
+        const nice_style: _Style = if (is_highlighted) .{ .bg = .blue, .fg = nice_fg } else .{ .bg = row_bg, .fg = nice_fg };
+        buf.setString(nice_col.x, y, nice_str, nice_style);
+
         buf.setString(path_col.x, y, path_display, secondary_style);
 
         // Update guide state for subsequent rows
@@ -621,6 +665,81 @@ fn renderMemBrailleChart(buf: *tui.render.Buffer, rect: layout.Rect, history: *c
     }
 }
 
+/// Braille sparkline chart - single row, 2 samples per character, consistent with other braille charts.
+/// Uses braille dot patterns to show vertical bars (4 levels per column).
+/// Each character is colored based on the max value of its two samples.
+fn renderSparkline(buf: *tui.render.Buffer, x: u16, y: u16, width: u16, history: *const model.CpuHistory) void {
+    if (width == 0) return;
+
+    // Build braille character from dot bits
+    // Braille dots are numbered 1-8:
+    //   1 4
+    //   2 5
+    //   3 6
+    //   7 8
+    // For vertical bars from bottom up:
+    // Left column (bottom to top): 7, 3, 2, 1
+    // Right column (bottom to top): 8, 6, 5, 4
+
+    const w: usize = @intCast(width);
+    const sample_count = history.count;
+
+    // 2 samples per braille character
+    const capacity = w * 2;
+    const start_sample: usize = if (sample_count > capacity) sample_count - capacity else 0;
+    const filled_chars: usize = if (sample_count >= 2) @min((sample_count + 1) / 2, w) else if (sample_count == 1) 1 else 0;
+
+    var col: usize = 0;
+    while (col < w) : (col += 1) {
+        const screen_x = x + @as(u16, @intCast(col));
+
+        // Before data starts, draw baseline (single bottom dot)
+        if (col < w - filled_chars) {
+            buf.setString(screen_x, y, "⡀", _Style{ .fg = .gray });
+            continue;
+        }
+
+        const data_col = col - (w - filled_chars);
+        const pair_base = start_sample + data_col * 2;
+
+        const left_val: f32 = if (pair_base < sample_count) @min(history.get(pair_base), 100.0) else 0;
+        const right_val: f32 = if (pair_base + 1 < sample_count) @min(history.get(pair_base + 1), 100.0) else left_val;
+
+        // Convert 0-100% to 0-4 level (4 dots per column)
+        var left_level: u8 = @intFromFloat(@min(left_val / 25.0, 4.0));
+        var right_level: u8 = @intFromFloat(@min(right_val / 25.0, 4.0));
+
+        // Ensure non-zero values show at least 1 dot
+        if (left_val > 0 and left_level == 0) left_level = 1;
+        if (right_val > 0 and right_level == 0) right_level = 1;
+
+        // Build braille codepoint from dots
+        // Left column bits: dot7=0x40, dot3=0x04, dot2=0x02, dot1=0x01
+        // Right column bits: dot8=0x80, dot6=0x20, dot5=0x10, dot4=0x08
+        var cp: u21 = 0x2800; // braille base
+
+        // Left column (bottom to top: 7, 3, 2, 1)
+        if (left_level >= 1) cp |= 0x40; // dot 7
+        if (left_level >= 2) cp |= 0x04; // dot 3
+        if (left_level >= 3) cp |= 0x02; // dot 2
+        if (left_level >= 4) cp |= 0x01; // dot 1
+
+        // Right column (bottom to top: 8, 6, 5, 4)
+        if (right_level >= 1) cp |= 0x80; // dot 8
+        if (right_level >= 2) cp |= 0x20; // dot 6
+        if (right_level >= 3) cp |= 0x10; // dot 5
+        if (right_level >= 4) cp |= 0x08; // dot 4
+
+        // Color based on max value
+        const max_val = @max(left_val, right_val);
+        const color = cpuColor(max_val);
+
+        var utf8_buf: [4]u8 = undefined;
+        const utf8_len = std.unicode.utf8Encode(cp, &utf8_buf) catch continue;
+        buf.setString(screen_x, y, utf8_buf[0..utf8_len], _Style{ .fg = color });
+    }
+}
+
 /// Multi-row braille area chart from a RateHistory with auto-scaling.
 /// Uses height-based gradient coloring (green→yellow→red from bottom to top).
 fn renderRateBrailleChart(buf: *tui.render.Buffer, rect: layout.Rect, history: *const model.RateHistory, color: _Color) void {
@@ -719,6 +838,71 @@ fn renderSocketBrailleChart(buf: *tui.render.Buffer, rect: layout.Rect, history:
 
             var utf8_buf: [4]u8 = undefined;
             const utf8_len = std.unicode.utf8Encode(braille_cp, &utf8_buf) catch continue;
+            buf.setString(
+                rect.x + @as(u16, @intCast(col)),
+                rect.y + @as(u16, @intCast(screen_row)),
+                utf8_buf[0..utf8_len],
+                _Style{ .fg = color },
+            );
+        }
+    }
+}
+
+fn renderDashboardGraph(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state.SystemState, mode: state.DashboardGraphMode) void {
+    if (!sys.has_data or rect.width == 0 or rect.height == 0) {
+        buf.setString(rect.x, rect.y, "Waiting for data...", _Style{ .fg = .gray });
+        return;
+    }
+
+    // Render the chart using full rect (label is in the border title)
+    const history = if (mode == .cpu) &sys.cpu_history else &sys.mem_history;
+    const color: _Color = if (mode == .cpu) .green else .cyan;
+    renderBrailleAreaChart(buf, rect, history, color);
+}
+
+fn renderBrailleAreaChart(buf: *tui.render.Buffer, rect: layout.Rect, history: *const model.CpuHistory, base_color: _Color) void {
+    if (rect.width == 0 or rect.height == 0) return;
+
+    const width: usize = @intCast(rect.width);
+    const height: usize = @intCast(rect.height);
+    const sample_count = history.count;
+
+    const capacity = width * 2;
+    const filled_cols: usize = if (sample_count >= 2) @min((sample_count + 1) / 2, width) else if (sample_count == 1) 1 else 0;
+    const start_sample: usize = if (sample_count > capacity) sample_count - capacity else 0;
+
+    _ = base_color; // Use gradient coloring instead
+
+    var col: usize = 0;
+    while (col < width) : (col += 1) {
+        if (col < width - filled_cols) continue;
+
+        const data_col = col - (width - filled_cols);
+        const pair_base = start_sample + data_col * 2;
+
+        const left_val = if (pair_base < sample_count) history.get(pair_base) else 0;
+        const right_val = if (pair_base + 1 < sample_count) history.get(pair_base + 1) else left_val;
+
+        const left_clamped = @min(left_val, 100.0);
+        const right_clamped = @min(right_val, 100.0);
+
+        var row: usize = 0;
+        while (row < height) : (row += 1) {
+            const screen_row = height - 1 - row;
+            const band_low: f32 = @as(f32, @floatFromInt(row)) * 100.0 / @as(f32, @floatFromInt(height));
+            const band_high: f32 = @as(f32, @floatFromInt(row + 1)) * 100.0 / @as(f32, @floatFromInt(height));
+
+            const left_level = quantize(left_clamped, band_low, band_high);
+            const right_level = quantize(right_clamped, band_low, band_high);
+
+            const braille_cp = braille_up[@as(usize, left_level) * 5 + @as(usize, right_level)];
+
+            if (braille_cp == 0x2800) continue;
+
+            var utf8_buf: [4]u8 = undefined;
+            const utf8_len = std.unicode.utf8Encode(braille_cp, &utf8_buf) catch continue;
+
+            const color = graphGradientColor(row, height);
             buf.setString(
                 rect.x + @as(u16, @intCast(col)),
                 rect.y + @as(u16, @intCast(screen_row)),
@@ -947,16 +1131,16 @@ fn renderCpuOverlay(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const stat
     const total_gap_w = if (num_cols > 1) (num_cols - 1) * col_gap else 0;
     const col_w: u16 = (inner_w -| total_gap_w) / num_cols;
 
-    // Core layout within each column: label(3) + chart(expanding) + pct(5)
+    // Core layout within each column: label(3) + sparkline(expanding) + pct(5)
+    // Sparklines use 1 row per core for maximum horizontal detail
     const label_w: u16 = 3; // "XX "
     const pct_w: u16 = 5; // " NNN%"
     const chart_w: u16 = if (col_w > label_w + pct_w) col_w -| label_w -| pct_w else 0;
 
-    // Calculate cores per column and rows per core
+    // With sparklines, each core gets exactly 1 row
     const cores_per_col: u16 = (core_count + num_cols - 1) / num_cols;
-    const rows_per_core: u16 = if (cores_per_col > 0) @max(1, cores_area_h / cores_per_col) else 1;
 
-    // Render cores in columns
+    // Render cores in columns using sparklines
     var col: u16 = 0;
     while (col < num_cols) : (col += 1) {
         const col_x = content_x + col * (col_w + col_gap);
@@ -966,33 +1150,25 @@ fn renderCpuOverlay(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const stat
             const core_idx = col * cores_per_col + row;
             if (core_idx >= core_count) break;
 
-            const y_start = content_y + row * rows_per_core;
-            if (y_start >= content_y + cores_area_h) break;
+            const y_row = content_y + row;
+            if (y_row >= content_y + cores_area_h) break;
 
             const pct = sys.core_percents[core_idx];
 
             // Core number label
             var label_buf: [4]u8 = undefined;
             const label = std.fmt.bufPrint(&label_buf, "{d:>2} ", .{core_idx}) catch "?? ";
-            buf.setString(col_x, y_start, label, _Style{ .fg = .gray });
+            buf.setString(col_x, y_row, label, _Style{ .fg = .gray });
 
-            // Multi-row braille chart
-            if (chart_w > 0 and rows_per_core > 0) {
-                const actual_chart_h = @min(rows_per_core, (content_y + cores_area_h) -| y_start);
-                if (actual_chart_h > 0) {
-                    renderCoreBrailleBlock(buf, .{
-                        .x = col_x + label_w,
-                        .y = y_start,
-                        .width = chart_w,
-                        .height = actual_chart_h,
-                    }, &sys.core_histories[core_idx]);
-                }
+            // Sparkline chart (single row, full width, colored per-value)
+            if (chart_w > 0) {
+                renderSparkline(buf, col_x + label_w, y_row, chart_w, &sys.core_histories[core_idx]);
             }
 
-            // Percentage (on first row, after chart)
+            // Percentage (after sparkline)
             var pct_buf: [6]u8 = undefined;
             const pct_str = std.fmt.bufPrint(&pct_buf, "{d:>4.0}%", .{pct}) catch "???%";
-            buf.setString(col_x + label_w + chart_w, y_start, pct_str, _Style{ .fg = cpuColor(pct) });
+            buf.setString(col_x + label_w + chart_w, y_row, pct_str, _Style{ .fg = cpuColor(pct) });
         }
     }
 
@@ -1635,6 +1811,12 @@ fn renderNetworkCombined(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const
         return;
     }
 
+    // By-process detail mode: show detailed I/O rates per process
+    if (display_mode == .by_process_detail) {
+        renderNetworkByProcessDetail(buf, rect, sys, protocol_filter);
+        return;
+    }
+
     const recv_glyph = "\xe2\x96\xbc"; // U+25BC ▼
     const sent_glyph = "\xe2\x96\xb2"; // U+25B2 ▲
 
@@ -1898,9 +2080,8 @@ fn renderNetworkByProcess(buf: *tui.render.Buffer, rect: layout.Rect, sys: *cons
     }
 
     // Layout: process labels (left) + braille chart (right)
-    // Each process gets 1 row: colored dot + name (8) + sockets (6) + chart (rest)
-    const label_w: u16 = 16; // "● name     123"
-    const chart_w: u16 = if (rect.width > label_w + 4) rect.width - label_w else 4;
+    // Each process gets 1 row: colored dot + name (8) + sockets (4) + I/O rates (opt) + chart (rest)
+    const label_w: u16 = 16; // "● name    123" base width
 
     // Count active processes and determine rows per process
     var active_procs: [model.MAX_TRACKED_PROCS]usize = undefined;
@@ -1919,6 +2100,22 @@ fn renderNetworkByProcess(buf: *tui.render.Buffer, rect: layout.Rect, sys: *cons
                 active_procs[active_count] = i;
                 active_count += 1;
             }
+        }
+    }
+
+    // Sort by network usage (bytes_in_rate + bytes_out_rate) descending
+    if (active_count > 1) {
+        for (1..active_count) |i| {
+            const key = active_procs[i];
+            const key_rate = sys.tracked_procs[key].bytes_in_rate + sys.tracked_procs[key].bytes_out_rate;
+            var j = i;
+            while (j > 0) {
+                const prev_rate = sys.tracked_procs[active_procs[j - 1]].bytes_in_rate + sys.tracked_procs[active_procs[j - 1]].bytes_out_rate;
+                if (prev_rate >= key_rate) break;
+                active_procs[j] = active_procs[j - 1];
+                j -= 1;
+            }
+            active_procs[j] = key;
         }
     }
 
@@ -1957,21 +2154,262 @@ fn renderNetworkByProcess(buf: *tui.render.Buffer, rect: layout.Rect, sys: *cons
             .unix => tp.unix_count,
         };
         var count_buf: [8]u8 = undefined;
-        const count_str = std.fmt.bufPrint(&count_buf, "{d:>4}", .{display_count}) catch "???";
+        const count_str = std.fmt.bufPrint(&count_buf, "{d:>3}", .{display_count}) catch "???";
         buf.setString(rect.x + 11, y, count_str, _Style{ .fg = color });
 
+        // Network I/O rates (from nettop, if available)
+        var rate_offset: u16 = 14;
+        if (tp.bytes_in_rate > 0 or tp.bytes_out_rate > 0) {
+            // Format: ▼1.2M ▲300K
+            var rate_buf: [24]u8 = undefined;
+            const in_rate = formatRateCompact(tp.bytes_in_rate);
+            const out_rate = formatRateCompact(tp.bytes_out_rate);
+            const rate_str = std.fmt.bufPrint(&rate_buf, "\xe2\x96\xbc{s}\xe2\x96\xb2{s}", .{ in_rate, out_rate }) catch "";
+            if (rate_str.len > 0) {
+                buf.setString(rect.x + rate_offset, y, rate_str, _Style{ .fg = .gray });
+                rate_offset += @as(u16, @intCast(@min(rate_str.len, 16)));
+            }
+        }
+
         // Braille chart for socket history (shows total - per-protocol history not tracked)
+        const adjusted_label_w = @max(label_w, rate_offset + 1);
+        const adjusted_chart_w: u16 = if (rect.width > adjusted_label_w + 2) rect.width - adjusted_label_w else 2;
         const chart_rows = @min(rows_per_proc, (rect.y + rect.height) -| y);
-        if (chart_w > 0 and chart_rows > 0) {
+        if (adjusted_chart_w > 0 and chart_rows > 0) {
             renderSocketBrailleChart(buf, .{
-                .x = rect.x + label_w,
+                .x = rect.x + adjusted_label_w,
                 .y = y,
-                .width = chart_w,
+                .width = adjusted_chart_w,
                 .height = chart_rows,
             }, &tp.history, color);
         }
 
         y += rows_per_proc;
+    }
+}
+
+/// Render detailed per-process network I/O view with table layout and sparklines
+fn renderNetworkByProcessDetail(buf: *tui.render.Buffer, rect: layout.Rect, sys: *const state.SystemState, filter: state.NetworkProtocolFilter) void {
+    const dim_style = _Style{ .fg = .gray };
+    const header_style = _Style{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } };
+
+    const tracked_count = sys.tracked_proc_count;
+    if (tracked_count == 0) {
+        buf.setString(rect.x, rect.y, "No network activity", dim_style);
+        buf.setString(rect.x, rect.y + 1, "(waiting for nettop data)", dim_style);
+        return;
+    }
+
+    // Collect active processes with I/O data
+    var active_procs: [model.MAX_TRACKED_PROCS]usize = undefined;
+    var active_count: usize = 0;
+    for (0..model.MAX_TRACKED_PROCS) |i| {
+        if (sys.tracked_procs[i].active) {
+            const tp = &sys.tracked_procs[i];
+            // Filter by protocol if applicable
+            const has_matching_sockets: bool = switch (filter) {
+                .all => tp.socket_count > 0,
+                .tcp => tp.tcp_count > 0,
+                .udp => tp.udp_count > 0,
+                .unix => tp.unix_count > 0,
+            };
+            // Show if has matching sockets OR has network I/O data
+            if (has_matching_sockets or tp.bytes_in_rate > 0 or tp.bytes_out_rate > 0) {
+                active_procs[active_count] = i;
+                active_count += 1;
+            }
+        }
+    }
+
+    // Sort by network usage (bytes_in_rate + bytes_out_rate) descending
+    if (active_count > 1) {
+        for (1..active_count) |i| {
+            const key = active_procs[i];
+            const key_rate = sys.tracked_procs[key].bytes_in_rate + sys.tracked_procs[key].bytes_out_rate;
+            var j = i;
+            while (j > 0) {
+                const prev_rate = sys.tracked_procs[active_procs[j - 1]].bytes_in_rate + sys.tracked_procs[active_procs[j - 1]].bytes_out_rate;
+                if (prev_rate >= key_rate) break;
+                active_procs[j] = active_procs[j - 1];
+                j -= 1;
+            }
+            active_procs[j] = key;
+        }
+    }
+
+    if (active_count == 0) {
+        buf.setString(rect.x, rect.y, "No processes with network activity", dim_style);
+        return;
+    }
+
+    // Calculate sparkline width based on available space
+    // Layout: name(10) + pid(8) + sock(6) + in_rate(12) + out_rate(12) + sparklines(rest)
+    const fixed_cols: u16 = 48;
+    const sparkline_area: u16 = if (rect.width > fixed_cols + 4) rect.width - fixed_cols else 4;
+    const sparkline_w: u16 = sparkline_area / 2; // Split between in/out
+
+    // Header row
+    var y = rect.y;
+    buf.setString(rect.x, y, "Process", header_style);
+    buf.setString(rect.x + 10, y, "PID", header_style);
+    buf.setString(rect.x + 18, y, "Sock", header_style);
+    buf.setString(rect.x + 23, y, "\xe2\x96\xbc In/s", header_style); // ▼ In/s
+    buf.setString(rect.x + 35, y, "\xe2\x96\xb2 Out/s", header_style); // ▲ Out/s
+    buf.setString(rect.x + fixed_cols, y, "In History", header_style);
+    buf.setString(rect.x + fixed_cols + sparkline_w, y, "Out History", header_style);
+    y += 1;
+
+    // Separator
+    if (y < rect.y + rect.height) {
+        var sep_buf: [128]u8 = undefined;
+        const sep_w: usize = @min(rect.width, 128);
+        @memset(sep_buf[0..sep_w], '-');
+        buf.setString(rect.x, y, sep_buf[0..sep_w], dim_style);
+        y += 1;
+    }
+
+    // Process rows
+    const proc_colors = [_]_Color{ .light_cyan, .light_magenta, .light_green, .light_yellow, .light_blue, .light_red, .cyan, .magenta };
+
+    for (0..active_count) |idx| {
+        if (y >= rect.y + rect.height) break;
+
+        const proc_idx = active_procs[idx];
+        const tp = &sys.tracked_procs[proc_idx];
+        const color = proc_colors[idx % proc_colors.len];
+
+        // Process name (truncated to 9 chars)
+        const name_len: usize = @intCast(tp.name_len);
+        const name_max: usize = 9;
+        const name_display_len = @min(name_len, name_max);
+        buf.setString(rect.x, y, tp.name[0..name_display_len], _Style{ .fg = color });
+
+        // PID
+        var pid_buf: [8]u8 = undefined;
+        const pid_str = std.fmt.bufPrint(&pid_buf, "{d:<7}", .{tp.pid}) catch "?";
+        buf.setString(rect.x + 10, y, pid_str, _Style{ .fg = .white });
+
+        // Socket count (filtered)
+        const sock_count: u32 = switch (filter) {
+            .all => tp.socket_count,
+            .tcp => tp.tcp_count,
+            .udp => tp.udp_count,
+            .unix => tp.unix_count,
+        };
+        var sock_buf: [6]u8 = undefined;
+        const sock_str = std.fmt.bufPrint(&sock_buf, "{d:<4}", .{sock_count}) catch "?";
+        buf.setString(rect.x + 18, y, sock_str, _Style{ .fg = .cyan });
+
+        // In rate
+        var in_rate_buf: [12]u8 = undefined;
+        const in_rate_str = formatRateWithBuf(&in_rate_buf, tp.bytes_in_rate);
+        buf.setString(rect.x + 23, y, in_rate_str, _Style{ .fg = .green });
+
+        // Out rate
+        var out_rate_buf: [12]u8 = undefined;
+        const out_rate_str = formatRateWithBuf(&out_rate_buf, tp.bytes_out_rate);
+        buf.setString(rect.x + 35, y, out_rate_str, _Style{ .fg = .yellow });
+
+        // In history sparkline
+        if (sparkline_w > 0) {
+            renderNetRateSparkline(buf, rect.x + fixed_cols, y, sparkline_w -| 1, &tp.in_rate_history, .green);
+        }
+
+        // Out history sparkline
+        if (sparkline_w > 0) {
+            renderNetRateSparkline(buf, rect.x + fixed_cols + sparkline_w, y, sparkline_w -| 1, &tp.out_rate_history, .yellow);
+        }
+
+        y += 1;
+    }
+}
+
+/// Render a single-row sparkline for network rate history using braille
+fn renderNetRateSparkline(buf: *tui.render.Buffer, x: u16, y: u16, width: u16, history: *const model.NetRateHistory, color: _Color) void {
+    if (width == 0 or history.count == 0) return;
+
+    const w: usize = @intCast(width);
+
+    // Auto-scale based on max value in history
+    const max_val = @max(history.max(), 1.0); // At least 1 to avoid div by zero
+
+    // 2 samples per braille character
+    const capacity = w * 2;
+    const start_sample: usize = if (history.count > capacity) history.count - capacity else 0;
+    const filled_chars: usize = if (history.count >= 2) @min((history.count + 1) / 2, w) else if (history.count == 1) 1 else 0;
+
+    var col: usize = 0;
+    while (col < w) : (col += 1) {
+        const screen_x = x + @as(u16, @intCast(col));
+
+        // Before data starts, draw baseline
+        if (col < w - filled_chars) {
+            buf.setString(screen_x, y, "⡀", _Style{ .fg = .gray });
+            continue;
+        }
+
+        const data_col = col - (w - filled_chars);
+        const pair_base = start_sample + data_col * 2;
+
+        const left_val: f32 = if (pair_base < history.count) history.get(pair_base) else 0;
+        const right_val: f32 = if (pair_base + 1 < history.count) history.get(pair_base + 1) else left_val;
+
+        // Normalize to 0-4 range based on max
+        var left_level: u8 = @intFromFloat(@min(left_val / max_val * 4.0, 4.0));
+        var right_level: u8 = @intFromFloat(@min(right_val / max_val * 4.0, 4.0));
+
+        // Ensure non-zero values show at least 1 dot
+        if (left_val > 0 and left_level == 0) left_level = 1;
+        if (right_val > 0 and right_level == 0) right_level = 1;
+
+        // Build braille codepoint
+        var cp: u21 = 0x2800;
+        if (left_level >= 1) cp |= 0x40;
+        if (left_level >= 2) cp |= 0x04;
+        if (left_level >= 3) cp |= 0x02;
+        if (left_level >= 4) cp |= 0x01;
+        if (right_level >= 1) cp |= 0x80;
+        if (right_level >= 2) cp |= 0x20;
+        if (right_level >= 3) cp |= 0x10;
+        if (right_level >= 4) cp |= 0x08;
+
+        var utf8_buf: [4]u8 = undefined;
+        const utf8_len = std.unicode.utf8Encode(cp, &utf8_buf) catch continue;
+        buf.setString(screen_x, y, utf8_buf[0..utf8_len], _Style{ .fg = color });
+    }
+}
+
+/// Format rate with buffer for non-static usage
+fn formatRateWithBuf(out_buf: *[12]u8, rate: f64) []const u8 {
+    if (rate >= 1024.0 * 1024.0 * 1024.0) {
+        return std.fmt.bufPrint(out_buf, "{d:>6.1} G/s", .{rate / (1024.0 * 1024.0 * 1024.0)}) catch "? G/s";
+    } else if (rate >= 1024.0 * 1024.0) {
+        return std.fmt.bufPrint(out_buf, "{d:>6.1} M/s", .{rate / (1024.0 * 1024.0)}) catch "? M/s";
+    } else if (rate >= 1024.0) {
+        return std.fmt.bufPrint(out_buf, "{d:>6.1} K/s", .{rate / 1024.0}) catch "? K/s";
+    } else if (rate > 0) {
+        return std.fmt.bufPrint(out_buf, "{d:>6.0} B/s", .{rate}) catch "? B/s";
+    } else {
+        return "     0 B/s";
+    }
+}
+
+/// Format a rate (bytes/sec) in compact form: "1.2M", "300K", "5G", etc.
+/// Returns a static buffer - not reentrant, use immediately.
+fn formatRateCompact(rate: f64) []const u8 {
+    const Static = struct {
+        var buf: [8]u8 = undefined;
+    };
+    if (rate >= 1024.0 * 1024.0 * 1024.0) {
+        return std.fmt.bufPrint(&Static.buf, "{d:.0}G", .{rate / (1024.0 * 1024.0 * 1024.0)}) catch "?G";
+    } else if (rate >= 1024.0 * 1024.0) {
+        return std.fmt.bufPrint(&Static.buf, "{d:.0}M", .{rate / (1024.0 * 1024.0)}) catch "?M";
+    } else if (rate >= 1024.0) {
+        return std.fmt.bufPrint(&Static.buf, "{d:.0}K", .{rate / 1024.0}) catch "?K";
+    } else if (rate > 0) {
+        return std.fmt.bufPrint(&Static.buf, "{d:.0}B", .{rate}) catch "?B";
+    } else {
+        return "0";
     }
 }
 
@@ -3079,8 +3517,10 @@ fn renderDetailNetworkView(buf: *tui.render.Buffer, rect: layout.Rect, app: *sta
     }
 
     var ln: usize = 0;
-    const vis_start = app.detail_scroll;
-    const vis_end = vis_start + @as(usize, @intCast(rect.height));
+    // Clamp scroll to prevent overflow - use saturating arithmetic
+    const max_scroll: usize = std.math.maxInt(usize) - @as(usize, rect.height) - 1;
+    const vis_start = @min(app.detail_scroll, max_scroll);
+    const vis_end = vis_start +| @as(usize, @intCast(rect.height)); // saturating add
     const max_w: usize = @intCast(rect.width);
 
     // Header
@@ -3578,9 +4018,11 @@ fn renderDetailTreeAndFiles(buf: *tui.render.Buffer, rect: layout.Rect, detail: 
     const rx: u16 = rect.x + 1;
     const max_w: usize = @intCast(rect.width -| 1);
 
-    const scroll = app.detail_right_scroll;
+    // Clamp scroll to prevent overflow - use saturating arithmetic
+    const max_scroll: usize = std.math.maxInt(usize) - @as(usize, rect.height) - 1;
+    const scroll = @min(app.detail_right_scroll, max_scroll);
     const vis_start = scroll;
-    const vis_end = scroll + @as(usize, rect.height);
+    const vis_end = scroll +| @as(usize, rect.height); // saturating add
 
     var ln: usize = 0;
 

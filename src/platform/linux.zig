@@ -14,10 +14,15 @@ pub fn collectSnapshot(arena: std.mem.Allocator) PlatformError!std.AutoHashMap(s
     return error.Unsupported;
 }
 
-pub fn signal(pid: std.posix.pid_t, sig: std.posix.SIG, force: bool) PlatformError!void {
+pub fn signal(pid: std.posix.pid_t, force: bool) PlatformError!void {
     _ = pid;
-    _ = sig;
     _ = force;
+    return error.Unsupported;
+}
+
+pub fn renice(pid: std.posix.pid_t, delta: i32) PlatformError!i32 {
+    _ = pid;
+    _ = delta;
     return error.Unsupported;
 }
 

@@ -41,6 +41,11 @@ pub fn main() !void {
     defer mount_queue.deinit();
     app.mount_queue = &mount_queue;
 
+    // nettop queue (per-process network I/O, lazy-loaded)
+    var nettop_queue = try channel.NettopQueue.initCapacity(gpa_alloc, 2);
+    defer nettop_queue.deinit();
+    app.nettop_queue = &nettop_queue;
+
     // Thread synch
     var mutex: std.Thread.Mutex = .{};
     var condition: std.Thread.Condition = .{};
@@ -86,6 +91,12 @@ pub fn main() !void {
             const result = result_ptr.*;
             mount_queue.pop();
             app.receiveMounts(result);
+        }
+
+        if (nettop_queue.front()) |result_ptr| {
+            const result = result_ptr.*;
+            nettop_queue.pop();
+            app.receiveNettop(result);
         }
 
         // Poll for events (100ms timeout)

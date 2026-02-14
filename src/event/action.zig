@@ -37,4 +37,8 @@ pub const Action = enum {
     confirm_dialog_no,
     toggle_select,
     clear_selections,
+    nice_up,
+    nice_down,
+    dashboard_cpu,
+    dashboard_mem,
 };
