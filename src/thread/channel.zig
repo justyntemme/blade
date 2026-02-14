@@ -79,3 +79,17 @@ pub const NettopResult = struct {
 };
 
 pub const NettopQueue = spsc.SpscQueue(NettopResult, false);
+
+/// TcpConnectionsResult carries system-wide TCP connections from worker thread to main.
+/// Uses arena for the connections list.
+pub const TcpConnectionsResult = struct {
+    arena: std.heap.ArenaAllocator,
+    connections: []model.TcpConnection,
+    timestamp_ns: i128,
+
+    pub fn deinit(self: *TcpConnectionsResult) void {
+        self.arena.deinit();
+    }
+};
+
+pub const TcpConnectionsQueue = spsc.SpscQueue(TcpConnectionsResult, false);

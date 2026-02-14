@@ -79,8 +79,14 @@ pub const SystemState = struct {
     tracked_procs: [model.MAX_TRACKED_PROCS]model.TrackedProcess = [_]model.TrackedProcess{.{}} ** model.MAX_TRACKED_PROCS,
     tracked_proc_count: u8 = 0,
 
+    // System-wide TCP connections (from sysctl, includes PID)
+    tcp_connections: [MAX_TCP_CONNECTIONS]model.TcpConnection = undefined,
+    tcp_connection_count: u16 = 0,
+
     prev_metrics: ?model.SystemMetrics = null,
     has_data: bool = false,
+
+    pub const MAX_TCP_CONNECTIONS = 1024;
 
     pub fn update(self: *SystemState, metrics: model.SystemMetrics) void {
         self.core_count = metrics.core_count;
@@ -431,9 +437,12 @@ pub const AppState = struct {
     detail_queue: *channel.DetailQueue = undefined,
     mount_queue: *channel.MountQueue = undefined,
     nettop_queue: *channel.NettopQueue = undefined,
+    tcp_connections_queue: *channel.TcpConnectionsQueue = undefined,
     last_mount_collect_ns: i128 = 0,
     last_nettop_collect_ns: i128 = 0,
+    last_tcp_collect_ns: i128 = 0,
     nettop_pending: bool = false,
+    tcp_pending: bool = false,
     detail_pid: ?model.pid_t = null,
     detail_data: ?model.ProcessDetail = null,
     detail_arena: ?std.heap.ArenaAllocator = null,
@@ -842,6 +851,22 @@ pub const AppState = struct {
             }
         }
 
+        // Lazy-load TCP connections via sysctl (for detail view network info)
+        // Rate-limited to every 2 seconds
+        const needs_tcp = self.mode == .detail or needs_nettop;
+        if (needs_tcp and !self.tcp_pending) {
+            const tcp_elapsed = now_ns - self.last_tcp_collect_ns;
+            const two_sec_ns: i128 = 2 * std.time.ns_per_s;
+            if (self.last_tcp_collect_ns == 0 or tcp_elapsed >= two_sec_ns) {
+                self.tcp_pending = true;
+                const tcp_thread = std.Thread.spawn(.{}, collectTcpConnectionsWorker, .{ self.tcp_connections_queue, self.gpa }) catch {
+                    self.tcp_pending = false;
+                    return;
+                };
+                tcp_thread.detach();
+            }
+        }
+
         //close detail view if the inspected process exits
         if (self.detail_pid) |dpid| {
             const exists = self.procs.pid_to_index.get(dpid) != null;
@@ -1094,6 +1119,57 @@ pub const AppState = struct {
 
         var r = result;
         r.deinit();
+    }
+
+    pub fn receiveTcpConnections(self: *AppState, result: channel.TcpConnectionsResult) void {
+        self.tcp_pending = false;
+
+        // Copy connections to system state (up to max)
+        const copy_count = @min(result.connections.len, SystemState.MAX_TCP_CONNECTIONS);
+        @memcpy(self.system.tcp_connections[0..copy_count], result.connections[0..copy_count]);
+        self.system.tcp_connection_count = @intCast(copy_count);
+
+        self.last_tcp_collect_ns = result.timestamp_ns;
+
+        var r = result;
+        r.deinit();
+    }
+
+    /// Background worker to collect system-wide TCP connections via sysctl
+    fn collectTcpConnectionsWorker(queue: *channel.TcpConnectionsQueue, gpa: std.mem.Allocator) void {
+        const pl = @import("platform");
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        const alloc = arena.allocator();
+
+        const connections = pl.collectTcpConnections(alloc) catch {
+            arena.deinit();
+            return;
+        };
+
+        const now_ns = std.time.nanoTimestamp();
+
+        // Try to push result - if queue is full, release the arena
+        if (!queue.tryPush(.{
+            .arena = arena,
+            .connections = connections,
+            .timestamp_ns = now_ns,
+        })) {
+            arena.deinit();
+        }
+    }
+
+    /// Get TCP connections for a specific PID
+    pub fn getTcpConnectionsForPid(self: *const AppState, pid: model.pid_t) []const model.TcpConnection {
+        // Count connections for this PID
+        var count: usize = 0;
+        for (self.system.tcp_connections[0..self.system.tcp_connection_count]) |conn| {
+            if (conn.pid == pid) count += 1;
+        }
+        if (count == 0) return &[_]model.TcpConnection{};
+
+        // Return a view into the connections array (caller should copy if needed)
+        // For simplicity, we return the whole slice and let caller filter
+        return self.system.tcp_connections[0..self.system.tcp_connection_count];
     }
 
     pub fn receiveDetail(self: *AppState, result: channel.DetailResult) void {

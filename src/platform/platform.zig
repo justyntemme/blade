@@ -69,3 +69,8 @@ pub fn countSockets(pid: std.posix.pid_t) u32 {
 pub fn countSocketsByType(pid: std.posix.pid_t) SocketCounts {
     return backend.countSocketsByType(pid);
 }
+
+/// Collect all TCP connections system-wide (includes PID for each connection)
+pub fn collectTcpConnections(arena: std.mem.Allocator) PlatformError![]model.TcpConnection {
+    return backend.collectTcpConnections(arena);
+}

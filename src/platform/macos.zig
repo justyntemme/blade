@@ -1174,3 +1174,308 @@ pub fn countSocketsByType(pid: std.posix.pid_t) SocketCounts {
 pub fn countSockets(pid: std.posix.pid_t) u32 {
     return countSocketsByType(pid).total();
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// System-wide TCP connection collector via sysctl
+// This bypasses per-process permission restrictions by reading kernel tables
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Kernel structure for TCP PCB list header/footer
+const xinpgen = extern struct {
+    xig_len: u32,
+    xig_count: u32,
+    xig_gen: u64,
+    xig_sogen: u64,
+};
+
+/// Socket info subset - we only need the PID
+const xsocket_n = extern struct {
+    xso_len: u32,
+    xso_kind: u32,
+    xso_so: u64,
+    xso_pcb: u64,
+    xso_type: i16,
+    xso_options: i16,
+    xso_linger: i16,
+    xso_state: i16,
+    xso_qlen: u16,
+    xso_incqlen: u16,
+    xso_qlimit: u16,
+    xso_timeo: i16,
+    xso_error: u16,
+    xso_pgid: i32,
+    xso_oobmark: u32,
+    xso_uid: u32,
+    xso_e_pid: i32, // Effective PID - this is what we need!
+    xso_last_pid: i32,
+    // More fields follow but we don't need them
+};
+
+/// Input PCB - contains addresses and ports
+const xinpcb_n = extern struct {
+    xi_len: u32,
+    xi_kind: u32,
+    xi_inpp: u64,
+    inp_fport: u16, // Foreign port (network byte order)
+    inp_lport: u16, // Local port (network byte order)
+    inp_ppcb: u64,
+    inp_gencnt: u64,
+    inp_flags: i32,
+    inp_flow: u32,
+    inp_vflag: u8,
+    inp_ip_ttl: u8,
+    inp_ip_p: u8,
+    inp_dependfaddr: [16]u8, // IPv6 foreign address or IPv4 in last 4 bytes
+    inp_dependladdr: [16]u8, // IPv6 local address or IPv4 in last 4 bytes
+    inp_depend4: extern struct {
+        inp4_ip_tos: u8,
+        pad: [3]u8,
+    },
+    inp_depend6: extern struct {
+        inp6_hlim: u8,
+        inp6_cksum: i8,
+        inp6_ifindex: u16,
+        inp6_hops: i16,
+    },
+    inp_flowhash: u32,
+    inp_flags2: u32,
+    xi_socket: xsocket_n,
+};
+
+/// TCP PCB - contains state and input PCB
+const xtcpcb_n = extern struct {
+    xt_len: u32,
+    xt_kind: u32,
+    t_segq: u64,
+    t_dupacks: i32,
+    t_timer: [4]i32,
+    t_state: i32, // TCP state (TCPS_* values)
+    t_flags: u32,
+    t_force: i32,
+    snd_una: u32,
+    snd_max: u32,
+    snd_nxt: u32,
+    snd_up: u32,
+    snd_wl1: u32,
+    snd_wl2: u32,
+    iss: u32,
+    irs: u32,
+    rcv_nxt: u32,
+    rcv_adv: u32,
+    rcv_wnd: u32,
+    rcv_up: u32,
+    snd_wnd: u32,
+    snd_cwnd: u32,
+    snd_ssthresh: u32,
+    t_maxopd: u32,
+    t_rcvtime: u32,
+    t_starttime: u32,
+    t_rtttime: i32,
+    t_rtseq: u32,
+    t_rxtcur: i32,
+    t_maxseg: u32,
+    t_srtt: i32,
+    t_rttvar: i32,
+    t_rxtshift: i32,
+    t_rttmin: u32,
+    t_rttupdated: u32,
+    max_sndwnd: u32,
+    t_softerror: i32,
+    t_oobflags: u8,
+    t_iobc: u8,
+    snd_scale: u8,
+    rcv_scale: u8,
+    request_r_scale: u8,
+    requested_s_scale: u8,
+    ts_recent: u32,
+    ts_recent_age: u32,
+    last_ack_sent: u32,
+    cc_send: u32,
+    cc_recv: u32,
+    snd_recover: u32,
+    snd_cwnd_prev: u32,
+    snd_ssthresh_prev: u32,
+    t_badrxtwin: u32,
+    xt_inpcb: xinpcb_n,
+};
+
+/// Collect all TCP connections system-wide using sysctl
+/// Helper to create a TcpConnection with formatted addresses
+fn makeConnection(pid: i32, local_port: u16, foreign_port: u16, local_addr: *const [16]u8, foreign_addr: *const [16]u8, is_ipv6: bool, tcp_state: i32) model.TcpConnection {
+    var conn: model.TcpConnection = .{
+        .pid = pid,
+        .local_port = local_port,
+        .remote_port = foreign_port,
+        .local_addr = [_]u8{0} ** 46,
+        .local_addr_len = 0,
+        .remote_addr = [_]u8{0} ** 46,
+        .remote_addr_len = 0,
+        .state = model.TcpState.fromKernelState(tcp_state),
+        .is_ipv6 = is_ipv6,
+    };
+
+    // Format addresses
+    if (is_ipv6) {
+        var local_buf: [c.INET6_ADDRSTRLEN]u8 = undefined;
+        var remote_buf: [c.INET6_ADDRSTRLEN]u8 = undefined;
+
+        const local_ptr = c.inet_ntop(c.AF_INET6, local_addr, &local_buf, c.INET6_ADDRSTRLEN);
+        const remote_ptr = c.inet_ntop(c.AF_INET6, foreign_addr, &remote_buf, c.INET6_ADDRSTRLEN);
+
+        if (local_ptr != null) {
+            const local_str = std.mem.sliceTo(&local_buf, 0);
+            const copy_len = @min(local_str.len, conn.local_addr.len);
+            @memcpy(conn.local_addr[0..copy_len], local_str[0..copy_len]);
+            conn.local_addr_len = @intCast(copy_len);
+        }
+        if (remote_ptr != null) {
+            const remote_str = std.mem.sliceTo(&remote_buf, 0);
+            const copy_len = @min(remote_str.len, conn.remote_addr.len);
+            @memcpy(conn.remote_addr[0..copy_len], remote_str[0..copy_len]);
+            conn.remote_addr_len = @intCast(copy_len);
+        }
+    } else {
+        // IPv4 - last 4 bytes of the 16-byte address
+        var local_buf: [c.INET_ADDRSTRLEN]u8 = undefined;
+        var remote_buf: [c.INET_ADDRSTRLEN]u8 = undefined;
+
+        const local_ptr = c.inet_ntop(c.AF_INET, local_addr[12..16], &local_buf, c.INET_ADDRSTRLEN);
+        const remote_ptr = c.inet_ntop(c.AF_INET, foreign_addr[12..16], &remote_buf, c.INET_ADDRSTRLEN);
+
+        if (local_ptr != null) {
+            const local_str = std.mem.sliceTo(&local_buf, 0);
+            const copy_len = @min(local_str.len, conn.local_addr.len);
+            @memcpy(conn.local_addr[0..copy_len], local_str[0..copy_len]);
+            conn.local_addr_len = @intCast(copy_len);
+        }
+        if (remote_ptr != null) {
+            const remote_str = std.mem.sliceTo(&remote_buf, 0);
+            const copy_len = @min(remote_str.len, conn.remote_addr.len);
+            @memcpy(conn.remote_addr[0..copy_len], remote_str[0..copy_len]);
+            conn.remote_addr_len = @intCast(copy_len);
+        }
+    }
+
+    return conn;
+}
+
+pub fn collectTcpConnections(arena: std.mem.Allocator) PlatformError![]model.TcpConnection {
+    // First call to get required buffer size
+    var len: usize = 0;
+    const name = "net.inet.tcp.pcblist_n";
+
+    if (c.sysctlbyname(name, null, &len, null, 0) != 0) {
+        return arena.alloc(model.TcpConnection, 0) catch return error.OutOfMemory;
+    }
+
+    if (len == 0) {
+        return arena.alloc(model.TcpConnection, 0) catch return error.OutOfMemory;
+    }
+
+    // Allocate buffer
+    const buf = arena.alloc(u8, len) catch return error.OutOfMemory;
+
+    // Get the data
+    if (c.sysctlbyname(name, buf.ptr, &len, null, 0) != 0) {
+        return arena.alloc(model.TcpConnection, 0) catch return error.OutOfMemory;
+    }
+
+    var connections: std.ArrayListUnmanaged(model.TcpConnection) = .empty;
+
+    // Header is xinpgen (24 bytes)
+    if (len < 24) {
+        return connections.toOwnedSlice(arena) catch return error.OutOfMemory;
+    }
+
+    const xig_len = std.mem.readInt(u32, buf[0..4], .little);
+    var offset: usize = xig_len;
+
+    // Entry kind values from XNU kernel
+    const XSO_SOCKET: u32 = 0x001;
+    const XSO_INPCB: u32 = 0x010;
+    const XSO_TCPCB: u32 = 0x020;
+
+    // Current connection being accumulated from multiple entries
+    var have_inpcb = false;
+    var local_port: u16 = 0;
+    var foreign_port: u16 = 0;
+    var local_addr: [16]u8 = undefined;
+    var foreign_addr: [16]u8 = undefined;
+    var is_ipv6: bool = false;
+    var pid: i32 = 0;
+    var tcp_state: i32 = 0;
+
+    // Parse entries - each connection has multiple sub-entries (INPCB, SOCKET, TCPCB)
+    while (offset + 8 <= len) {
+        var xt_len = std.mem.readInt(u32, buf[offset..][0..4], .little);
+        var xt_kind = std.mem.readInt(u32, buf[offset + 4 ..][0..4], .little);
+
+        // Footer check
+        if (xt_len == xig_len) {
+            // Save last connection if pending
+            if (have_inpcb and pid > 0) {
+                const conn = makeConnection(pid, local_port, foreign_port, &local_addr, &foreign_addr, is_ipv6, tcp_state);
+                connections.append(arena, conn) catch {};
+            }
+            break;
+        }
+
+        // Handle padding (xt_len=0) by scanning forward
+        if (xt_len == 0) {
+            var scan = offset;
+            while (scan + 8 <= len) {
+                scan += 4;
+                const try_len = std.mem.readInt(u32, buf[scan..][0..4], .little);
+                if (try_len >= 24 and try_len < 1024) {
+                    const try_kind = std.mem.readInt(u32, buf[scan + 4 ..][0..4], .little);
+                    if (try_kind >= 1 and try_kind <= 0x20) {
+                        offset = scan;
+                        xt_len = try_len;
+                        xt_kind = try_kind;
+                        break;
+                    }
+                }
+            }
+            if (xt_len == 0) break;
+        }
+
+        if (offset + xt_len > len) break;
+
+        // INPCB (kind=16) - start of new connection, contains ports and addresses
+        if (xt_kind == XSO_INPCB and xt_len >= 64) {
+            // Save previous connection if any
+            if (have_inpcb and pid > 0) {
+                const conn = makeConnection(pid, local_port, foreign_port, &local_addr, &foreign_addr, is_ipv6, tcp_state);
+                connections.append(arena, conn) catch {};
+            }
+
+            have_inpcb = true;
+            pid = 0;
+            tcp_state = 0;
+
+            // Ports at offset 16/18 (network byte order)
+            foreign_port = std.mem.bigToNative(u16, std.mem.readInt(u16, buf[offset + 16 ..][0..2], .big));
+            local_port = std.mem.bigToNative(u16, std.mem.readInt(u16, buf[offset + 18 ..][0..2], .big));
+
+            // Addresses: foreign at offset 48, local at offset 64 (16 bytes each)
+            @memcpy(&foreign_addr, buf[offset + 48 ..][0..16]);
+            @memcpy(&local_addr, buf[offset + 64 ..][0..16]);
+
+            // IPv6 flag at offset 44 (inp_vflag)
+            const vflag = buf[offset + 44];
+            is_ipv6 = (vflag & 0x2) != 0;
+        }
+        // SOCKET (kind=1) - contains UID at offset 64, PID at offset 68
+        else if (xt_kind == XSO_SOCKET and xt_len >= 72) {
+            pid = std.mem.readInt(i32, buf[offset + 68 ..][0..4], .little);
+        }
+        // TCPCB (kind=32) - contains state at offset 36
+        else if (xt_kind == XSO_TCPCB and xt_len >= 40) {
+            tcp_state = std.mem.readInt(i32, buf[offset + 36 ..][0..4], .little);
+        }
+
+        offset += xt_len;
+    }
+
+    return connections.toOwnedSlice(arena) catch return error.OutOfMemory;
+}

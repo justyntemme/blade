@@ -156,6 +156,36 @@ pub const TcpState = enum {
             .unknown => "UNKNOWN",
         };
     }
+
+    pub fn fromKernelState(state: i32) TcpState {
+        return switch (state) {
+            0 => .closed,
+            1 => .listen,
+            2 => .syn_sent,
+            3 => .syn_received,
+            4 => .established,
+            5 => .close_wait,
+            6 => .fin_wait_1,
+            7 => .closing,
+            8 => .last_ack,
+            9 => .fin_wait_2,
+            10 => .time_wait,
+            else => .unknown,
+        };
+    }
+};
+
+/// System-wide TCP connection (from kernel sysctl, includes PID)
+pub const TcpConnection = struct {
+    pid: pid_t,
+    local_port: u16,
+    remote_port: u16,
+    local_addr: [46]u8, // Max IPv6 string length
+    local_addr_len: u8,
+    remote_addr: [46]u8,
+    remote_addr_len: u8,
+    state: TcpState,
+    is_ipv6: bool,
 };
 
 pub const OpenFile = struct {

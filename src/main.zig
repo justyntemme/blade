@@ -46,6 +46,11 @@ pub fn main() !void {
     defer nettop_queue.deinit();
     app.nettop_queue = &nettop_queue;
 
+    // TCP connections queue (system-wide connections via sysctl, lazy-loaded)
+    var tcp_connections_queue = try channel.TcpConnectionsQueue.initCapacity(gpa_alloc, 2);
+    defer tcp_connections_queue.deinit();
+    app.tcp_connections_queue = &tcp_connections_queue;
+
     // Thread synch
     var mutex: std.Thread.Mutex = .{};
     var condition: std.Thread.Condition = .{};
@@ -97,6 +102,12 @@ pub fn main() !void {
             const result = result_ptr.*;
             nettop_queue.pop();
             app.receiveNettop(result);
+        }
+
+        if (tcp_connections_queue.front()) |result_ptr| {
+            const result = result_ptr.*;
+            tcp_connections_queue.pop();
+            app.receiveTcpConnections(result);
         }
 
         // Poll for events (100ms timeout)

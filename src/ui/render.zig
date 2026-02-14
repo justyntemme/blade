@@ -223,8 +223,44 @@ pub fn render(draw_ctx: state.DrawContext, buf: *tui.render.Buffer) !void {
         buf.setString(title_x + 11, y0, "[2] Mem", mem_style);
         buf.setChar(title_x + 18, y0, BD_TL, border_style);
     }
-    // Disk IO title (with Memory+Disks in overlay)
-    drawTitle(buf, x0 + 2, y_hd1, "Disk IO");
+    // Disk IO title with keybinding indicators [s]torage and [m]ount
+    {
+        const title_x = x0 + 2;
+        // First island: Disk IO
+        buf.setChar(title_x, y_hd1, BD_TR, border_style);
+        buf.setString(title_x + 1, y_hd1, "Disk IO", pane_title_style);
+        buf.setChar(title_x + 8, y_hd1, BD_TL, border_style);
+
+        // Separator
+        buf.setChar(title_x + 9, y_hd1, BD_HOR, border_style);
+
+        // Second island: [s]torage mode
+        buf.setChar(title_x + 10, y_hd1, BD_TR, border_style);
+        buf.setString(title_x + 11, y_hd1, "[", _Style{ .fg = .gray });
+        buf.setString(title_x + 12, y_hd1, "s", _Style{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } });
+        buf.setString(title_x + 13, y_hd1, "]", _Style{ .fg = .gray });
+        const storage_label: []const u8 = switch (app.storage_detail_mode) {
+            .compact => "compact",
+            .full => "full",
+            .with_swap => "swap",
+        };
+        buf.setString(title_x + 14, y_hd1, storage_label, _Style{ .fg = .light_magenta });
+        const storage_end = title_x + 14 + @as(u16, @intCast(storage_label.len));
+        buf.setChar(storage_end, y_hd1, BD_TL, border_style);
+
+        // Separator
+        buf.setChar(storage_end + 1, y_hd1, BD_HOR, border_style);
+
+        // Third island: [m]ount filter
+        buf.setChar(storage_end + 2, y_hd1, BD_TR, border_style);
+        buf.setString(storage_end + 3, y_hd1, "[", _Style{ .fg = .gray });
+        buf.setString(storage_end + 4, y_hd1, "m", _Style{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } });
+        buf.setString(storage_end + 5, y_hd1, "]", _Style{ .fg = .gray });
+        const mount_label: []const u8 = if (app.mount_filter == .user_only) "user" else "all";
+        buf.setString(storage_end + 6, y_hd1, mount_label, _Style{ .fg = .light_green });
+        const mount_end = storage_end + 6 + @as(u16, @intCast(mount_label.len));
+        buf.setChar(mount_end, y_hd1, BD_TL, border_style);
+    }
     drawTitle(buf, x_vdB + 2, y_hd1, "Processes");
     // Network title with keybinding indicators "[n]etwork" "[p]rotocol" and mode/IP
     {
@@ -3471,8 +3507,34 @@ fn renderDetailNetworkView(buf: *tui.render.Buffer, rect: layout.Rect, app: *sta
     const header_style = _Style{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } };
     const dim_style = _Style{ .fg = .gray };
 
+    // Get sysctl TCP connections for the detail PID (works for sandboxed processes)
+    const detail_pid = app.detail_pid orelse 0;
+    var sysctl_tcp_count: usize = 0;
+    const all_tcp = app.system.tcp_connections[0..app.system.tcp_connection_count];
+    for (all_tcp) |conn| {
+        if (conn.pid == detail_pid) sysctl_tcp_count += 1;
+    }
+
     const files = app.detail_open_files;
-    if (files == null or files.?.len == 0) {
+    const has_files = files != null and files.?.len > 0;
+
+    // Count sockets by type from proc_pidinfo
+    var proc_tcp_count: usize = 0;
+    var udp_count: usize = 0;
+    var unix_count: usize = 0;
+    if (has_files) {
+        for (files.?) |f| {
+            if (f.fd_type == .socket_tcp) proc_tcp_count += 1;
+            if (f.fd_type == .socket_udp) udp_count += 1;
+            if (f.fd_type == .socket_unix) unix_count += 1;
+        }
+    }
+
+    // Use sysctl TCP if proc_pidinfo didn't find any (sandboxed apps)
+    const tcp_count = if (proc_tcp_count > 0) proc_tcp_count else sysctl_tcp_count;
+    const use_sysctl_tcp = proc_tcp_count == 0 and sysctl_tcp_count > 0;
+
+    if (!has_files and sysctl_tcp_count == 0) {
         buf.setString(rect.x, rect.y, "No open file descriptors found", dim_style);
         buf.setString(rect.x, rect.y + 1, "(checked process + all descendants)", dim_style);
         if (rect.height > 3) {
@@ -3483,16 +3545,7 @@ fn renderDetailNetworkView(buf: *tui.render.Buffer, rect: layout.Rect, app: *sta
         return;
     }
 
-    // Count sockets by type
-    const file_list = files.?;
-    var tcp_count: usize = 0;
-    var udp_count: usize = 0;
-    var unix_count: usize = 0;
-    for (file_list) |f| {
-        if (f.fd_type == .socket_tcp) tcp_count += 1;
-        if (f.fd_type == .socket_udp) udp_count += 1;
-        if (f.fd_type == .socket_unix) unix_count += 1;
-    }
+    const file_list = if (has_files) files.? else &[_]model.OpenFile{};
 
     // Apply protocol filter to determine what to show
     const filter = app.network_protocol_filter;
@@ -3527,7 +3580,10 @@ fn renderDetailNetworkView(buf: *tui.render.Buffer, rect: layout.Rect, app: *sta
     if (ln >= vis_start and ln < vis_end) {
         const y = rect.y + @as(u16, @intCast(ln - vis_start));
         buf.setString(rect.x, y, "Network Connections", header_style);
-        buf.setString(rect.x + 20, y, "(+ descendants)", _Style{ .fg = .light_magenta });
+        // Show source: sysctl (kernel tables) or proc_pidinfo (+ descendants)
+        const source_label = if (use_sysctl_tcp) "(kernel)" else "(+ descendants)";
+        const source_style = if (use_sysctl_tcp) _Style{ .fg = .cyan } else _Style{ .fg = .light_magenta };
+        buf.setString(rect.x + 20, y, source_label, source_style);
         // Show counts and filter
         var count_buf: [48]u8 = undefined;
         const count_str = std.fmt.bufPrint(&count_buf, " [{s}] {d} TCP, {d} UDP, {d} Unix", .{ filter.label(), tcp_count, udp_count, unix_count }) catch "";
@@ -3559,45 +3615,97 @@ fn renderDetailNetworkView(buf: *tui.render.Buffer, rect: layout.Rect, app: *sta
     const state_order = [_]model.TcpState{ .listen, .established, .syn_sent, .syn_received, .close_wait, .fin_wait_1, .fin_wait_2, .time_wait, .closing, .last_ack, .closed, .unknown };
 
     if (show_tcp) {
-        for (state_order) |target_state| {
-            for (file_list) |file| {
-                if (file.fd_type != .socket_tcp) continue;
-                if (file.tcp_state != target_state) continue;
+        if (use_sysctl_tcp) {
+            // Use sysctl data (works for sandboxed processes like WebKit)
+            for (state_order) |target_state| {
+                for (all_tcp) |conn| {
+                    if (conn.pid != detail_pid) continue;
+                    if (conn.state != target_state) continue;
 
-            if (ln >= vis_start and ln < vis_end) {
-                const y = rect.y + @as(u16, @intCast(ln - vis_start));
+                    if (ln >= vis_start and ln < vis_end) {
+                        const y = rect.y + @as(u16, @intCast(ln - vis_start));
 
-                // Protocol
-                buf.setString(rect.x, y, "tcp", _Style{ .fg = .green });
+                        // Protocol
+                        buf.setString(rect.x, y, "tcp", _Style{ .fg = .green });
 
-                // State with color
-                const state_label = file.tcp_state.label();
-                const state_color: _Color = switch (file.tcp_state) {
-                    .established => .green,
-                    .listen => .cyan,
-                    .time_wait, .fin_wait_1, .fin_wait_2, .closing, .last_ack => .yellow,
-                    .close_wait => .light_red,
-                    .syn_sent, .syn_received => .light_blue,
-                    .closed => .gray,
-                    .unknown => .gray,
-                };
-                buf.setString(rect.x + 6, y, state_label, _Style{ .fg = state_color });
+                        // State with color
+                        const conn_state_label = conn.state.label();
+                        const conn_state_color: _Color = switch (conn.state) {
+                            .established => .green,
+                            .listen => .cyan,
+                            .time_wait, .fin_wait_1, .fin_wait_2, .closing, .last_ack => .yellow,
+                            .close_wait => .light_red,
+                            .syn_sent, .syn_received => .light_blue,
+                            .closed => .gray,
+                            .unknown => .gray,
+                        };
+                        buf.setString(rect.x + 6, y, conn_state_label, _Style{ .fg = conn_state_color });
 
-                // Local address
-                const local_max: usize = 22;
-                const local_len = @min(file.local_addr.len, local_max);
-                if (local_len > 0) {
-                    buf.setString(rect.x + 18, y, file.local_addr[0..local_len], _Style{ .fg = .white });
-                }
+                        // Local address (format: addr:port)
+                        var local_buf: [64]u8 = undefined;
+                        const local_addr_slice = conn.local_addr[0..conn.local_addr_len];
+                        const local_str = std.fmt.bufPrint(&local_buf, "{s}:{d}", .{ local_addr_slice, conn.local_port }) catch "";
+                        const local_max: usize = 22;
+                        const local_len = @min(local_str.len, local_max);
+                        if (local_len > 0) {
+                            buf.setString(rect.x + 18, y, local_str[0..local_len], _Style{ .fg = .white });
+                        }
 
-                // Remote address
-                const remote_max: usize = @min(max_w -| 42, 30);
-                const remote_len = @min(file.remote_addr.len, remote_max);
-                if (remote_len > 0) {
-                    buf.setString(rect.x + 42, y, file.remote_addr[0..remote_len], _Style{ .fg = .light_white });
+                        // Remote address (format: addr:port)
+                        var remote_buf: [64]u8 = undefined;
+                        const remote_addr_slice = conn.remote_addr[0..conn.remote_addr_len];
+                        const remote_str = std.fmt.bufPrint(&remote_buf, "{s}:{d}", .{ remote_addr_slice, conn.remote_port }) catch "";
+                        const remote_max: usize = @min(max_w -| 42, 30);
+                        const remote_len = @min(remote_str.len, remote_max);
+                        if (remote_len > 0) {
+                            buf.setString(rect.x + 42, y, remote_str[0..remote_len], _Style{ .fg = .light_white });
+                        }
+                    }
+                    ln += 1;
                 }
             }
-                ln += 1;
+        } else {
+            // Use proc_pidinfo data (regular processes)
+            for (state_order) |target_state| {
+                for (file_list) |file| {
+                    if (file.fd_type != .socket_tcp) continue;
+                    if (file.tcp_state != target_state) continue;
+
+                    if (ln >= vis_start and ln < vis_end) {
+                        const y = rect.y + @as(u16, @intCast(ln - vis_start));
+
+                        // Protocol
+                        buf.setString(rect.x, y, "tcp", _Style{ .fg = .green });
+
+                        // State with color
+                        const state_label = file.tcp_state.label();
+                        const state_color: _Color = switch (file.tcp_state) {
+                            .established => .green,
+                            .listen => .cyan,
+                            .time_wait, .fin_wait_1, .fin_wait_2, .closing, .last_ack => .yellow,
+                            .close_wait => .light_red,
+                            .syn_sent, .syn_received => .light_blue,
+                            .closed => .gray,
+                            .unknown => .gray,
+                        };
+                        buf.setString(rect.x + 6, y, state_label, _Style{ .fg = state_color });
+
+                        // Local address
+                        const local_max: usize = 22;
+                        const local_len = @min(file.local_addr.len, local_max);
+                        if (local_len > 0) {
+                            buf.setString(rect.x + 18, y, file.local_addr[0..local_len], _Style{ .fg = .white });
+                        }
+
+                        // Remote address
+                        const remote_max: usize = @min(max_w -| 42, 30);
+                        const remote_len = @min(file.remote_addr.len, remote_max);
+                        if (remote_len > 0) {
+                            buf.setString(rect.x + 42, y, file.remote_addr[0..remote_len], _Style{ .fg = .light_white });
+                        }
+                    }
+                    ln += 1;
+                }
             }
         }
     }
