@@ -62,8 +62,13 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
         },
         .move_up => {
             if (app.mode == .detail) {
-                if (app.detail_focus == .left) app.detailScrollUp() else {
-                    if (app.detail_right_scroll > 0) app.detail_right_scroll -= 1;
+                if (app.detail_focus == .left) {
+                    app.detailScrollUp();
+                } else {
+                    // Right pane: try to move to previous section, or scroll up if at first
+                    if (!app.detailSectionUp()) {
+                        if (app.detail_right_scroll > 0) app.detail_right_scroll -= 1;
+                    }
                 }
             } else if (app.mode == .help) {
                 if (app.help_scroll > 0) app.help_scroll -= 1;
@@ -73,7 +78,14 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
         },
         .move_down => {
             if (app.mode == .detail) {
-                if (app.detail_focus == .left) app.detailScrollDown() else app.detail_right_scroll += 1;
+                if (app.detail_focus == .left) {
+                    app.detailScrollDown();
+                } else {
+                    // Right pane: try to move to next section, or scroll down if at last
+                    if (!app.detailSectionDown()) {
+                        app.detail_right_scroll += 1;
+                    }
+                }
             } else if (app.mode == .help) {
                 app.help_scroll += 1;
             } else if (app.dashboard_focus == .network_pane) {
@@ -224,6 +236,7 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
         .focus_right => {
             if (app.mode == .detail) {
                 app.detail_focus = .right;
+                app.validateSectionFocus(); // Ensure section focus is valid
             } else {
                 app.dashboard_focus = .process_list;
             }
@@ -231,6 +244,11 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
         .toggle_detail_view => {
             app.detail_view_mode = if (app.detail_view_mode == .info) .network else .info;
             app.detail_scroll = 0; // Reset scroll when switching views
+        },
+        .toggle_detail_section => {
+            if (app.mode == .detail and app.detail_focus == .right) {
+                app.toggleDetailSection();
+            }
         },
         .toggle_cpu_overlay => {
             app.cpu_overlay_mode = if (app.cpu_overlay_mode == .cores) .aggregate else .cores;

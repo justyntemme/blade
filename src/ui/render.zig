@@ -3773,30 +3773,28 @@ fn renderDetailView(buf: *tui.render.Buffer, area: tui.render.Rect, app: *state.
 
         const left_focused = app.detail_focus == .left;
 
-        // Render static live stats (always visible, never scrolls)
-        renderDetailStats(buf, stats_rect, detail, live_cpu, live_mem, !left_focused);
+        // Render static live stats (never focused - it's not selectable)
+        renderDetailStats(buf, stats_rect, detail, live_cpu, live_mem, false);
 
-        // Measure combined content: proc tree + separator + open files
+        // Measure right pane content for scroll clamping
         const tree_info = renderDetailTreeAndFiles(buf, content_rect, detail, app, true, false);
         const right_content_lines = tree_info.total_lines;
         const right_visible: usize = @intCast(content_rect.height);
 
-        // Auto-center on first open (scroll still at 0 and selected proc not visible)
-        if (app.detail_right_scroll == 0 and tree_info.self_line >= right_visible and right_content_lines > right_visible) {
-            const half = right_visible / 2;
-            app.detail_right_scroll = if (tree_info.self_line > half) tree_info.self_line - half else 0;
-        }
+        // Clamp scroll to valid range
         if (right_content_lines > right_visible) {
             app.detail_right_scroll = @min(app.detail_right_scroll, right_content_lines - right_visible);
         } else {
             app.detail_right_scroll = 0;
         }
+
+        // Render accordion content for right pane
         _ = renderDetailTreeAndFiles(buf, content_rect, detail, app, false, !left_focused);
 
         // Render left pane
         renderDetailLeftPane(buf, left_rect, detail, app.detail_scroll, left_focused);
 
-        // --- Scroll arrows for focused pane ---
+        // --- Scroll arrows ---
         if (left_focused) {
             if (app.detail_scroll > 0) {
                 const arrow_x = left_rect.x + left_rect.width -| 1;
@@ -3808,6 +3806,7 @@ fn renderDetailView(buf: *tui.render.Buffer, area: tui.render.Rect, app: *state.
                 buf.setString(arrow_x, arrow_y, "v", _Style{ .fg = .cyan });
             }
         } else {
+            // Right pane scroll arrows
             if (app.detail_right_scroll > 0) {
                 const arrow_x = content_rect.x + content_rect.width -| 1;
                 buf.setString(arrow_x, content_rect.y, "^", _Style{ .fg = .cyan });
@@ -3824,7 +3823,7 @@ fn renderDetailView(buf: *tui.render.Buffer, area: tui.render.Rect, app: *state.
     const footer_hint = if (app.detail_view_mode == .network)
         "esc:close  v:info  j/k:scroll  u/d:page  s:suspend  r:resume  x:kill"
     else
-        "esc:close  v:network  h/l:pane  j/k:scroll  s:suspend  r:resume  x:kill";
+        "esc:close  v:network  h/l:pane  j/k:nav  tab:fold  s:suspend  x:kill";
     buf.setString(footer_rect.x, footer_rect.y, footer_hint, _Style{ .fg = .gray });
 }
 
@@ -4613,47 +4612,52 @@ fn renderDetailTree(buf: *tui.render.Buffer, rect: layout.Rect, detail: model.Pr
 }
 
 /// Combined render function that shows process tree followed by open files
+/// Uses accordion-style collapsible sections when content doesn't fit
 fn renderDetailTreeAndFiles(buf: *tui.render.Buffer, rect: layout.Rect, detail: model.ProcessDetail, app: *state.AppState, measure_only: bool, focused: bool) TreeInfo {
-    const sec: _Style = if (focused) .{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } } else .{ .fg = .gray };
     const lbl = _Style{ .fg = .gray };
     const val = _Style{ .fg = .light_white };
     const rx: u16 = rect.x + 1;
     const max_w: usize = @intCast(rect.width -| 1);
-
-    // Clamp scroll to prevent overflow - use saturating arithmetic
-    const max_scroll: usize = std.math.maxInt(usize) - @as(usize, rect.height) - 1;
-    const scroll = @min(app.detail_right_scroll, max_scroll);
-    const vis_start = scroll;
-    const vis_end = scroll +| @as(usize, rect.height); // saturating add
-
-    var ln: usize = 0;
-
-    // === PROCESS TREE SECTION ===
-    // Header
-    if (!measure_only and ln >= vis_start and ln < vis_end) {
-        const y = rect.y + @as(u16, @intCast(ln - vis_start));
-        buf.setString(rx, y, "Process Tree", sec);
-    }
-    ln += 1;
+    const avail_height: usize = @intCast(rect.height);
 
     const pids = app.procs.hot.items(.pid);
     const cold_names = app.procs.cold.items(.name);
     const cold_ppids = app.procs.cold.items(.ppid);
+    const cold_coalition_ids = app.procs.cold.items(.coalition_id);
     const cold_len = app.procs.cold.len;
 
-    // Walk full ancestor chain
-    const max_ancestors = 64;
-    var ancestor_pids: [max_ancestors]model.pid_t = undefined;
-    var ancestor_names: [max_ancestors][]const u8 = undefined;
+    // === MEASURE PHASE: Calculate content heights for each section ===
+
+    // Get current process's coalition_id
+    const current_coalition_id: u64 = blk: {
+        if (app.procs.pid_to_index.get(detail.pid)) |idx| {
+            const i: usize = @intCast(idx);
+            if (i < cold_len) {
+                break :blk cold_coalition_ids[i];
+            }
+        }
+        break :blk 0;
+    };
+
+    // Count coalition members (excluding self)
+    var coalition_member_count: usize = 0;
+    if (current_coalition_id != 0) {
+        for (cold_coalition_ids, 0..) |cid, i| {
+            if (i >= pids.len) break;
+            if (cid == current_coalition_id and pids[i] != detail.pid) {
+                coalition_member_count += 1;
+            }
+        }
+    }
+
+    // Calculate tree height (ancestors + self + children)
     var ancestor_count: usize = 0;
     var walk_pid = detail.ppid;
-    while (ancestor_count < max_ancestors) {
+    while (ancestor_count < 64) {
         if (walk_pid <= 0) break;
         if (app.procs.pid_to_index.get(walk_pid)) |idx| {
             const i: usize = @intCast(idx);
             if (i >= cold_len) break;
-            ancestor_pids[ancestor_count] = walk_pid;
-            ancestor_names[ancestor_count] = cold_names[i];
             ancestor_count += 1;
             const next_ppid = cold_ppids[i];
             if (next_ppid == walk_pid) break;
@@ -4661,261 +4665,448 @@ fn renderDetailTreeAndFiles(buf: *tui.render.Buffer, rect: layout.Rect, detail: 
         } else break;
     }
 
-    // Ancestors top-down (reverse the stack)
-    var ai: usize = ancestor_count;
-    while (ai > 0) {
-        ai -= 1;
-        if (!measure_only and ln >= vis_start and ln < vis_end) {
-            const y = rect.y + @as(u16, @intCast(ln - vis_start));
-            const indent = ancestor_count - 1 - ai;
-            var anc_buf: [80]u8 = [_]u8{' '} ** 80;
-            const pad: usize = 2 + indent * 2;
-            var fmt_buf: [64]u8 = undefined;
-            const label = std.fmt.bufPrint(&fmt_buf, "{s} ({d})", .{ ancestor_names[ai], ancestor_pids[ai] }) catch "???";
-            const start = @min(pad, anc_buf.len);
-            const end = @min(start + label.len, anc_buf.len);
-            @memcpy(anc_buf[start..end], label[0 .. end - start]);
-            buf.setString(rx, y, anc_buf[0..@min(end, max_w)], lbl);
+    var child_count: usize = 0;
+    for (cold_ppids, 0..) |ppid, i| {
+        if (i >= pids.len) break;
+        if (ppid == detail.pid) child_count += 1;
+    }
+
+    // Calculate file count (excluding grouped entries)
+    var file_lines: usize = 0;
+    var pipe_count: usize = 0;
+    var kqueue_count: usize = 0;
+    var other_count: usize = 0;
+    if (app.detail_open_files) |files| {
+        for (files) |file| {
+            const is_std_fd = file.fd == 0 or file.fd == 1 or file.fd == 2;
+            switch (file.fd_type) {
+                .pipe => {
+                    if (!is_std_fd) {
+                        pipe_count += 1;
+                    } else {
+                        file_lines += 1;
+                    }
+                },
+                .kqueue => kqueue_count += 1,
+                .other => other_count += 1,
+                else => file_lines += 1,
+            }
         }
+        if (pipe_count > 0 or kqueue_count > 0 or other_count > 0) {
+            file_lines += 1; // Summary line
+        }
+    }
+
+    // Content heights (not including headers)
+    const coalition_content_height: usize = coalition_member_count;
+    const tree_content_height: usize = ancestor_count + 1 + @max(child_count, 1); // ancestors + self + children or "(no children)"
+    const files_content_height: usize = if (app.detail_open_files != null) file_lines + 1 else 1; // +1 for column headers or error msg
+
+    // Header heights (1 line each, plus 1 blank line between sections)
+    const has_coalition = coalition_member_count > 0;
+    const coalition_header_height: usize = if (has_coalition) 1 else 0;
+    const tree_header_height: usize = 1;
+    const files_header_height: usize = 1;
+
+    // Total height if all expanded
+    const total_height_expanded = coalition_header_height + coalition_content_height +
+        (if (has_coalition) @as(usize, 1) else @as(usize, 0)) + // blank line after coalition
+        tree_header_height + tree_content_height +
+        1 + // blank line
+        files_header_height + files_content_height;
+
+    // Determine effective expanded state for each section (always respect user's state)
+    const coalition_expanded = app.detail_sections_expanded.coalition;
+    const tree_expanded = app.detail_sections_expanded.tree;
+    const files_expanded = app.detail_sections_expanded.files;
+
+    // Show accordion UI if any existing section is collapsed OR content doesn't fit when expanded
+    const coalition_collapsed = has_coalition and !coalition_expanded;
+    const any_collapsed = coalition_collapsed or !tree_expanded or !files_expanded;
+    const needs_accordion = any_collapsed or (total_height_expanded > avail_height);
+
+    // === RENDER PHASE ===
+    var ln: usize = 0;
+    var self_ln: usize = 0;
+
+    // Scroll support
+    const scroll = app.detail_right_scroll;
+    const vis_start = scroll;
+    const vis_end = scroll +| avail_height;
+
+    // Helper to check if line is visible and get screen Y position
+    const isVisible = struct {
+        fn f(line: usize, start: usize, end: usize) bool {
+            return line >= start and line < end;
+        }
+    }.f;
+
+    const getScreenY = struct {
+        fn f(line: usize, start: usize, base_y: u16) u16 {
+            return base_y + @as(u16, @intCast(line - start));
+        }
+    }.f;
+
+    // Helper for section header style
+    // When left pane focused: all headers gray (dimmed)
+    // When right pane focused + accordion: focused section = yellow, others = gray
+    // When right pane focused + no accordion: all headers cyan
+    const getSectionStyle = struct {
+        fn f(right_pane_focused: bool, section: state.DetailSection, current_focus: state.DetailSection, show_accordion: bool) _Style {
+            if (!right_pane_focused) {
+                // Left pane has focus - dim all section headers
+                return _Style{ .fg = .gray };
+            }
+            // Right pane has focus
+            if (show_accordion) {
+                // Accordion mode: highlight only the focused section
+                if (section == current_focus) {
+                    return _Style{ .fg = .light_yellow, .modifier = _Modifier{ .bold = true } };
+                }
+                return _Style{ .fg = .gray };
+            }
+            // No accordion needed - all headers cyan to indicate right pane focus
+            return _Style{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } };
+        }
+    }.f;
+
+    // === COALITION MEMBERS SECTION ===
+    if (has_coalition) {
+        if (!measure_only and isVisible(ln, vis_start, vis_end)) {
+            const y = getScreenY(ln, vis_start, rect.y);
+            const sec_style = getSectionStyle(focused, .coalition, app.detail_section_focus, needs_accordion);
+
+            // Show fold indicator if accordion mode
+            if (needs_accordion) {
+                const indicator: []const u8 = if (coalition_expanded) "▼ " else "▶ ";
+                buf.setString(rx, y, indicator, sec_style);
+                var header_buf: [40]u8 = undefined;
+                const header = std.fmt.bufPrint(&header_buf, "Coalition Members ({d})", .{coalition_member_count}) catch "Coalition Members";
+                buf.setString(rx + 2, y, header, sec_style);
+            } else {
+                buf.setString(rx, y, "Coalition Members", sec_style);
+            }
+        }
+        ln += 1;
+
+        // Content (only if expanded)
+        if (coalition_expanded) {
+            for (cold_coalition_ids, cold_names, 0..) |cid, name, i| {
+                if (i >= pids.len) break;
+                if (cid == current_coalition_id and pids[i] != detail.pid) {
+                    if (!measure_only and isVisible(ln, vis_start, vis_end)) {
+                        const y = getScreenY(ln, vis_start, rect.y);
+                        var member_buf: [80]u8 = undefined;
+                        const member_str = std.fmt.bufPrint(&member_buf, "  {s} ({d})", .{ name, pids[i] }) catch "  ???";
+                        buf.setString(rx, y, member_str[0..@min(member_str.len, max_w)], val);
+                    }
+                    ln += 1;
+                }
+            }
+        }
+
+        // Blank line after coalition members
         ln += 1;
     }
 
-    // Current process (highlighted)
-    const self_ln = ln;
-    if (!measure_only and ln >= vis_start and ln < vis_end) {
-        const y = rect.y + @as(u16, @intCast(ln - vis_start));
-        const indent = ancestor_count * 2 + 2;
-        var cur_buf: [80]u8 = [_]u8{' '} ** 80;
-        var fmt_buf: [64]u8 = undefined;
-        const label = std.fmt.bufPrint(&fmt_buf, "{s} ({d})", .{ detail.name, detail.pid }) catch "???";
-        const start = @min(indent, cur_buf.len);
-        const end = @min(start + label.len, cur_buf.len);
-        @memcpy(cur_buf[start..end], label[0 .. end - start]);
-        buf.setString(rx, y, cur_buf[0..@min(end, max_w)], _Style{ .fg = .light_yellow, .modifier = _Modifier{ .bold = true } });
+    // === PROCESS TREE SECTION ===
+    if (!measure_only and isVisible(ln, vis_start, vis_end)) {
+        const y = getScreenY(ln, vis_start, rect.y);
+        const sec_style = getSectionStyle(focused, .tree, app.detail_section_focus, needs_accordion);
+
+        if (needs_accordion) {
+            const indicator: []const u8 = if (tree_expanded) "▼ " else "▶ ";
+            buf.setString(rx, y, indicator, sec_style);
+            buf.setString(rx + 2, y, "Process Tree", sec_style);
+        } else {
+            buf.setString(rx, y, "Process Tree", sec_style);
+        }
     }
     ln += 1;
 
-    // Children
-    const child_indent = ancestor_count * 2 + 4;
-    var child_count: u16 = 0;
-    for (cold_ppids, cold_names, 0..) |ppid, name, i| {
-        if (i >= pids.len) break;
-        if (ppid == detail.pid) {
-            if (!measure_only and ln >= vis_start and ln < vis_end) {
-                const y = rect.y + @as(u16, @intCast(ln - vis_start));
-                var child_line: [80]u8 = [_]u8{' '} ** 80;
+    if (tree_expanded) {
+        // Walk full ancestor chain
+        const max_ancestors = 64;
+        var ancestor_pids: [max_ancestors]model.pid_t = undefined;
+        var ancestor_names: [max_ancestors][]const u8 = undefined;
+        var actual_ancestor_count: usize = 0;
+        walk_pid = detail.ppid;
+        while (actual_ancestor_count < max_ancestors) {
+            if (walk_pid <= 0) break;
+            if (app.procs.pid_to_index.get(walk_pid)) |idx| {
+                const i: usize = @intCast(idx);
+                if (i >= cold_len) break;
+                ancestor_pids[actual_ancestor_count] = walk_pid;
+                ancestor_names[actual_ancestor_count] = cold_names[i];
+                actual_ancestor_count += 1;
+                const next_ppid = cold_ppids[i];
+                if (next_ppid == walk_pid) break;
+                walk_pid = next_ppid;
+            } else break;
+        }
+
+        // Ancestors top-down (reverse the stack)
+        var ai: usize = actual_ancestor_count;
+        while (ai > 0) {
+            ai -= 1;
+            if (!measure_only and isVisible(ln, vis_start, vis_end)) {
+                const y = getScreenY(ln, vis_start, rect.y);
+                const indent = actual_ancestor_count - 1 - ai;
+                var anc_buf: [80]u8 = [_]u8{' '} ** 80;
+                const pad: usize = 2 + indent * 2;
                 var fmt_buf: [64]u8 = undefined;
-                const label = std.fmt.bufPrint(&fmt_buf, "{s} ({d})", .{ name, pids[i] }) catch "???";
-                const start = @min(child_indent, child_line.len);
-                const end = @min(start + label.len, child_line.len);
-                @memcpy(child_line[start..end], label[0 .. end - start]);
-                buf.setString(rx, y, child_line[0..@min(end, max_w)], val);
+                const label = std.fmt.bufPrint(&fmt_buf, "{s} ({d})", .{ ancestor_names[ai], ancestor_pids[ai] }) catch "???";
+                const start = @min(pad, anc_buf.len);
+                const end = @min(start + label.len, anc_buf.len);
+                @memcpy(anc_buf[start..end], label[0 .. end - start]);
+                buf.setString(rx, y, anc_buf[0..@min(end, max_w)], lbl);
             }
             ln += 1;
-            child_count += 1;
         }
-    }
-    if (child_count == 0) {
-        if (!measure_only and ln >= vis_start and ln < vis_end) {
-            const y = rect.y + @as(u16, @intCast(ln - vis_start));
-            var no_child: [80]u8 = [_]u8{' '} ** 80;
-            const msg = "(no children)";
-            const start = @min(child_indent, no_child.len);
-            const end = @min(start + msg.len, no_child.len);
-            @memcpy(no_child[start..end], msg);
-            buf.setString(rx, y, no_child[0..@min(end, max_w)], lbl);
+
+        // Current process (highlighted)
+        self_ln = ln;
+        if (!measure_only and isVisible(ln, vis_start, vis_end)) {
+            const y = getScreenY(ln, vis_start, rect.y);
+            const indent = actual_ancestor_count * 2 + 2;
+            var cur_buf: [80]u8 = [_]u8{' '} ** 80;
+            var fmt_buf: [64]u8 = undefined;
+            const label = std.fmt.bufPrint(&fmt_buf, "{s} ({d})", .{ detail.name, detail.pid }) catch "???";
+            const start = @min(indent, cur_buf.len);
+            const end = @min(start + label.len, cur_buf.len);
+            @memcpy(cur_buf[start..end], label[0 .. end - start]);
+            buf.setString(rx, y, cur_buf[0..@min(end, max_w)], _Style{ .fg = .light_yellow, .modifier = _Modifier{ .bold = true } });
         }
         ln += 1;
+
+        // Children
+        const child_indent = actual_ancestor_count * 2 + 4;
+        var rendered_children: u16 = 0;
+        for (cold_ppids, cold_names, 0..) |ppid, name, i| {
+            if (i >= pids.len) break;
+            if (ppid == detail.pid) {
+                if (!measure_only and isVisible(ln, vis_start, vis_end)) {
+                    const y = getScreenY(ln, vis_start, rect.y);
+                    var child_line: [80]u8 = [_]u8{' '} ** 80;
+                    var fmt_buf: [64]u8 = undefined;
+                    const label = std.fmt.bufPrint(&fmt_buf, "{s} ({d})", .{ name, pids[i] }) catch "???";
+                    const start = @min(child_indent, child_line.len);
+                    const end = @min(start + label.len, child_line.len);
+                    @memcpy(child_line[start..end], label[0 .. end - start]);
+                    buf.setString(rx, y, child_line[0..@min(end, max_w)], val);
+                }
+                ln += 1;
+                rendered_children += 1;
+            }
+        }
+        if (rendered_children == 0) {
+            if (!measure_only and isVisible(ln, vis_start, vis_end)) {
+                const y = getScreenY(ln, vis_start, rect.y);
+                var no_child: [80]u8 = [_]u8{' '} ** 80;
+                const msg = "(no children)";
+                const start = @min(child_indent, no_child.len);
+                const end = @min(start + msg.len, no_child.len);
+                @memcpy(no_child[start..end], msg);
+                buf.setString(rx, y, no_child[0..@min(end, max_w)], lbl);
+            }
+            ln += 1;
+        }
     }
 
     // === SEPARATOR ===
     ln += 1; // blank line
 
     // === OPEN FILES SECTION ===
-    // Header
-    if (!measure_only and ln >= vis_start and ln < vis_end) {
-        const y = rect.y + @as(u16, @intCast(ln - vis_start));
+    if (!measure_only and isVisible(ln, vis_start, vis_end)) {
+        const y = getScreenY(ln, vis_start, rect.y);
+        const sec_style = getSectionStyle(focused, .files, app.detail_section_focus, needs_accordion);
+
         var file_count_buf: [32]u8 = undefined;
         const file_count = if (app.detail_open_files) |files| files.len else 0;
-        const header = std.fmt.bufPrint(&file_count_buf, "Open Files ({d})", .{file_count}) catch "Open Files";
-        buf.setString(rx, y, header, sec);
-    }
-    ln += 1;
 
-    // Column headers
-    if (!measure_only and ln >= vis_start and ln < vis_end) {
-        const y = rect.y + @as(u16, @intCast(ln - vis_start));
-        buf.setString(rx, y, "FD", lbl);
-        buf.setString(rx + 5, y, "Type", lbl);
-        buf.setString(rx + 14, y, "Path / Address", lbl);
-    }
-    ln += 1;
-
-    // File rows
-    if (app.detail_open_files) |files| {
-        const path_x = rx + 14;
-        const path_max: usize = if (max_w > 14) max_w - 14 else 1;
-
-        // Count anonymous pipes and kqueues (excluding stdin/stdout/stderr)
-        var pipe_count: usize = 0;
-        var kqueue_count: usize = 0;
-        var other_count: usize = 0;
-        for (files) |file| {
-            switch (file.fd_type) {
-                .pipe => {
-                    // Don't count stdin/stdout/stderr
-                    if (file.fd != 0 and file.fd != 1 and file.fd != 2) {
-                        pipe_count += 1;
-                    }
-                },
-                .kqueue => kqueue_count += 1,
-                .other => other_count += 1,
-                else => {},
-            }
+        if (needs_accordion) {
+            const indicator: []const u8 = if (files_expanded) "▼ " else "▶ ";
+            buf.setString(rx, y, indicator, sec_style);
+            const header = std.fmt.bufPrint(&file_count_buf, "Open Files ({d})", .{file_count}) catch "Open Files";
+            buf.setString(rx + 2, y, header, sec_style);
+        } else {
+            const header = std.fmt.bufPrint(&file_count_buf, "Open Files ({d})", .{file_count}) catch "Open Files";
+            buf.setString(rx, y, header, sec_style);
         }
+    }
+    ln += 1;
 
-        for (files) |file| {
-            // Skip anonymous pipes (except stdin/stdout/stderr), kqueues, and other - we'll summarize them
-            const is_std_fd = file.fd == 0 or file.fd == 1 or file.fd == 2;
-            if (file.fd_type == .kqueue) continue;
-            if (file.fd_type == .other) continue;
-            if (file.fd_type == .pipe and !is_std_fd) continue;
+    if (files_expanded) {
+        // Column headers
+        if (!measure_only and isVisible(ln, vis_start, vis_end)) {
+            const y = getScreenY(ln, vis_start, rect.y);
+            buf.setString(rx, y, "FD", lbl);
+            buf.setString(rx + 5, y, "Type", lbl);
+            buf.setString(rx + 14, y, "Path / Address", lbl);
+        }
+        ln += 1;
 
-            // Get the path/address string
-            var addr_buf: [256]u8 = undefined;
-            const path_str: []const u8 = if (file.fd_type == .socket_tcp or file.fd_type == .socket_udp) blk: {
-                const addr_str = std.fmt.bufPrint(&addr_buf, "{s} -> {s}", .{
-                    if (file.local_addr.len > 0) file.local_addr else "?",
-                    if (file.remote_addr.len > 0) file.remote_addr else "?",
-                }) catch "???";
-                break :blk addr_str;
-            } else if (file.fd_type == .pipe and is_std_fd) blk: {
-                // Show stdin/stdout/stderr for FD 0/1/2
-                break :blk switch (file.fd) {
-                    0 => "stdin",
-                    1 => "stdout",
-                    2 => "stderr",
-                    else => "(pipe)",
-                };
-            } else file.path;
+        // File rows
+        if (app.detail_open_files) |files| {
+            const path_x = rx + 14;
+            const path_max: usize = if (max_w > 14) max_w - 14 else 1;
 
-            // First line: FD, Type, State (for TCP), and start of path
-            if (!measure_only and ln >= vis_start and ln < vis_end) {
-                const y = rect.y + @as(u16, @intCast(ln - vis_start));
-
-                // FD number
-                var fd_buf: [5]u8 = undefined;
-                const fd_str = std.fmt.bufPrint(&fd_buf, "{d:>3}", .{file.fd}) catch "???";
-                buf.setString(rx, y, fd_str, val);
-
-                // Type with color
-                const type_str = switch (file.fd_type) {
-                    .file => "file",
-                    .socket_tcp => "tcp",
-                    .socket_udp => "udp",
-                    .socket_unix => "unix",
-                    .pipe => "pipe",
-                    .kqueue => "kqueue",
-                    .other => "other",
-                };
-                const type_color: _Color = switch (file.fd_type) {
-                    .file => .white,
-                    .socket_tcp => .green,
-                    .socket_udp => .yellow,
-                    .socket_unix => .cyan,
-                    .pipe => .magenta,
-                    .kqueue => .blue,
-                    .other => .gray,
-                };
-                buf.setString(rx + 5, y, type_str, _Style{ .fg = type_color });
-
-                // For TCP sockets, show the connection state
-                var state_offset: u16 = 0;
-                if (file.fd_type == .socket_tcp) {
-                    const state_label = file.tcp_state.label();
-                    // Color based on state
-                    const state_color: _Color = switch (file.tcp_state) {
-                        .established => .green,
-                        .listen => .cyan,
-                        .time_wait, .fin_wait_1, .fin_wait_2, .closing, .last_ack => .yellow,
-                        .close_wait => .light_red,
-                        .syn_sent, .syn_received => .light_blue,
-                        .closed => .gray,
-                        .unknown => .gray,
-                    };
-                    buf.setString(rx + 9, y, state_label, _Style{ .fg = state_color });
-                    state_offset = @intCast(state_label.len + 1);
-                }
-
-                // First chunk of path (shifted right for TCP state)
-                if (path_str.len > 0) {
-                    const actual_path_x = path_x + state_offset;
-                    const actual_path_max = if (path_max > state_offset) path_max - state_offset else 0;
-                    const first_chunk = path_str[0..@min(path_str.len, actual_path_max)];
-                    buf.setString(actual_path_x, y, first_chunk, _Style{ .fg = .light_cyan });
+            // Re-count grouped entries
+            var local_pipe_count: usize = 0;
+            var local_kqueue_count: usize = 0;
+            var local_other_count: usize = 0;
+            for (files) |file| {
+                switch (file.fd_type) {
+                    .pipe => {
+                        if (file.fd != 0 and file.fd != 1 and file.fd != 2) {
+                            local_pipe_count += 1;
+                        }
+                    },
+                    .kqueue => local_kqueue_count += 1,
+                    .other => local_other_count += 1,
+                    else => {},
                 }
             }
-            ln += 1;
 
-            // Continuation lines for long paths
-            var offset: usize = path_max;
-            while (offset < path_str.len) : (offset += path_max) {
-                if (!measure_only and ln >= vis_start and ln < vis_end) {
-                    const y = rect.y + @as(u16, @intCast(ln - vis_start));
-                    const chunk_end = @min(offset + path_max, path_str.len);
-                    const chunk = path_str[offset..chunk_end];
-                    buf.setString(path_x, y, chunk, _Style{ .fg = .light_cyan });
+            for (files) |file| {
+                // Skip anonymous pipes (except stdin/stdout/stderr), kqueues, and other
+                const is_std_fd = file.fd == 0 or file.fd == 1 or file.fd == 2;
+                if (file.fd_type == .kqueue) continue;
+                if (file.fd_type == .other) continue;
+                if (file.fd_type == .pipe and !is_std_fd) continue;
+
+                // Get the path/address string
+                var addr_buf: [256]u8 = undefined;
+                const path_str: []const u8 = if (file.fd_type == .socket_tcp or file.fd_type == .socket_udp) blk: {
+                    const addr_str = std.fmt.bufPrint(&addr_buf, "{s} -> {s}", .{
+                        if (file.local_addr.len > 0) file.local_addr else "?",
+                        if (file.remote_addr.len > 0) file.remote_addr else "?",
+                    }) catch "???";
+                    break :blk addr_str;
+                } else if (file.fd_type == .pipe and is_std_fd) blk: {
+                    break :blk switch (file.fd) {
+                        0 => "stdin",
+                        1 => "stdout",
+                        2 => "stderr",
+                        else => "(pipe)",
+                    };
+                } else file.path;
+
+                if (!measure_only and isVisible(ln, vis_start, vis_end)) {
+                    const y = getScreenY(ln, vis_start, rect.y);
+
+                    // FD number
+                    var fd_buf: [5]u8 = undefined;
+                    const fd_str = std.fmt.bufPrint(&fd_buf, "{d:>3}", .{file.fd}) catch "???";
+                    buf.setString(rx, y, fd_str, val);
+
+                    // Type with color
+                    const type_str = switch (file.fd_type) {
+                        .file => "file",
+                        .socket_tcp => "tcp",
+                        .socket_udp => "udp",
+                        .socket_unix => "unix",
+                        .pipe => "pipe",
+                        .kqueue => "kqueue",
+                        .other => "other",
+                    };
+                    const type_color: _Color = switch (file.fd_type) {
+                        .file => .white,
+                        .socket_tcp => .green,
+                        .socket_udp => .yellow,
+                        .socket_unix => .cyan,
+                        .pipe => .magenta,
+                        .kqueue => .blue,
+                        .other => .gray,
+                    };
+                    buf.setString(rx + 5, y, type_str, _Style{ .fg = type_color });
+
+                    // For TCP sockets, show the connection state
+                    var state_offset: u16 = 0;
+                    if (file.fd_type == .socket_tcp) {
+                        const state_label = file.tcp_state.label();
+                        const state_color: _Color = switch (file.tcp_state) {
+                            .established => .green,
+                            .listen => .cyan,
+                            .time_wait, .fin_wait_1, .fin_wait_2, .closing, .last_ack => .yellow,
+                            .close_wait => .light_red,
+                            .syn_sent, .syn_received => .light_blue,
+                            .closed => .gray,
+                            .unknown => .gray,
+                        };
+                        buf.setString(rx + 9, y, state_label, _Style{ .fg = state_color });
+                        state_offset = @intCast(state_label.len + 1);
+                    }
+
+                    // First chunk of path
+                    if (path_str.len > 0) {
+                        const actual_path_x = path_x + state_offset;
+                        const actual_path_max = if (path_max > state_offset) path_max - state_offset else 0;
+                        const first_chunk = path_str[0..@min(path_str.len, actual_path_max)];
+                        buf.setString(actual_path_x, y, first_chunk, _Style{ .fg = .light_cyan });
+                    }
+                }
+                ln += 1;
+
+                // Continuation lines for long paths
+                var offset: usize = path_max;
+                while (offset < path_str.len) : (offset += path_max) {
+                    if (!measure_only and isVisible(ln, vis_start, vis_end)) {
+                        const y = getScreenY(ln, vis_start, rect.y);
+                        const chunk_end = @min(offset + path_max, path_str.len);
+                        const chunk = path_str[offset..chunk_end];
+                        buf.setString(path_x, y, chunk, _Style{ .fg = .light_cyan });
+                    }
+                    ln += 1;
+                }
+            }
+
+            // Summary line for grouped anonymous entries
+            if (local_pipe_count > 0 or local_kqueue_count > 0 or local_other_count > 0) {
+                if (!measure_only and isVisible(ln, vis_start, vis_end)) {
+                    const y = getScreenY(ln, vis_start, rect.y);
+                    var summary_buf: [64]u8 = undefined;
+                    var parts: [3][]const u8 = undefined;
+                    var part_count: usize = 0;
+                    var pipe_buf_inner: [20]u8 = undefined;
+                    var kq_buf: [20]u8 = undefined;
+                    var other_buf: [20]u8 = undefined;
+
+                    if (local_pipe_count > 0) {
+                        parts[part_count] = std.fmt.bufPrint(&pipe_buf_inner, "{d} pipes", .{local_pipe_count}) catch "? pipes";
+                        part_count += 1;
+                    }
+                    if (local_kqueue_count > 0) {
+                        parts[part_count] = std.fmt.bufPrint(&kq_buf, "{d} kqueues", .{local_kqueue_count}) catch "? kqueues";
+                        part_count += 1;
+                    }
+                    if (local_other_count > 0) {
+                        parts[part_count] = std.fmt.bufPrint(&other_buf, "{d} other", .{local_other_count}) catch "? other";
+                        part_count += 1;
+                    }
+
+                    var summary_len: usize = 0;
+                    for (parts[0..part_count], 0..) |part, i| {
+                        if (i > 0 and summary_len + 2 < summary_buf.len) {
+                            @memcpy(summary_buf[summary_len..][0..2], ", ");
+                            summary_len += 2;
+                        }
+                        const copy_len = @min(part.len, summary_buf.len - summary_len);
+                        @memcpy(summary_buf[summary_len..][0..copy_len], part[0..copy_len]);
+                        summary_len += copy_len;
+                    }
+
+                    buf.setString(rx + 2, y, summary_buf[0..summary_len], _Style{ .fg = .gray });
                 }
                 ln += 1;
             }
-        }
-
-        // Summary line for grouped anonymous entries
-        if (pipe_count > 0 or kqueue_count > 0 or other_count > 0) {
-            if (!measure_only and ln >= vis_start and ln < vis_end) {
-                const y = rect.y + @as(u16, @intCast(ln - vis_start));
-                var summary_buf: [64]u8 = undefined;
-                var parts: [3][]const u8 = undefined;
-                var part_count: usize = 0;
-                var pipe_buf: [20]u8 = undefined;
-                var kq_buf: [20]u8 = undefined;
-                var other_buf: [20]u8 = undefined;
-
-                if (pipe_count > 0) {
-                    parts[part_count] = std.fmt.bufPrint(&pipe_buf, "{d} pipes", .{pipe_count}) catch "? pipes";
-                    part_count += 1;
-                }
-                if (kqueue_count > 0) {
-                    parts[part_count] = std.fmt.bufPrint(&kq_buf, "{d} kqueues", .{kqueue_count}) catch "? kqueues";
-                    part_count += 1;
-                }
-                if (other_count > 0) {
-                    parts[part_count] = std.fmt.bufPrint(&other_buf, "{d} other", .{other_count}) catch "? other";
-                    part_count += 1;
-                }
-
-                // Build summary string
-                var summary_len: usize = 0;
-                for (parts[0..part_count], 0..) |part, i| {
-                    if (i > 0 and summary_len + 2 < summary_buf.len) {
-                        @memcpy(summary_buf[summary_len..][0..2], ", ");
-                        summary_len += 2;
-                    }
-                    const copy_len = @min(part.len, summary_buf.len - summary_len);
-                    @memcpy(summary_buf[summary_len..][0..copy_len], part[0..copy_len]);
-                    summary_len += copy_len;
-                }
-
-                buf.setString(rx + 2, y, summary_buf[0..summary_len], _Style{ .fg = .gray });
+        } else {
+            if (!measure_only and isVisible(ln, vis_start, vis_end)) {
+                const y = getScreenY(ln, vis_start, rect.y);
+                buf.setString(rx + 2, y, "(unable to read file descriptors)", lbl);
             }
             ln += 1;
         }
-    } else {
-        if (!measure_only and ln >= vis_start and ln < vis_end) {
-            const y = rect.y + @as(u16, @intCast(ln - vis_start));
-            buf.setString(rx + 2, y, "(unable to read file descriptors)", lbl);
-        }
-        ln += 1;
     }
 
     return .{ .total_lines = ln, .self_line = self_ln };

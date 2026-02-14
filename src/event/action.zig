@@ -31,6 +31,7 @@ pub const Action = enum {
     focus_left,
     focus_right,
     toggle_detail_view,
+    toggle_detail_section,
     toggle_cpu_overlay,
     toggle_temp_unit,
     cycle_storage_detail,

@@ -383,6 +383,36 @@ pub const NetworkProtocolFilter = enum {
 };
 pub const DetailViewMode = enum { info, network };
 
+/// Detail view section identifiers for accordion navigation
+pub const DetailSection = enum {
+    coalition,
+    tree,
+    files,
+
+    pub fn next(self: DetailSection) DetailSection {
+        return switch (self) {
+            .coalition => .tree,
+            .tree => .files,
+            .files => .coalition,
+        };
+    }
+
+    pub fn prev(self: DetailSection) DetailSection {
+        return switch (self) {
+            .coalition => .files,
+            .tree => .coalition,
+            .files => .tree,
+        };
+    }
+};
+
+/// Tracks which detail sections are expanded/collapsed
+pub const DetailSectionsExpanded = struct {
+    coalition: bool = false,
+    tree: bool = false,
+    files: bool = false,
+};
+
 /// Preserve log mode for network connection history
 pub const PreserveLog = enum {
     no, // Only show active connections (default)
@@ -483,6 +513,8 @@ pub const AppState = struct {
     detail_focus: DetailFocus = .left,
     detail_view_mode: DetailViewMode = .info,
     detail_open_files: ?[]const model.OpenFile = null,
+    detail_sections_expanded: DetailSectionsExpanded = .{},
+    detail_section_focus: DetailSection = .tree,
     help_scroll: usize = 0,
     procs: procs.Store,
     system: SystemState = .{},
@@ -1241,6 +1273,9 @@ pub const AppState = struct {
         self.detail_right_scroll = 0;
         self.detail_focus = .left;
         self.detail_view_mode = .info;
+        self.detail_sections_expanded = .{}; // Start with all sections collapsed
+        // Set initial section focus to coalition (first section)
+        self.detail_section_focus = .coalition;
         self.previous_mode = self.mode;
         self.mode = .detail;
 
@@ -1590,6 +1625,100 @@ pub const AppState = struct {
     pub fn detailScrollToBottom(self: *AppState) void {
         // Use a large but safe value that won't overflow in render calculations
         self.detail_scroll = std.math.maxInt(usize) / 2;
+    }
+
+    /// Toggle expansion of the currently focused section (right pane accordion)
+    pub fn toggleDetailSection(self: *AppState) void {
+        switch (self.detail_section_focus) {
+            .coalition => self.detail_sections_expanded.coalition = !self.detail_sections_expanded.coalition,
+            .tree => self.detail_sections_expanded.tree = !self.detail_sections_expanded.tree,
+            .files => self.detail_sections_expanded.files = !self.detail_sections_expanded.files,
+        }
+    }
+
+    /// Check if the coalition section should be visible (has members)
+    fn hasCoalitionMembers(self: *const AppState) bool {
+        const pid = self.detail_pid orelse return false;
+        const cold = self.procs.cold.slice();
+        const pids = self.procs.hot.items(.pid);
+        const coalition_ids = cold.items(.coalition_id);
+        const cold_len = cold.len;
+
+        // Get current process's coalition_id
+        const current_coalition_id: u64 = blk: {
+            if (self.procs.pid_to_index.get(pid)) |idx| {
+                const i: usize = @intCast(idx);
+                if (i < cold_len) {
+                    break :blk coalition_ids[i];
+                }
+            }
+            break :blk 0;
+        };
+
+        if (current_coalition_id == 0) return false;
+
+        // Count coalition members (excluding self)
+        for (coalition_ids, 0..) |cid, i| {
+            if (i >= pids.len) break;
+            if (cid == current_coalition_id and pids[i] != pid) {
+                return true; // Found at least one other member
+            }
+        }
+        return false;
+    }
+
+    /// Move section focus up (previous section, skipping coalition if no members)
+    /// Returns true if moved to a different section, false if already at first section
+    pub fn detailSectionUp(self: *AppState) bool {
+        const has_coalition = self.hasCoalitionMembers();
+        const first_section: DetailSection = if (has_coalition) .coalition else .tree;
+
+        // Already at first section - can't go up
+        if (self.detail_section_focus == first_section) {
+            return false;
+        }
+
+        var next_section = self.detail_section_focus.prev();
+        // Skip coalition if no members
+        if (!has_coalition and next_section == .coalition) {
+            next_section = next_section.prev();
+        }
+
+        // Don't wrap around - stop at first section
+        if (next_section == .files and self.detail_section_focus == first_section) {
+            return false;
+        }
+
+        self.detail_section_focus = next_section;
+        return true;
+    }
+
+    /// Move section focus down (next section, skipping coalition if no members)
+    /// Returns true if moved to a different section, false if already at last section
+    pub fn detailSectionDown(self: *AppState) bool {
+        // Already at last section - can't go down
+        if (self.detail_section_focus == .files) {
+            return false;
+        }
+
+        const has_coalition = self.hasCoalitionMembers();
+        var next_section = self.detail_section_focus.next();
+        // Skip coalition if no members (shouldn't happen going down, but be safe)
+        if (!has_coalition and next_section == .coalition) {
+            next_section = next_section.next();
+        }
+
+        self.detail_section_focus = next_section;
+        return true;
+    }
+
+    /// Ensure section focus is on a valid section (call when switching to right pane)
+    pub fn validateSectionFocus(self: *AppState) void {
+        const has_coalition = self.hasCoalitionMembers();
+        // If focused on coalition but no members exist, move to tree
+        if (self.detail_section_focus == .coalition and !has_coalition) {
+            self.detail_section_focus = .tree;
+        }
     }
 
     pub fn searchClear(self: *AppState) void {
