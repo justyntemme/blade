@@ -579,8 +579,6 @@ pub const AppState = struct {
     mach_port_cache_initialized: bool = false,
     // Mach port fetch in progress (to avoid duplicate fetches)
     mach_port_fetch_pending: bool = false,
-    // Last Mach port fetch error (for display)
-    mach_port_last_error: ?[]const u8 = null,
 
     // VM map cache (per-PID, collected via mach_vm_region_recurse with entitlement)
     vm_map_cache: std.AutoHashMap(model.pid_t, CachedVmMapInfo) = undefined,
@@ -666,6 +664,14 @@ pub const AppState = struct {
             self.last_visible_change_ns = std.time.nanoTimestamp();
         }
         self.visible_pid_count = count;
+
+        // Pre-fetch Mach ports for first visible PID not yet cached
+        for (self.visible_pids[0..count]) |pid| {
+            if (!self.mach_port_cache.contains(pid)) {
+                self.triggerMachPortsFetch(pid);
+                break; // one at a time (single pending slot)
+            }
+        }
     }
 
     /// Toggle preserve log mode (cycles: no -> yes -> fade -> no)
@@ -1339,8 +1345,9 @@ pub const AppState = struct {
         self.previous_mode = self.mode;
         self.mode = .detail;
 
-        // Immediately trigger TCP collection (don't wait for next batch)
+        // Immediately trigger TCP and Mach port collection (don't wait for next batch)
         self.triggerTcpCollection();
+        self.triggerMachPortsFetch(pid);
 
         const thread = std.Thread.spawn(.{}, collectDetailWorker, .{ self.detail_queue, pid, self.gpa }) catch {
             self.showToast("Detail collection failed", .err);
@@ -1799,7 +1806,6 @@ pub const AppState = struct {
         }
 
         self.mach_port_fetch_pending = true;
-        self.mach_port_last_error = null;
         const thread = std.Thread.spawn(.{}, fetchMachPortsWorker, .{
             pid,
             self.gpa,
@@ -1821,24 +1827,53 @@ pub const AppState = struct {
         var arena = std.heap.ArenaAllocator.init(gpa);
         const alloc = arena.allocator();
 
-        const info = mach_ports.collectMachPorts(alloc, pid) catch |err| {
-            arena.deinit();
-            app.mach_port_last_error = switch (err) {
-                error.PermissionDenied => "Permission denied",
-                error.ProcessNotFound => "Process not found",
-                error.TaskForPidFailed => "task_for_pid failed (SIP-protected process)",
-                else => "Failed to get Mach ports",
+        const info = mach_ports.collectMachPorts(alloc, pid) catch {
+            // Cache empty result on failure (negative caching) so we don't retry every frame.
+            // The 2-second TTL will allow periodic retries.
+            const now_ns = std.time.nanoTimestamp();
+            if (app.mach_port_cache.getPtr(pid)) |old| {
+                old.arena.deinit();
+            }
+            const empty_info = model.MachPortInfo{
+                .pid = pid,
+                .send_rights = &[_]model.MachPort{},
+                .receive_rights = &[_]model.MachPort{},
+                .port_sets = &[_]model.MachPort{},
+                .dead_names = &[_]model.MachPort{},
+            };
+            app.mach_port_cache.put(pid, .{
+                .info = empty_info,
+                .cached_at_ns = now_ns,
+                .arena = arena,
+            }) catch {
+                arena.deinit();
             };
             return;
         };
 
         const model_info = convertMachPortInfo(alloc, info) catch {
-            arena.deinit();
-            app.mach_port_last_error = "Failed to parse Mach ports data";
+            // Same negative caching for conversion failures
+            const now_ns = std.time.nanoTimestamp();
+            if (app.mach_port_cache.getPtr(pid)) |old| {
+                old.arena.deinit();
+            }
+            const empty_info = model.MachPortInfo{
+                .pid = pid,
+                .send_rights = &[_]model.MachPort{},
+                .receive_rights = &[_]model.MachPort{},
+                .port_sets = &[_]model.MachPort{},
+                .dead_names = &[_]model.MachPort{},
+            };
+            app.mach_port_cache.put(pid, .{
+                .info = empty_info,
+                .cached_at_ns = now_ns,
+                .arena = arena,
+            }) catch {
+                arena.deinit();
+            };
             return;
         };
 
-        app.mach_port_last_error = null;
         const now_ns = std.time.nanoTimestamp();
 
         // Free old cache entry's arena if replacing
