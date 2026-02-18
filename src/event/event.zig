@@ -63,7 +63,12 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
         .move_up => {
             if (app.mode == .detail) {
                 if (app.detail_view_mode == .network) {
-                    app.detailScrollUp();
+                    if (app.detail_focus == .right) {
+                        // Scroll mach ports column
+                        if (app.detail_right_scroll > 0) app.detail_right_scroll -= 1;
+                    } else {
+                        app.detailScrollUp();
+                    }
                 } else if (app.detail_focus == .left) {
                     app.detailScrollUp();
                 } else {
@@ -81,7 +86,12 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
         .move_down => {
             if (app.mode == .detail) {
                 if (app.detail_view_mode == .network) {
-                    app.detailScrollDown();
+                    if (app.detail_focus == .right) {
+                        // Scroll mach ports column
+                        app.detail_right_scroll += 1;
+                    } else {
+                        app.detailScrollDown();
+                    }
                 } else if (app.detail_focus == .left) {
                     app.detailScrollDown();
                 } else {
@@ -248,6 +258,7 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
         .toggle_detail_view => {
             app.detail_view_mode = if (app.detail_view_mode == .info) .network else .info;
             app.detail_scroll = 0; // Reset scroll when switching views
+            app.detail_right_scroll = 0;
         },
         .toggle_detail_section => {
             if (app.mode == .detail and app.detail_focus == .right) {

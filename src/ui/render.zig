@@ -16,6 +16,53 @@ fn setClipped(buf: *tui.render.Buffer, x: u16, y: u16, text: []const u8, style: 
     buf.setString(x, y, text[0..@min(text.len, avail)], style);
 }
 
+/// Write text with word-wrapping within a rect. Returns number of lines consumed.
+/// Text wraps at word boundaries when possible, hard-breaks mid-word if a single word exceeds width.
+fn setWrapped(buf: *tui.render.Buffer, x: u16, start_y: u16, text: []const u8, style: _Style, max_x: u16, max_y: u16) u16 {
+    if (x >= max_x or start_y >= max_y) return 0;
+    const width: usize = max_x - x;
+    if (width == 0) return 0;
+
+    var y = start_y;
+    var remaining = text;
+
+    while (remaining.len > 0 and y < max_y) {
+        if (remaining.len <= width) {
+            buf.setString(x, y, remaining, style);
+            y += 1;
+            break;
+        }
+
+        // Find wrap point: last space within width, or hard-break at width
+        var wrap_at: usize = width;
+        var skip: usize = 0; // chars to skip after wrap (space)
+        // Search backwards from width for a space
+        var i: usize = width;
+        while (i > 0) : (i -= 1) {
+            if (remaining[i - 1] == ' ') {
+                wrap_at = i - 1;
+                skip = 1; // skip the space
+                break;
+            }
+        }
+        // If no space found (single long word), hard-break at width
+        if (i == 0) {
+            wrap_at = width;
+            skip = 0;
+        }
+
+        buf.setString(x, y, remaining[0..wrap_at], style);
+        y += 1;
+        remaining = remaining[wrap_at + skip ..];
+        // Skip leading spaces on next line
+        while (remaining.len > 0 and remaining[0] == ' ') {
+            remaining = remaining[1..];
+        }
+    }
+
+    return y - start_y;
+}
+
 fn cpuColor(cpu_percent: f32) _Color {
     if (cpu_percent > 50.0) return .red;
     if (cpu_percent > 25.0) return .yellow;
@@ -3784,50 +3831,55 @@ fn renderDetailView(buf: *tui.render.Buffer, area: tui.render.Rect, app: *state.
             app.detail_scroll = 0;
         }
 
-        // Dynamically split right pane: render stats row, then accordion starts right below
+        // === Global right-pane scroll: stats + memmap + accordion as one scrollable unit ===
         const half_w = right_rect.width / 2;
-        const stats_col = layout.Rect{
-            .x = right_rect.x,
-            .y = right_rect.y,
-            .width = half_w,
-            .height = right_rect.height,
-        };
-        const memmap_col = layout.Rect{
-            .x = right_rect.x + half_w,
-            .y = right_rect.y,
-            .width = right_rect.width - half_w,
-            .height = right_rect.height,
-        };
-
         const left_focused = app.detail_focus == .left;
 
-        // Render both columns and track actual lines used
-        const stats_lines = renderDetailStats(buf, stats_col, detail, live_cpu, live_mem, false);
-        const memmap_lines = renderDetailMemoryMap(buf, memmap_col, app, detail);
-        const top_used = @max(stats_lines, memmap_lines) + 1; // +1 for separator gap
+        // --- Measure phase (no rendering) ---
+        // Use skip_lines=maxInt to count lines without writing to buffer
+        const measure_skip = std.math.maxInt(u16);
+        const measure_col_l = layout.Rect{ .x = right_rect.x, .y = right_rect.y, .width = half_w, .height = right_rect.height };
+        const measure_col_r = layout.Rect{ .x = right_rect.x + half_w, .y = right_rect.y, .width = right_rect.width - half_w, .height = right_rect.height };
+        const stats_total: usize = @intCast(renderDetailStats(buf, measure_col_l, detail, live_cpu, live_mem, false, measure_skip));
+        const memmap_total: usize = @intCast(renderDetailMemoryMap(buf, measure_col_r, app, detail, measure_skip));
+        const top_used: usize = @max(stats_total, memmap_total) + 1; // +1 separator
 
-        // Accordion starts immediately after the tallest column
-        const content_rect = layout.Rect{
-            .x = right_rect.x,
-            .y = right_rect.y + top_used,
-            .width = right_rect.width,
-            .height = right_rect.height -| top_used,
-        };
+        const accordion_measure_rect = layout.Rect{ .x = right_rect.x, .y = right_rect.y, .width = right_rect.width, .height = right_rect.height };
+        const accordion_info = renderDetailTreeAndFiles(buf, accordion_measure_rect, detail, app, true, false, 0);
+        const accordion_total = accordion_info.total_lines;
 
-        // Measure right pane content for scroll clamping
-        const tree_info = renderDetailTreeAndFiles(buf, content_rect, detail, app, true, false);
-        const right_content_lines = tree_info.total_lines;
-        const right_visible: usize = @intCast(content_rect.height);
+        // Total virtual content height for the right pane
+        const total_virtual: usize = top_used + accordion_total;
+        const right_visible: usize = @intCast(right_rect.height);
 
-        // Clamp scroll to valid range
-        if (right_content_lines > right_visible) {
-            app.detail_right_scroll = @min(app.detail_right_scroll, right_content_lines - right_visible);
+        // Clamp global scroll
+        if (total_virtual > right_visible) {
+            app.detail_right_scroll = @min(app.detail_right_scroll, total_virtual - right_visible);
         } else {
             app.detail_right_scroll = 0;
         }
 
-        // Render accordion content for right pane
-        _ = renderDetailTreeAndFiles(buf, content_rect, detail, app, false, !left_focused);
+        const global_scroll = app.detail_right_scroll;
+
+        // --- Render phase ---
+        // How many top-section (stats/memmap) lines remain visible after scrolling
+        const visible_top_lines: u16 = @intCast(top_used -| global_scroll);
+        const capped_top: u16 = @min(visible_top_lines, right_rect.height);
+
+        // Render stats/memmap with skip_lines (scrolled lines hidden from top)
+        const stats_skip: u16 = @intCast(@min(global_scroll, stats_total));
+        const memmap_skip: u16 = @intCast(@min(global_scroll, memmap_total));
+        const stats_col = layout.Rect{ .x = right_rect.x, .y = right_rect.y, .width = half_w, .height = capped_top };
+        const memmap_col = layout.Rect{ .x = right_rect.x + half_w, .y = right_rect.y, .width = right_rect.width - half_w, .height = capped_top };
+        _ = renderDetailStats(buf, stats_col, detail, live_cpu, live_mem, false, stats_skip);
+        _ = renderDetailMemoryMap(buf, memmap_col, app, detail, memmap_skip);
+
+        // Render accordion below the visible top section
+        const accordion_y = right_rect.y + capped_top;
+        const accordion_h = right_rect.height -| capped_top;
+        const accordion_rect = layout.Rect{ .x = right_rect.x, .y = accordion_y, .width = right_rect.width, .height = accordion_h };
+        const accordion_scroll: usize = if (global_scroll > top_used) global_scroll - top_used else 0;
+        _ = renderDetailTreeAndFiles(buf, accordion_rect, detail, app, false, !left_focused, accordion_scroll);
 
         // Render left pane
         renderDetailLeftPane(buf, left_rect, detail, app.detail_scroll, left_focused);
@@ -3844,14 +3896,14 @@ fn renderDetailView(buf: *tui.render.Buffer, area: tui.render.Rect, app: *state.
                 buf.setString(arrow_x, arrow_y, "v", _Style{ .fg = .cyan });
             }
         } else {
-            // Right pane scroll arrows
-            if (app.detail_right_scroll > 0) {
-                const arrow_x = content_rect.x + content_rect.width -| 1;
-                buf.setString(arrow_x, content_rect.y, "^", _Style{ .fg = .cyan });
+            // Right pane scroll arrows (whole pane)
+            if (global_scroll > 0) {
+                const arrow_x = right_rect.x + right_rect.width -| 1;
+                buf.setString(arrow_x, right_rect.y, "^", _Style{ .fg = .cyan });
             }
-            if (right_content_lines > right_visible and app.detail_right_scroll + right_visible < right_content_lines) {
-                const arrow_x = content_rect.x + content_rect.width -| 1;
-                const arrow_y = content_rect.y + content_rect.height -| 1;
+            if (total_virtual > right_visible and global_scroll + right_visible < total_virtual) {
+                const arrow_x = right_rect.x + right_rect.width -| 1;
+                const arrow_y = right_rect.y + right_rect.height -| 1;
                 buf.setString(arrow_x, arrow_y, "v", _Style{ .fg = .cyan });
             }
         }
@@ -3885,14 +3937,9 @@ fn renderTcpConnection(
     if (ln.* >= vis_start and ln.* < vis_end) {
         const y = rect.y + @as(u16, @intCast(ln.* - vis_start));
         const col_limit = rect.x + rect.width; // absolute right edge of this column
+        const compact = rect.width < 56;
 
-        // Protocol
-        if (rect.x + 3 <= col_limit) {
-            buf.setString(rect.x, y, "tcp", _Style{ .fg = .green });
-        }
-
-        // State with color
-        const state_label = conn.state.label();
+        // State color (shared by both modes)
         const state_color: _Color = switch (conn.state) {
             .established => .green,
             .listen => .cyan,
@@ -3902,50 +3949,98 @@ fn renderTcpConnection(
             .closed => .gray,
             .unknown => .gray,
         };
-        const state_x = rect.x + 6;
-        if (state_x < col_limit) {
-            const avail = col_limit - state_x;
-            buf.setString(state_x, y, state_label[0..@min(state_label.len, avail)], _Style{ .fg = state_color });
-        }
 
-        // Local address (format: addr:port)
-        const local_x = rect.x + 18;
-        if (local_x < col_limit) {
-            var local_buf: [64]u8 = undefined;
-            const local_addr_slice = conn.local_addr[0..conn.local_addr_len];
-            const local_str = std.fmt.bufPrint(&local_buf, "{s}:{d}", .{ local_addr_slice, conn.local_port }) catch "";
-            const avail: usize = col_limit - local_x;
-            const local_len = @min(local_str.len, @min(avail, 22));
-            if (local_len > 0) {
-                buf.setString(local_x, y, local_str[0..local_len], _Style{ .fg = .white });
+        if (compact) {
+            // Compact: State :port Remote [via Process]
+            const state_label = conn.state.label();
+            setClipped(buf, rect.x, y, state_label, _Style{ .fg = state_color }, col_limit);
+
+            // Local port only (":port" format)
+            const port_x = rect.x + 12;
+            if (port_x < col_limit) {
+                var port_buf: [8]u8 = undefined;
+                const port_str = std.fmt.bufPrint(&port_buf, ":{d}", .{conn.local_port}) catch ":?";
+                setClipped(buf, port_x, y, port_str, _Style{ .fg = .white }, col_limit);
             }
-        }
 
-        // Remote address - clip to column boundary
-        const remote_x = rect.x + 42;
-        var remote_len: usize = 0;
-        if (remote_x < col_limit) {
-            var remote_buf: [64]u8 = undefined;
-            const remote_addr_slice = conn.remote_addr[0..conn.remote_addr_len];
-            const remote_str = std.fmt.bufPrint(&remote_buf, "{s}:{d}", .{ remote_addr_slice, conn.remote_port }) catch "";
-            const avail: usize = col_limit - remote_x;
-            remote_len = @min(remote_str.len, @min(avail, 22));
-            if (remote_len > 0) {
-                buf.setString(remote_x, y, remote_str[0..remote_len], _Style{ .fg = .light_white });
+            // Remote address
+            const remote_x = rect.x + 20;
+            var remote_len: usize = 0;
+            if (remote_x < col_limit) {
+                var remote_buf: [64]u8 = undefined;
+                const remote_addr_slice = conn.remote_addr[0..conn.remote_addr_len];
+                const remote_str = std.fmt.bufPrint(&remote_buf, "{s}:{d}", .{ remote_addr_slice, conn.remote_port }) catch "";
+                const avail: usize = col_limit - remote_x;
+                remote_len = @min(remote_str.len, avail);
+                if (remote_len > 0) {
+                    buf.setString(remote_x, y, remote_str[0..remote_len], _Style{ .fg = .light_white });
+                }
             }
-        }
 
-        // For XPC service connections, show the owning process name after remote
-        if (proc_name) |name| {
-            const via_x = remote_x +| @as(u16, @intCast(remote_len)) + 1;
-            if (via_x + 5 < col_limit) {
-                buf.setString(via_x, y, "via", _Style{ .fg = .gray });
-                const name_x = via_x + 4;
-                if (name_x < col_limit) {
-                    const remaining: usize = col_limit - name_x;
-                    const name_len = @min(name.len, @min(remaining, 20));
-                    if (name_len > 0) {
-                        buf.setString(name_x, y, name[0..name_len], _Style{ .fg = .cyan });
+            // XPC service process name
+            if (proc_name) |name| {
+                const via_x = remote_x +| @as(u16, @intCast(remote_len)) + 1;
+                if (via_x + 5 < col_limit) {
+                    buf.setString(via_x, y, "via", _Style{ .fg = .gray });
+                    const name_x = via_x + 4;
+                    if (name_x < col_limit) {
+                        const remaining: usize = col_limit - name_x;
+                        const name_len = @min(name.len, remaining);
+                        if (name_len > 0) {
+                            buf.setString(name_x, y, name[0..name_len], _Style{ .fg = .cyan });
+                        }
+                    }
+                }
+            }
+        } else {
+            // Full layout: Proto State Local Remote [via Process]
+            if (rect.x + 3 <= col_limit) {
+                buf.setString(rect.x, y, "tcp", _Style{ .fg = .green });
+            }
+
+            const state_label = conn.state.label();
+            const state_x = rect.x + 6;
+            if (state_x < col_limit) {
+                const avail = col_limit - state_x;
+                buf.setString(state_x, y, state_label[0..@min(state_label.len, avail)], _Style{ .fg = state_color });
+            }
+
+            const local_x = rect.x + 18;
+            if (local_x < col_limit) {
+                var local_buf: [64]u8 = undefined;
+                const local_addr_slice = conn.local_addr[0..conn.local_addr_len];
+                const local_str = std.fmt.bufPrint(&local_buf, "{s}:{d}", .{ local_addr_slice, conn.local_port }) catch "";
+                const avail: usize = col_limit - local_x;
+                const local_len = @min(local_str.len, @min(avail, 22));
+                if (local_len > 0) {
+                    buf.setString(local_x, y, local_str[0..local_len], _Style{ .fg = .white });
+                }
+            }
+
+            const remote_x = rect.x + 42;
+            var remote_len: usize = 0;
+            if (remote_x < col_limit) {
+                var remote_buf: [64]u8 = undefined;
+                const remote_addr_slice = conn.remote_addr[0..conn.remote_addr_len];
+                const remote_str = std.fmt.bufPrint(&remote_buf, "{s}:{d}", .{ remote_addr_slice, conn.remote_port }) catch "";
+                const avail: usize = col_limit - remote_x;
+                remote_len = @min(remote_str.len, avail);
+                if (remote_len > 0) {
+                    buf.setString(remote_x, y, remote_str[0..remote_len], _Style{ .fg = .light_white });
+                }
+            }
+
+            if (proc_name) |name| {
+                const via_x = remote_x +| @as(u16, @intCast(remote_len)) + 1;
+                if (via_x + 5 < col_limit) {
+                    buf.setString(via_x, y, "via", _Style{ .fg = .gray });
+                    const name_x = via_x + 4;
+                    if (name_x < col_limit) {
+                        const remaining: usize = col_limit - name_x;
+                        const name_len = @min(name.len, remaining);
+                        if (name_len > 0) {
+                            buf.setString(name_x, y, name[0..name_len], _Style{ .fg = .cyan });
+                        }
                     }
                 }
             }
@@ -3983,7 +4078,7 @@ fn renderMachPortsColumn(buf: *tui.render.Buffer, rect: layout.Rect, app: *state
     const label_style = if (focused) _Style{ .fg = .white } else _Style{ .fg = .gray };
     const xpc_style = _Style{ .fg = .magenta };
 
-    // Header
+    // Header (always visible, not scrolled)
     buf.setString(rect.x, rect.y, "Mach Ports", header_style);
 
     if (focused) {
@@ -4037,14 +4132,15 @@ fn renderMachPortsColumn(buf: *tui.render.Buffer, rect: layout.Rect, app: *state
     app.triggerMachPortsBatchFetch(show_pids[0..show_count]);
 
     const clip_x = rect.x + rect.width;
-    var ln: u16 = 2;
-    const max_ln = rect.height;
+    // Content area starts at line 2 (after header + blank), scrollable
+    const content_start: u16 = 2;
+    const scroll: u16 = @intCast(@min(app.detail_right_scroll, std.math.maxInt(u16)));
+    var vline: u16 = 0; // virtual line counter for content
     var any_data = false;
     var all_cached = true;
+    var total_content_lines: usize = 0;
 
     for (show_pids[0..show_count], show_names[0..show_count], 0..) |pid, name, i| {
-        if (ln >= max_ln) break;
-
         if (app.mach_port_cache.get(pid)) |cached| {
             const info = cached.info;
             const total = info.totalCount();
@@ -4057,23 +4153,32 @@ fn renderMachPortsColumn(buf: *tui.render.Buffer, rect: layout.Rect, app: *state
             const name_style = if (is_main) label_style else xpc_style;
             const prefix: []const u8 = if (is_main) "" else "  ";
 
-            var name_buf: [48]u8 = undefined;
-            const name_str = std.fmt.bufPrint(&name_buf, "{s}{s} ({d})", .{ prefix, name, pid }) catch "???";
-            setClipped(buf, rect.x + 1, rect.y + ln, name_str, name_style, clip_x);
-            ln += 1;
-            if (ln >= max_ln) break;
+            if (vline >= scroll) {
+                const screen_y = content_start + (vline - scroll);
+                if (screen_y < rect.height) {
+                    var name_buf: [48]u8 = undefined;
+                    const name_str = std.fmt.bufPrint(&name_buf, "{s}{s} ({d})", .{ prefix, name, pid }) catch "???";
+                    setClipped(buf, rect.x + 1, rect.y + screen_y, name_str, name_style, clip_x);
+                }
+            }
+            vline += 1;
 
             // Port counts on one line
-            var counts_buf: [64]u8 = undefined;
-            const counts_str = std.fmt.bufPrint(&counts_buf, "{s}  S:{d} R:{d} PS:{d} D:{d}", .{
-                prefix,
-                info.send_rights.len,
-                info.receive_rights.len,
-                info.port_sets.len,
-                info.dead_names.len,
-            }) catch "???";
-            setClipped(buf, rect.x + 1, rect.y + ln, counts_str, dim_style, clip_x);
-            ln += 1;
+            if (vline >= scroll) {
+                const screen_y = content_start + (vline - scroll);
+                if (screen_y < rect.height) {
+                    var counts_buf: [64]u8 = undefined;
+                    const counts_str = std.fmt.bufPrint(&counts_buf, "{s}  S:{d} R:{d} PS:{d} D:{d}", .{
+                        prefix,
+                        info.send_rights.len,
+                        info.receive_rights.len,
+                        info.port_sets.len,
+                        info.dead_names.len,
+                    }) catch "???";
+                    setClipped(buf, rect.x + 1, rect.y + screen_y, counts_str, dim_style, clip_x);
+                }
+            }
+            vline += 1;
 
             // Queued messages (if any)
             var total_queued: u32 = 0;
@@ -4081,23 +4186,49 @@ fn renderMachPortsColumn(buf: *tui.render.Buffer, rect: layout.Rect, app: *state
                 total_queued += port.msg_count;
             }
             if (total_queued > 0) {
-                if (ln >= max_ln) break;
-                var q_buf: [48]u8 = undefined;
-                const q_str = std.fmt.bufPrint(&q_buf, "{s}  queued: {d} msgs", .{ prefix, total_queued }) catch "";
-                setClipped(buf, rect.x + 1, rect.y + ln, q_str, dim_style, clip_x);
-                ln += 1;
+                if (vline >= scroll) {
+                    const screen_y = content_start + (vline - scroll);
+                    if (screen_y < rect.height) {
+                        var q_buf: [48]u8 = undefined;
+                        const q_str = std.fmt.bufPrint(&q_buf, "{s}  queued: {d} msgs", .{ prefix, total_queued }) catch "";
+                        setClipped(buf, rect.x + 1, rect.y + screen_y, q_str, dim_style, clip_x);
+                    }
+                }
+                vline += 1;
             }
         } else {
             all_cached = false;
         }
     }
 
-    if (!any_data and ln == 2) {
-        if (!all_cached) {
-            setClipped(buf, rect.x + 2, rect.y + ln, "Loading...", _Style{ .fg = .yellow }, clip_x);
-        } else {
-            setClipped(buf, rect.x + 2, rect.y + ln, "No port data (SIP)", dim_style, clip_x);
+    total_content_lines = vline;
+
+    if (!any_data and vline == 0) {
+        const msg_y = rect.y + content_start;
+        if (content_start < rect.height) {
+            if (!all_cached) {
+                setClipped(buf, rect.x + 2, msg_y, "Loading...", _Style{ .fg = .yellow }, clip_x);
+            } else {
+                setClipped(buf, rect.x + 2, msg_y, "No port data (SIP)", dim_style, clip_x);
+            }
         }
+        total_content_lines = 1;
+    }
+
+    // Clamp scroll for mach ports
+    const avail_content: usize = @as(usize, rect.height) -| content_start;
+    if (total_content_lines > avail_content) {
+        app.detail_right_scroll = @min(app.detail_right_scroll, total_content_lines - avail_content);
+    } else {
+        app.detail_right_scroll = 0;
+    }
+
+    // Scroll indicators
+    if (app.detail_right_scroll > 0) {
+        buf.setString(rect.x + rect.width -| 1, rect.y + content_start, "^", _Style{ .fg = .cyan });
+    }
+    if (total_content_lines > avail_content and app.detail_right_scroll + avail_content < total_content_lines) {
+        buf.setString(rect.x + rect.width -| 1, rect.y + rect.height -| 1, "v", _Style{ .fg = .cyan });
     }
 }
 
@@ -4204,13 +4335,12 @@ fn renderNetworkConnectionsColumn(buf: *tui.render.Buffer, rect: layout.Rect, ap
 
     if (!has_files and sysctl_tcp_count == 0) {
         const rx = rect.x + rect.width;
-        setClipped(buf, rect.x, rect.y, "No open file descriptors found", dim_style, rx);
-        setClipped(buf, rect.x, rect.y + 1, "(checked process + all descendants)", dim_style, rx);
-        if (rect.height > 3) {
-            setClipped(buf, rect.x, rect.y + 3, "Sandboxed apps (Safari, Mail) delegate networking", _Style{ .fg = .yellow }, rx);
-            setClipped(buf, rect.x, rect.y + 4, "to XPC services. Search for 'WebKit' or 'Network'", _Style{ .fg = .yellow }, rx);
-            setClipped(buf, rect.x, rect.y + 5, "in the process list to find them.", _Style{ .fg = .yellow }, rx);
-        }
+        const by = rect.y + rect.height;
+        var y: u16 = rect.y;
+        y += setWrapped(buf, rect.x, y, "No open file descriptors found", dim_style, rx, by);
+        y += setWrapped(buf, rect.x, y, "(checked process + all descendants)", dim_style, rx, by);
+        y += 1; // gap
+        _ = setWrapped(buf, rect.x, y, "Sandboxed apps (Safari, Mail) delegate networking to XPC services. Search for 'WebKit' or 'Network' in the process list to find them.", _Style{ .fg = .yellow }, rx, by);
         return;
     }
 
@@ -4228,17 +4358,17 @@ fn renderNetworkConnectionsColumn(buf: *tui.render.Buffer, rect: layout.Rect, ap
 
     if (filtered_count == 0) {
         const rx = rect.x + rect.width;
+        const by = rect.y + rect.height;
         var msg_buf: [64]u8 = undefined;
         const msg = if (filter == .all)
             "No network connections"
         else
             std.fmt.bufPrint(&msg_buf, "No {s} connections", .{filter.label()}) catch "No connections";
-        setClipped(buf, rect.x, rect.y, msg, dim_style, rx);
-        setClipped(buf, rect.x, rect.y + 1, "(has file descriptors but no matching sockets)", dim_style, rx);
-        if (rect.height > 3) {
-            setClipped(buf, rect.x, rect.y + 3, "Sandboxed apps delegate networking to XPC services.", _Style{ .fg = .yellow }, rx);
-            setClipped(buf, rect.x, rect.y + 4, "Try searching for related service processes.", _Style{ .fg = .yellow }, rx);
-        }
+        var y: u16 = rect.y;
+        y += setWrapped(buf, rect.x, y, msg, dim_style, rx, by);
+        y += setWrapped(buf, rect.x, y, "(has file descriptors but no matching sockets)", dim_style, rx, by);
+        y += 1; // gap
+        _ = setWrapped(buf, rect.x, y, "Sandboxed apps delegate networking to XPC services. Try searching for related service processes.", _Style{ .fg = .yellow }, rx, by);
         return;
     }
 
@@ -4250,13 +4380,17 @@ fn renderNetworkConnectionsColumn(buf: *tui.render.Buffer, rect: layout.Rect, ap
     const max_w: usize = @intCast(rect.width);
 
     // Header
+    // Column boundary for clipping
+    const col_limit = rect.x + rect.width;
+    const compact = rect.width < 56;
+
     if (ln >= vis_start and ln < vis_end) {
         const y = rect.y + @as(u16, @intCast(ln - vis_start));
-        buf.setString(rect.x, y, "Network Connections", header_style);
+        setClipped(buf, rect.x, y, "Network Connections", header_style, col_limit);
         // Show source: sysctl (kernel tables) or proc_pidinfo (+ descendants)
         const source_label = if (use_sysctl_tcp) "(kernel)" else "(+ descendants)";
         const source_style = if (use_sysctl_tcp) _Style{ .fg = .cyan } else _Style{ .fg = .light_magenta };
-        buf.setString(rect.x + 20, y, source_label, source_style);
+        if (rect.x + 20 < col_limit) setClipped(buf, rect.x + 20, y, source_label, source_style, col_limit);
     }
     ln += 1;
 
@@ -4265,17 +4399,23 @@ fn renderNetworkConnectionsColumn(buf: *tui.render.Buffer, rect: layout.Rect, ap
         const y = rect.y + @as(u16, @intCast(ln - vis_start));
         var count_buf: [64]u8 = undefined;
         const count_str = std.fmt.bufPrint(&count_buf, "[{s}] {d} TCP, {d} UDP, {d} Unix", .{ filter.label(), tcp_count, udp_count, unix_count }) catch "";
-        buf.setString(rect.x, y, count_str, dim_style);
+        setClipped(buf, rect.x, y, count_str, dim_style, col_limit);
     }
     ln += 1;
 
-    // Column headers
+    // Column headers (compact mode when width < 56)
     if (ln >= vis_start and ln < vis_end) {
         const y = rect.y + @as(u16, @intCast(ln - vis_start));
-        buf.setString(rect.x, y, "Proto", _Style{ .fg = .gray });
-        buf.setString(rect.x + 6, y, "State", _Style{ .fg = .gray });
-        buf.setString(rect.x + 18, y, "Local Address", _Style{ .fg = .gray });
-        buf.setString(rect.x + 42, y, "Remote Address", _Style{ .fg = .gray });
+        if (compact) {
+            setClipped(buf, rect.x, y, "State", _Style{ .fg = .gray }, col_limit);
+            setClipped(buf, rect.x + 12, y, ":Port", _Style{ .fg = .gray }, col_limit);
+            setClipped(buf, rect.x + 20, y, "Remote Address", _Style{ .fg = .gray }, col_limit);
+        } else {
+            buf.setString(rect.x, y, "Proto", _Style{ .fg = .gray });
+            buf.setString(rect.x + 6, y, "State", _Style{ .fg = .gray });
+            buf.setString(rect.x + 18, y, "Local Address", _Style{ .fg = .gray });
+            setClipped(buf, rect.x + 42, y, "Remote Address", _Style{ .fg = .gray }, col_limit);
+        }
     }
     ln += 1;
 
@@ -4309,7 +4449,7 @@ fn renderNetworkConnectionsColumn(buf: *tui.render.Buffer, rect: layout.Rect, ap
                 // Add separator label
                 if (ln >= vis_start and ln < vis_end) {
                     const y = rect.y + @as(u16, @intCast(ln - vis_start));
-                    buf.setString(rect.x, y, "--- via XPC Services ---", _Style{ .fg = .magenta });
+                    setClipped(buf, rect.x, y, "--- via XPC Services ---", _Style{ .fg = .magenta }, col_limit);
                 }
                 ln += 1;
 
@@ -4340,10 +4480,6 @@ fn renderNetworkConnectionsColumn(buf: *tui.render.Buffer, rect: layout.Rect, ap
                     if (ln >= vis_start and ln < vis_end) {
                         const y = rect.y + @as(u16, @intCast(ln - vis_start));
 
-                        // Protocol
-                        buf.setString(rect.x, y, "tcp", _Style{ .fg = .green });
-
-                        // State with color
                         const state_label = file.tcp_state.label();
                         const state_color: _Color = switch (file.tcp_state) {
                             .established => .green,
@@ -4354,20 +4490,45 @@ fn renderNetworkConnectionsColumn(buf: *tui.render.Buffer, rect: layout.Rect, ap
                             .closed => .gray,
                             .unknown => .gray,
                         };
-                        buf.setString(rect.x + 6, y, state_label, _Style{ .fg = state_color });
 
-                        // Local address
-                        const local_max: usize = 22;
-                        const local_len = @min(file.local_addr.len, local_max);
-                        if (local_len > 0) {
-                            buf.setString(rect.x + 18, y, file.local_addr[0..local_len], _Style{ .fg = .white });
-                        }
+                        if (compact) {
+                            // Compact: State :port Remote
+                            setClipped(buf, rect.x, y, state_label, _Style{ .fg = state_color }, col_limit);
+                            // Extract port from local_addr (format "addr:port" or just port)
+                            const local_slice = file.local_addr[0..file.local_addr.len];
+                            var port_buf: [8]u8 = undefined;
+                            const port_str = blk: {
+                                if (std.mem.lastIndexOfScalar(u8, local_slice, ':')) |colon| {
+                                    break :blk std.fmt.bufPrint(&port_buf, "{s}", .{local_slice[colon..]}) catch ":?";
+                                }
+                                break :blk std.fmt.bufPrint(&port_buf, "{s}", .{local_slice}) catch "?";
+                            };
+                            if (rect.x + 12 < col_limit) setClipped(buf, rect.x + 12, y, port_str, _Style{ .fg = .white }, col_limit);
+                            if (rect.x + 20 < col_limit) {
+                                const remote_max: usize = col_limit -| (rect.x + 20);
+                                const remote_len = @min(file.remote_addr.len, remote_max);
+                                if (remote_len > 0) {
+                                    buf.setString(rect.x + 20, y, file.remote_addr[0..remote_len], _Style{ .fg = .light_white });
+                                }
+                            }
+                        } else {
+                            // Full: Proto State Local Remote
+                            buf.setString(rect.x, y, "tcp", _Style{ .fg = .green });
+                            setClipped(buf, rect.x + 6, y, state_label, _Style{ .fg = state_color }, col_limit);
 
-                        // Remote address
-                        const remote_max: usize = @min(max_w -| 42, 30);
-                        const remote_len = @min(file.remote_addr.len, remote_max);
-                        if (remote_len > 0) {
-                            buf.setString(rect.x + 42, y, file.remote_addr[0..remote_len], _Style{ .fg = .light_white });
+                            const local_max: usize = 22;
+                            const local_len = @min(file.local_addr.len, local_max);
+                            if (local_len > 0 and rect.x + 18 < col_limit) {
+                                setClipped(buf, rect.x + 18, y, file.local_addr[0..local_len], _Style{ .fg = .white }, col_limit);
+                            }
+
+                            if (rect.x + 42 < col_limit) {
+                                const remote_max: usize = col_limit -| (rect.x + 42);
+                                const remote_len = @min(file.remote_addr.len, remote_max);
+                                if (remote_len > 0) {
+                                    buf.setString(rect.x + 42, y, file.remote_addr[0..remote_len], _Style{ .fg = .light_white });
+                                }
+                            }
                         }
                     }
                     ln += 1;
@@ -4381,28 +4542,48 @@ fn renderNetworkConnectionsColumn(buf: *tui.render.Buffer, rect: layout.Rect, ap
         for (file_list) |file| {
             if (file.fd_type != .socket_udp) continue;
 
-        if (ln >= vis_start and ln < vis_end) {
-            const y = rect.y + @as(u16, @intCast(ln - vis_start));
+            if (ln >= vis_start and ln < vis_end) {
+                const y = rect.y + @as(u16, @intCast(ln - vis_start));
 
-            // Protocol
-            buf.setString(rect.x, y, "udp", _Style{ .fg = .yellow });
+                if (compact) {
+                    // Compact: "udp" as state, :port, remote
+                    setClipped(buf, rect.x, y, "udp", _Style{ .fg = .yellow }, col_limit);
+                    setClipped(buf, rect.x + 12, y, "-", dim_style, col_limit);
+                    if (rect.x + 20 < col_limit) {
+                        const local_slice = file.local_addr[0..file.local_addr.len];
+                        var port_buf: [8]u8 = undefined;
+                        const port_str = blk: {
+                            if (std.mem.lastIndexOfScalar(u8, local_slice, ':')) |colon| {
+                                break :blk std.fmt.bufPrint(&port_buf, "{s}", .{local_slice[colon..]}) catch ":?";
+                            }
+                            break :blk std.fmt.bufPrint(&port_buf, "{s}", .{local_slice}) catch "?";
+                        };
+                        setClipped(buf, rect.x + 12, y, port_str, _Style{ .fg = .white }, col_limit);
+                        const remote_max: usize = col_limit -| (rect.x + 20);
+                        const remote_len = @min(file.remote_addr.len, remote_max);
+                        if (remote_len > 0) {
+                            buf.setString(rect.x + 20, y, file.remote_addr[0..remote_len], _Style{ .fg = .light_white });
+                        }
+                    }
+                } else {
+                    // Full layout
+                    buf.setString(rect.x, y, "udp", _Style{ .fg = .yellow });
+                    buf.setString(rect.x + 6, y, "-", dim_style);
 
-            // State placeholder
-            buf.setString(rect.x + 6, y, "-", dim_style);
+                    const local_max: usize = 22;
+                    const local_len = @min(file.local_addr.len, local_max);
+                    if (local_len > 0 and rect.x + 18 < col_limit) {
+                        setClipped(buf, rect.x + 18, y, file.local_addr[0..local_len], _Style{ .fg = .white }, col_limit);
+                    }
 
-            // Local address
-            const local_max: usize = 22;
-            const local_len = @min(file.local_addr.len, local_max);
-            if (local_len > 0) {
-                buf.setString(rect.x + 18, y, file.local_addr[0..local_len], _Style{ .fg = .white });
-            }
-
-            // Remote address
-            const remote_max: usize = @min(max_w -| 42, 30);
-            const remote_len = @min(file.remote_addr.len, remote_max);
-            if (remote_len > 0) {
-                buf.setString(rect.x + 42, y, file.remote_addr[0..remote_len], _Style{ .fg = .light_white });
-            }
+                    if (rect.x + 42 < col_limit) {
+                        const remote_max: usize = col_limit -| (rect.x + 42);
+                        const remote_len = @min(file.remote_addr.len, remote_max);
+                        if (remote_len > 0) {
+                            buf.setString(rect.x + 42, y, file.remote_addr[0..remote_len], _Style{ .fg = .light_white });
+                        }
+                    }
+                }
             }
             ln += 1;
         }
@@ -4485,7 +4666,7 @@ fn renderNetworkConnectionsColumn(buf: *tui.render.Buffer, rect: layout.Rect, ap
             // Section header
             if (ln >= vis_start and ln < vis_end) {
                 const y = rect.y + @as(u16, @intCast(ln - vis_start));
-                buf.setString(rect.x, y, "--- Closed Connections ---", _Style{ .fg = .gray, .modifier = _Modifier{ .dim = true } });
+                setClipped(buf, rect.x, y, "--- Closed Connections ---", _Style{ .fg = .gray, .modifier = _Modifier{ .dim = true } }, col_limit);
             }
             ln += 1;
 
@@ -4504,35 +4685,71 @@ fn renderNetworkConnectionsColumn(buf: *tui.render.Buffer, rect: layout.Rect, ap
                     // Show "x" prefix to indicate closed
                     buf.setString(rect.x, y, "x", _Style{ .fg = .red, .modifier = _Modifier{ .dim = true } });
 
-                    // Protocol
-                    buf.setString(rect.x + 2, y, "tcp", closed_style);
+                    if (compact) {
+                        // Compact: x CLOSED :port remote (age)
+                        setClipped(buf, rect.x + 2, y, "CLOSED", closed_style, col_limit);
+                        // Local port only
+                        var local_buf: [64]u8 = undefined;
+                        const local_str = formatConnAddr(hist.conn.local_addr[0..hist.conn.local_addr_len], hist.conn.local_port, &local_buf);
+                        var port_buf: [8]u8 = undefined;
+                        const port_str = blk: {
+                            if (std.mem.lastIndexOfScalar(u8, local_str, ':')) |colon| {
+                                break :blk std.fmt.bufPrint(&port_buf, "{s}", .{local_str[colon..]}) catch ":?";
+                            }
+                            break :blk std.fmt.bufPrint(&port_buf, "{s}", .{local_str}) catch "?";
+                        };
+                        if (rect.x + 12 < col_limit) setClipped(buf, rect.x + 12, y, port_str, closed_style, col_limit);
 
-                    // State (CLOSED)
-                    buf.setString(rect.x + 6, y, "CLOSED", closed_style);
+                        // Remote address
+                        const remote_x: u16 = rect.x + 20;
+                        var remote_buf: [64]u8 = undefined;
+                        const remote_str = formatConnAddr(hist.conn.remote_addr[0..hist.conn.remote_addr_len], hist.conn.remote_port, &remote_buf);
+                        const remote_max: usize = col_limit -| remote_x;
+                        const remote_len = @min(remote_str.len, remote_max);
+                        if (remote_x < col_limit and remote_len > 0) {
+                            buf.setString(remote_x, y, remote_str[0..remote_len], closed_style);
+                        }
 
-                    // Local address
-                    var local_buf: [64]u8 = undefined;
-                    const local_str = formatConnAddr(hist.conn.local_addr[0..hist.conn.local_addr_len], hist.conn.local_port, &local_buf);
-                    const local_max: usize = 22;
-                    const local_len = @min(local_str.len, local_max);
-                    buf.setString(rect.x + 18, y, local_str[0..local_len], closed_style);
+                        // Show time since closed
+                        if (app.preserve_log == .fade and hist.closed_at_ns > 0) {
+                            const age_ns = now_ns - hist.closed_at_ns;
+                            const age_s = @as(u32, @intCast(@divFloor(age_ns, std.time.ns_per_s)));
+                            var age_buf: [16]u8 = undefined;
+                            const age_str = std.fmt.bufPrint(&age_buf, " ({d}s)", .{age_s}) catch "";
+                            const age_x = remote_x +| @as(u16, @intCast(remote_len));
+                            if (age_x + age_str.len < col_limit) {
+                                buf.setString(age_x, y, age_str, _Style{ .fg = .yellow, .modifier = _Modifier{ .dim = true } });
+                            }
+                        }
+                    } else {
+                        // Full: x tcp CLOSED local:port remote:port (age)
+                        buf.setString(rect.x + 2, y, "tcp", closed_style);
+                        buf.setString(rect.x + 6, y, "CLOSED", closed_style);
 
-                    // Remote address
-                    var remote_buf: [64]u8 = undefined;
-                    const remote_str = formatConnAddr(hist.conn.remote_addr[0..hist.conn.remote_addr_len], hist.conn.remote_port, &remote_buf);
-                    const remote_max: usize = @min(max_w -| 42, 30);
-                    const remote_len = @min(remote_str.len, remote_max);
-                    buf.setString(rect.x + 42, y, remote_str[0..remote_len], closed_style);
+                        var local_buf: [64]u8 = undefined;
+                        const local_str = formatConnAddr(hist.conn.local_addr[0..hist.conn.local_addr_len], hist.conn.local_port, &local_buf);
+                        const local_max: usize = 22;
+                        const local_len = @min(local_str.len, local_max);
+                        if (rect.x + 18 < col_limit) setClipped(buf, rect.x + 18, y, local_str[0..local_len], closed_style, col_limit);
 
-                    // Show time since closed (if in fade mode)
-                    if (app.preserve_log == .fade and hist.closed_at_ns > 0) {
-                        const age_ns = now_ns - hist.closed_at_ns;
-                        const age_s = @as(u32, @intCast(@divFloor(age_ns, std.time.ns_per_s)));
-                        var age_buf: [16]u8 = undefined;
-                        const age_str = std.fmt.bufPrint(&age_buf, " ({d}s)", .{age_s}) catch "";
-                        const age_x = rect.x + 42 + @as(u16, @intCast(remote_len));
-                        if (age_x + age_str.len < rect.x + rect.width) {
-                            buf.setString(age_x, y, age_str, _Style{ .fg = .yellow, .modifier = _Modifier{ .dim = true } });
+                        var remote_buf: [64]u8 = undefined;
+                        const remote_str = formatConnAddr(hist.conn.remote_addr[0..hist.conn.remote_addr_len], hist.conn.remote_port, &remote_buf);
+                        const remote_max: usize = col_limit -| (rect.x + 42);
+                        const remote_len = @min(remote_str.len, remote_max);
+                        if (rect.x + 42 < col_limit and remote_len > 0) {
+                            buf.setString(rect.x + 42, y, remote_str[0..remote_len], closed_style);
+                        }
+
+                        // Show time since closed
+                        if (app.preserve_log == .fade and hist.closed_at_ns > 0) {
+                            const age_ns = now_ns - hist.closed_at_ns;
+                            const age_s = @as(u32, @intCast(@divFloor(age_ns, std.time.ns_per_s)));
+                            var age_buf: [16]u8 = undefined;
+                            const age_str = std.fmt.bufPrint(&age_buf, " ({d}s)", .{age_s}) catch "";
+                            const age_x = rect.x + 42 + @as(u16, @intCast(remote_len));
+                            if (age_x + age_str.len < col_limit) {
+                                buf.setString(age_x, y, age_str, _Style{ .fg = .yellow, .modifier = _Modifier{ .dim = true } });
+                            }
                         }
                     }
                 }
@@ -4701,12 +4918,13 @@ fn renderDetailLeftPane(buf: *tui.render.Buffer, rect: layout.Rect, detail: mode
     }
 }
 
-fn renderDetailMemoryMap(buf: *tui.render.Buffer, rect: layout.Rect, app: *state.AppState, detail: model.ProcessDetail) u16 {
+fn renderDetailMemoryMap(buf: *tui.render.Buffer, rect: layout.Rect, app: *state.AppState, detail: model.ProcessDetail, skip_lines: u16) u16 {
     const sec_style = _Style{ .fg = .gray };
     const val = _Style{ .fg = .light_white };
     const lbl = _Style{ .fg = .gray };
     const rx: u16 = rect.x + 1;
-    var y: u16 = rect.y;
+    var vline: u16 = 0; // virtual line counter
+    var y: u16 = rect.y; // screen Y
     const max_y = rect.y + rect.height;
     const max_w: usize = @as(usize, rect.width) -| 2; // clip to column width (1 char padding each side)
 
@@ -4718,10 +4936,13 @@ fn renderDetailMemoryMap(buf: *tui.render.Buffer, rect: layout.Rect, app: *state
 
     if (vm_map_info) |info| {
         // Header with region count
-        var header_buf: [40]u8 = undefined;
-        const header = std.fmt.bufPrint(&header_buf, "Memory Map ({d} regions)", .{info.summary.region_count}) catch "Memory Map";
-        buf.setString(rx, y, header[0..@min(header.len, max_w)], sec_style);
-        y += 1;
+        if (vline >= skip_lines and y < max_y) {
+            var header_buf: [40]u8 = undefined;
+            const header = std.fmt.bufPrint(&header_buf, "Memory Map ({d} regions)", .{info.summary.region_count}) catch "Memory Map";
+            buf.setString(rx, y, header[0..@min(header.len, max_w)], sec_style);
+            y += 1;
+        }
+        vline += 1;
 
         const s = info.summary;
 
@@ -4739,199 +4960,267 @@ fn renderDetailMemoryMap(buf: *tui.render.Buffer, rect: layout.Rect, app: *state
 
         for (type_entries) |entry| {
             if (entry.size == 0) continue;
-            if (y >= max_y) return y - rect.y;
-            var size_buf: [32]u8 = undefined;
-            const size_str = formatMemSize(&size_buf, entry.size, entry.label);
-            buf.setString(rx, y, size_str[0..@min(size_str.len, max_w)], val);
-            y += 1;
+            if (vline >= skip_lines and y < max_y) {
+                var size_buf: [32]u8 = undefined;
+                const size_str = formatMemSize(&size_buf, entry.size, entry.label);
+                buf.setString(rx, y, size_str[0..@min(size_str.len, max_w)], val);
+                y += 1;
+            }
+            vline += 1;
         }
 
         // Resident total (actual physical memory in use)
-        if (y >= max_y) return y - rect.y;
-        if (s.total_resident > 0) {
-            var res_buf: [32]u8 = undefined;
-            const res_str = formatMemSize(&res_buf, s.total_resident, "  Resident:");
-            buf.setString(rx, y, res_str[0..@min(res_str.len, max_w)], _Style{ .fg = .light_white });
-        } else {
-            const res_na = "  Resident: (n/a)";
-            buf.setString(rx, y, res_na[0..@min(res_na.len, max_w)], lbl);
+        if (vline >= skip_lines and y < max_y) {
+            if (s.total_resident > 0) {
+                var res_buf: [32]u8 = undefined;
+                const res_str = formatMemSize(&res_buf, s.total_resident, "  Resident:");
+                buf.setString(rx, y, res_str[0..@min(res_str.len, max_w)], _Style{ .fg = .light_white });
+            } else {
+                const res_na = "  Resident: (n/a)";
+                buf.setString(rx, y, res_na[0..@min(res_na.len, max_w)], lbl);
+            }
+            y += 1;
         }
-        y += 1;
+        vline += 1;
     } else if (app.vm_map_last_error) |err_msg| {
-        buf.setString(rx, y, "Memory Map", sec_style);
-        y += 1;
-        if (y < max_y) {
+        if (vline >= skip_lines and y < max_y) {
+            buf.setString(rx, y, "Memory Map", sec_style);
+            y += 1;
+        }
+        vline += 1;
+        if (vline >= skip_lines and y < max_y) {
             buf.setString(rx + 2, y, err_msg[0..@min(err_msg.len, max_w)], _Style{ .fg = .red });
             y += 1;
         }
+        vline += 1;
     } else {
-        const loading_str = "Memory Map (loading...)";
-        buf.setString(rx, y, loading_str[0..@min(loading_str.len, max_w)], sec_style);
-        y += 1;
+        if (vline >= skip_lines and y < max_y) {
+            const loading_str = "Memory Map (loading...)";
+            buf.setString(rx, y, loading_str[0..@min(loading_str.len, max_w)], sec_style);
+            y += 1;
+        }
+        vline += 1;
     }
-    return y - rect.y;
+    return vline;
 }
 
-fn renderDetailStats(buf: *tui.render.Buffer, rect: layout.Rect, detail: model.ProcessDetail, live_cpu: f32, live_mem: u64, focused: bool) u16 {
+fn renderDetailStats(buf: *tui.render.Buffer, rect: layout.Rect, detail: model.ProcessDetail, live_cpu: f32, live_mem: u64, focused: bool, skip_lines: u16) u16 {
     const sec: _Style = if (focused) .{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } } else .{ .fg = .gray };
     const val = _Style{ .fg = .light_white };
     const dim = _Style{ .fg = .gray };
     const rx: u16 = rect.x + 1;
-    var y: u16 = rect.y;
+    var vline: u16 = 0; // virtual line counter (total lines regardless of skip)
+    var y: u16 = rect.y; // screen Y (only incremented when rendering)
     const max_y = rect.y + rect.height;
 
-    if (y >= max_y) return y - rect.y;
-    buf.setString(rx, y, "Live Stats", sec);
-    y += 1;
+    // "Live Stats" header
+    if (vline >= skip_lines and y < max_y) {
+        buf.setString(rx, y, "Live Stats", sec);
+        y += 1;
+    }
+    vline += 1;
 
-    if (y >= max_y) return y - rect.y;
-    var cpu_buf: [24]u8 = undefined;
-    const cpu_str = std.fmt.bufPrint(&cpu_buf, "  CPU:     {d:>5.1}%", .{live_cpu}) catch "  CPU: ???";
-    buf.setString(rx, y, cpu_str, _Style{ .fg = cpuColor(live_cpu) });
-    y += 1;
+    // CPU
+    if (vline >= skip_lines and y < max_y) {
+        var cpu_buf: [24]u8 = undefined;
+        const cpu_str = std.fmt.bufPrint(&cpu_buf, "  CPU:     {d:>5.1}%", .{live_cpu}) catch "  CPU: ???";
+        buf.setString(rx, y, cpu_str, _Style{ .fg = cpuColor(live_cpu) });
+        y += 1;
+    }
+    vline += 1;
 
     // Show phys_footprint (Activity Monitor "Memory") if available, otherwise RSS
     const ext = detail.task_extended;
     if (ext.available and ext.phys_footprint > 0) {
-        if (y >= max_y) return y - rect.y;
-        var mem_buf: [32]u8 = undefined;
-        const phys_str = formatMemSize(&mem_buf, ext.phys_footprint, "  Memory:");
-        buf.setString(rx, y, phys_str, _Style{ .fg = memColor(ext.phys_footprint) });
-        y += 1;
+        if (vline >= skip_lines and y < max_y) {
+            var mem_buf: [32]u8 = undefined;
+            const phys_str = formatMemSize(&mem_buf, ext.phys_footprint, "  Memory:");
+            buf.setString(rx, y, phys_str, _Style{ .fg = memColor(ext.phys_footprint) });
+            y += 1;
+        }
+        vline += 1;
 
         if (ext.compressed > 0) {
-            if (y >= max_y) return y - rect.y;
-            var comp_buf: [32]u8 = undefined;
-            const comp_str = formatMemSize(&comp_buf, ext.compressed, "  Compr: ");
-            buf.setString(rx, y, comp_str, dim);
-            y += 1;
+            if (vline >= skip_lines and y < max_y) {
+                var comp_buf: [32]u8 = undefined;
+                const comp_str = formatMemSize(&comp_buf, ext.compressed, "  Compr: ");
+                buf.setString(rx, y, comp_str, dim);
+                y += 1;
+            }
+            vline += 1;
         }
 
         if (ext.internal > 0) {
-            if (y >= max_y) return y - rect.y;
-            var int_buf: [32]u8 = undefined;
-            const int_str = formatMemSize(&int_buf, ext.internal, "  Private:");
-            buf.setString(rx, y, int_str, dim);
-            y += 1;
+            if (vline >= skip_lines and y < max_y) {
+                var int_buf: [32]u8 = undefined;
+                const int_str = formatMemSize(&int_buf, ext.internal, "  Private:");
+                buf.setString(rx, y, int_str, dim);
+                y += 1;
+            }
+            vline += 1;
         }
 
         if (ext.reusable > 0) {
-            if (y >= max_y) return y - rect.y;
-            var reuse_buf: [32]u8 = undefined;
-            const reuse_str = formatMemSize(&reuse_buf, ext.reusable, "  Reusabl:");
-            buf.setString(rx, y, reuse_str, dim);
-            y += 1;
+            if (vline >= skip_lines and y < max_y) {
+                var reuse_buf: [32]u8 = undefined;
+                const reuse_str = formatMemSize(&reuse_buf, ext.reusable, "  Reusabl:");
+                buf.setString(rx, y, reuse_str, dim);
+                y += 1;
+            }
+            vline += 1;
         }
     } else {
-        if (y >= max_y) return y - rect.y;
-        var mem_buf: [24]u8 = undefined;
-        const mem_mb = @as(f64, @floatFromInt(live_mem)) / (1024.0 * 1024.0);
-        const mem_str = std.fmt.bufPrint(&mem_buf, "  MEM:     {d:>6.1} MB", .{mem_mb}) catch "  MEM: ???";
-        buf.setString(rx, y, mem_str, _Style{ .fg = memColor(live_mem) });
-        y += 1;
+        if (vline >= skip_lines and y < max_y) {
+            var mem_buf: [24]u8 = undefined;
+            const mem_mb = @as(f64, @floatFromInt(live_mem)) / (1024.0 * 1024.0);
+            const mem_str = std.fmt.bufPrint(&mem_buf, "  MEM:     {d:>5.1} MB", .{mem_mb}) catch "  MEM: ???";
+            buf.setString(rx, y, mem_str, _Style{ .fg = memColor(live_mem) });
+            y += 1;
+        }
+        vline += 1;
     }
 
-    if (y >= max_y) return y - rect.y;
-    var thr_buf: [24]u8 = undefined;
-    const thr_str = std.fmt.bufPrint(&thr_buf, "  Threads: {d}", .{detail.thread_count}) catch "  Threads: ???";
-    buf.setString(rx, y, thr_str, val);
-    y += 1;
+    // Threads
+    if (vline >= skip_lines and y < max_y) {
+        var thr_buf: [24]u8 = undefined;
+        const thr_str = std.fmt.bufPrint(&thr_buf, "  Threads: {d}", .{detail.thread_count}) catch "  Threads: ???";
+        buf.setString(rx, y, thr_str, val);
+        y += 1;
+    }
+    vline += 1;
 
-    if (y >= max_y) return y - rect.y;
-    var fd_buf: [24]u8 = undefined;
-    const fd_str = std.fmt.bufPrint(&fd_buf, "  FDs:     {d}", .{detail.fd_count}) catch "  FDs: ???";
-    buf.setString(rx, y, fd_str, val);
-    y += 1;
+    // FDs
+    if (vline >= skip_lines and y < max_y) {
+        var fd_buf: [24]u8 = undefined;
+        const fd_str = std.fmt.bufPrint(&fd_buf, "  FDs:     {d}", .{detail.fd_count}) catch "  FDs: ???";
+        buf.setString(rx, y, fd_str, val);
+        y += 1;
+    }
+    vline += 1;
 
-    if (y >= max_y) return y - rect.y;
-    var virt_buf: [32]u8 = undefined;
-    const virt_str = formatMemSize(&virt_buf, detail.virtual_mem, "  VirtAddr:");
-    buf.setString(rx, y, virt_str, dim);
-    y += 1;
+    // Virtual address space
+    if (vline >= skip_lines and y < max_y) {
+        var virt_buf: [32]u8 = undefined;
+        const virt_str = formatMemSize(&virt_buf, detail.virtual_mem, "  VirtAddr:");
+        buf.setString(rx, y, virt_str, dim);
+        y += 1;
+    }
+    vline += 1;
 
     // Extended task info (if available via task_for_pid)
     if (ext.available) {
-        if (y >= max_y) return y - rect.y;
-        y += 1; // blank separator
+        // blank separator
+        if (vline >= skip_lines and y < max_y) {
+            y += 1;
+        }
+        vline += 1;
 
-        if (y >= max_y) return y - rect.y;
-        var csw_buf: [32]u8 = undefined;
-        const csw_str = fmtCount(&csw_buf, "  CSW:     ", ext.csw);
-        buf.setString(rx, y, csw_str, dim);
-        y += 1;
+        // CSW
+        if (vline >= skip_lines and y < max_y) {
+            var csw_buf: [32]u8 = undefined;
+            const csw_str = fmtCount(&csw_buf, "  CSW:     ", ext.csw);
+            buf.setString(rx, y, csw_str, dim);
+            y += 1;
+        }
+        vline += 1;
 
-        if (y >= max_y) return y - rect.y;
-        var faults_buf: [32]u8 = undefined;
-        const faults_str = fmtCount(&faults_buf, "  Faults:  ", ext.faults);
-        buf.setString(rx, y, faults_str, dim);
-        y += 1;
+        // Faults
+        if (vline >= skip_lines and y < max_y) {
+            var faults_buf: [32]u8 = undefined;
+            const faults_str = fmtCount(&faults_buf, "  Faults:  ", ext.faults);
+            buf.setString(rx, y, faults_str, dim);
+            y += 1;
+        }
+        vline += 1;
 
         if (ext.pageins > 0) {
-            if (y >= max_y) return y - rect.y;
-            var pageins_buf: [32]u8 = undefined;
-            const pageins_str = fmtCount(&pageins_buf, "  Pageins: ", ext.pageins);
-            buf.setString(rx, y, pageins_str, dim);
-            y += 1;
+            if (vline >= skip_lines and y < max_y) {
+                var pageins_buf: [32]u8 = undefined;
+                const pageins_str = fmtCount(&pageins_buf, "  Pageins: ", ext.pageins);
+                buf.setString(rx, y, pageins_str, dim);
+                y += 1;
+            }
+            vline += 1;
         }
 
         if (ext.cow_faults > 0) {
-            if (y >= max_y) return y - rect.y;
-            var cow_buf: [32]u8 = undefined;
-            const cow_str = fmtCount(&cow_buf, "  COW:     ", ext.cow_faults);
-            buf.setString(rx, y, cow_str, dim);
-            y += 1;
+            if (vline >= skip_lines and y < max_y) {
+                var cow_buf: [32]u8 = undefined;
+                const cow_str = fmtCount(&cow_buf, "  COW:     ", ext.cow_faults);
+                buf.setString(rx, y, cow_str, dim);
+                y += 1;
+            }
+            vline += 1;
         }
 
-        if (y >= max_y) return y - rect.y;
-        var syscall_buf: [32]u8 = undefined;
-        const total_syscalls = ext.syscalls_mach + ext.syscalls_unix;
-        const syscall_str = fmtCount(&syscall_buf, "  Syscalls:", total_syscalls);
-        buf.setString(rx, y, syscall_str, dim);
-        y += 1;
+        // Syscalls
+        if (vline >= skip_lines and y < max_y) {
+            var syscall_buf: [32]u8 = undefined;
+            const total_syscalls = ext.syscalls_mach + ext.syscalls_unix;
+            const syscall_str = fmtCount(&syscall_buf, "  Syscalls:", total_syscalls);
+            buf.setString(rx, y, syscall_str, dim);
+            y += 1;
+        }
+        vline += 1;
 
         // IPC messages (Mach messages sent/received)
         const total_msgs = ext.messages_sent + ext.messages_received;
         if (total_msgs > 0) {
-            if (y >= max_y) return y - rect.y;
-            var msg_buf: [32]u8 = undefined;
-            const msg_str = fmtCount(&msg_buf, "  IPC Msgs:", total_msgs);
-            buf.setString(rx, y, msg_str, dim);
-            y += 1;
+            if (vline >= skip_lines and y < max_y) {
+                var msg_buf: [32]u8 = undefined;
+                const msg_str = fmtCount(&msg_buf, "  IPC Msgs:", total_msgs);
+                buf.setString(rx, y, msg_str, dim);
+                y += 1;
+            }
+            vline += 1;
         }
 
         if (ext.platform_idle_wakeups > 0) {
-            if (y >= max_y) return y - rect.y;
-            var wake_buf: [32]u8 = undefined;
-            const wake_str = fmtCount(&wake_buf, "  Wakeups: ", ext.platform_idle_wakeups);
-            buf.setString(rx, y, wake_str, dim);
-            y += 1;
+            if (vline >= skip_lines and y < max_y) {
+                var wake_buf: [32]u8 = undefined;
+                const wake_str = fmtCount(&wake_buf, "  Wakeups: ", ext.platform_idle_wakeups);
+                buf.setString(rx, y, wake_str, dim);
+                y += 1;
+            }
+            vline += 1;
         }
     }
-    return y - rect.y;
+    return vline;
 }
 
-/// Format a byte count as human-readable memory size with a label prefix
+/// Format a byte count as human-readable memory size with a label prefix.
+/// Label is right-padded to 11 chars so values align at a consistent column.
 fn formatMemSize(out: *[32]u8, bytes: u64, label: []const u8) []const u8 {
+    // Pad label to 11 chars for alignment
+    var padded: [11]u8 = [_]u8{' '} ** 11;
+    const copy_len = @min(label.len, 11);
+    @memcpy(padded[0..copy_len], label[0..copy_len]);
+
     const f_bytes = @as(f64, @floatFromInt(bytes));
     if (bytes >= 1024 * 1024 * 1024) {
-        return std.fmt.bufPrint(out, "{s} {d:>5.1} GB", .{ label, f_bytes / (1024.0 * 1024.0 * 1024.0) }) catch label;
+        return std.fmt.bufPrint(out, "{s}{d:>5.1} GB", .{ padded, f_bytes / (1024.0 * 1024.0 * 1024.0) }) catch label;
     } else if (bytes >= 1024 * 1024) {
-        return std.fmt.bufPrint(out, "{s} {d:>5.1} MB", .{ label, f_bytes / (1024.0 * 1024.0) }) catch label;
+        return std.fmt.bufPrint(out, "{s}{d:>5.1} MB", .{ padded, f_bytes / (1024.0 * 1024.0) }) catch label;
     } else {
-        return std.fmt.bufPrint(out, "{s} {d:>5.1} KB", .{ label, f_bytes / 1024.0 }) catch label;
+        return std.fmt.bufPrint(out, "{s}{d:>5.1} KB", .{ padded, f_bytes / 1024.0 }) catch label;
     }
 }
 
-/// Format a large count with K/M/G suffixes
+/// Format a large count with K/M/G suffixes.
+/// Label is right-padded to 11 chars for alignment consistency.
 fn fmtCount(out: *[32]u8, label: []const u8, count: u64) []const u8 {
+    var padded: [11]u8 = [_]u8{' '} ** 11;
+    const copy_len = @min(label.len, 11);
+    @memcpy(padded[0..copy_len], label[0..copy_len]);
+
     if (count >= 1_000_000_000) {
-        return std.fmt.bufPrint(out, "{s}{d:>5.1}G", .{ label, @as(f64, @floatFromInt(count)) / 1_000_000_000.0 }) catch label;
+        return std.fmt.bufPrint(out, "{s}{d:>5.1}G", .{ padded, @as(f64, @floatFromInt(count)) / 1_000_000_000.0 }) catch label;
     } else if (count >= 1_000_000) {
-        return std.fmt.bufPrint(out, "{s}{d:>5.1}M", .{ label, @as(f64, @floatFromInt(count)) / 1_000_000.0 }) catch label;
+        return std.fmt.bufPrint(out, "{s}{d:>5.1}M", .{ padded, @as(f64, @floatFromInt(count)) / 1_000_000.0 }) catch label;
     } else if (count >= 1_000) {
-        return std.fmt.bufPrint(out, "{s}{d:>5.1}K", .{ label, @as(f64, @floatFromInt(count)) / 1_000.0 }) catch label;
+        return std.fmt.bufPrint(out, "{s}{d:>5.1}K", .{ padded, @as(f64, @floatFromInt(count)) / 1_000.0 }) catch label;
     } else {
-        return std.fmt.bufPrint(out, "{s}{d:>5}", .{ label, count }) catch label;
+        return std.fmt.bufPrint(out, "{s}{d:>5}", .{ padded, count }) catch label;
     }
 }
 
@@ -5054,7 +5343,7 @@ fn renderDetailTree(buf: *tui.render.Buffer, rect: layout.Rect, detail: model.Pr
 
 /// Combined render function that shows process tree followed by open files
 /// Uses accordion-style collapsible sections when content doesn't fit
-fn renderDetailTreeAndFiles(buf: *tui.render.Buffer, rect: layout.Rect, detail: model.ProcessDetail, app: *state.AppState, measure_only: bool, focused: bool) TreeInfo {
+fn renderDetailTreeAndFiles(buf: *tui.render.Buffer, rect: layout.Rect, detail: model.ProcessDetail, app: *state.AppState, measure_only: bool, focused: bool, scroll_offset: usize) TreeInfo {
     const lbl = _Style{ .fg = .gray };
     const val = _Style{ .fg = .light_white };
     const rx: u16 = rect.x + 1;
@@ -5170,8 +5459,8 @@ fn renderDetailTreeAndFiles(buf: *tui.render.Buffer, rect: layout.Rect, detail: 
     var ln: usize = 0;
     var self_ln: usize = 0;
 
-    // Scroll support
-    const scroll = app.detail_right_scroll;
+    // Scroll support (offset passed by caller for global pane scroll)
+    const scroll = scroll_offset;
     const vis_start = scroll;
     const vis_end = scroll +| avail_height;
 
