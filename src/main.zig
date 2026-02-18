@@ -6,7 +6,6 @@ const render = @import("ui_render");
 const state = @import("state");
 const channel = @import("thread_channel");
 const producer = @import("thread_producer");
-
 // External deps
 const tui = @import("zigtui");
 
@@ -14,7 +13,6 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const gpa_alloc = gpa.allocator();
-    // try tui.backend.NativeBackend.init(allocator);
     var backend = try tui.backend.AnsiBackend.init(gpa_alloc);
     defer backend.deinit();
 

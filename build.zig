@@ -86,6 +86,14 @@ pub fn build(b: *std.Build) void {
         .target = module_target,
         .optimize = optimize,
     });
+
+    // macOS helper modules
+    const mach_ports_mod = b.createModule(.{
+        .root_source_file = b.path("src/platform/macos/mach_ports.zig"),
+        .target = module_target,
+        .optimize = optimize,
+    });
+
     const main_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = module_target,
@@ -107,6 +115,7 @@ pub fn build(b: *std.Build) void {
     state_mod.addImport("model", model_mod);
     state_mod.addImport("event_keymap", event_keymap_mod);
     state_mod.addImport("platform", platform_mod);
+    state_mod.addImport("mach_ports", mach_ports_mod);
 
     // thread wiring
     thread_channel_mod.addImport("spsc_queue", spsc_mod);
@@ -142,6 +151,9 @@ pub fn build(b: *std.Build) void {
     // platform wiring
     platform_mod.addImport("model", model_mod);
 
+    // macOS helper wiring
+    mach_ports_mod.addImport("model", model_mod);
+
     const exe = b.addExecutable(.{
         .name = "Blade",
         .root_module = main_mod,
@@ -152,8 +164,45 @@ pub fn build(b: *std.Build) void {
         exe.linkFramework("CoreFoundation");
     }
     b.installArtifact(exe);
+
     const run_exe = b.addRunArtifact(exe);
 
     const run_step = b.step("run", "Run the application");
     run_step.dependOn(&run_exe.step);
+
+    // macOS code signing with entitlements (separate step, requires sudo)
+    // Usage: zig build sign-run -Didentity="<SHA-1 hash or identity name>"
+    // Use SHA-1 hash from `security find-identity -v -p codesigning` to avoid ambiguity.
+    // Example: zig build sign-run -Didentity=ADC2D51ECEA52752635545E86CD07FB8DA06AA6E
+    if (target.result.os.tag == .macos) {
+        const signing_identity = b.option(
+            []const u8,
+            "identity",
+            "Code signing identity (SHA-1 hash or name from `security find-identity -v -p codesigning`)",
+        );
+
+        if (signing_identity) |identity| {
+            const codesign = b.addSystemCommand(&.{
+                "sudo",
+                "codesign",
+                "--force",
+                "--options",
+                "runtime",
+                "--entitlements",
+            });
+            codesign.addFileArg(b.path("blade.entitlements"));
+            codesign.addArg("--sign");
+            codesign.addArg(identity);
+            codesign.addArtifactArg(exe);
+
+            const sign_step = b.step("sign", "Build and sign with entitlements (requires sudo)");
+            sign_step.dependOn(&codesign.step);
+
+            // sign-run: build, sign, then run
+            const signed_run = b.addRunArtifact(exe);
+            signed_run.step.dependOn(&codesign.step);
+            const sign_run_step = b.step("sign-run", "Build, sign, and run (requires sudo)");
+            sign_run_step.dependOn(&signed_run.step);
+        }
+    }
 }

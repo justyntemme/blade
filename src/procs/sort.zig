@@ -9,7 +9,7 @@ pub fn compareByIndex(ctx: model.SortContext, a: usize, b: usize) bool {
             break :blk if (cmp != .eq) cmp else std.math.order(ctx.pids[a], ctx.pids[b]);
         },
         .mem => blk: {
-            const cmp = std.math.order(ctx.mem_rsss[a], ctx.mem_rsss[b]);
+            const cmp = std.math.order(ctx.mems[a], ctx.mems[b]);
             break :blk if (cmp != .eq) cmp else std.math.order(ctx.pids[a], ctx.pids[b]);
         },
         .name => blk: {

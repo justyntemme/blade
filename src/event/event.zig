@@ -62,7 +62,9 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
         },
         .move_up => {
             if (app.mode == .detail) {
-                if (app.detail_focus == .left) {
+                if (app.detail_view_mode == .network) {
+                    app.detailScrollUp();
+                } else if (app.detail_focus == .left) {
                     app.detailScrollUp();
                 } else {
                     // Right pane: try to move to previous section, or scroll up if at first
@@ -78,7 +80,9 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
         },
         .move_down => {
             if (app.mode == .detail) {
-                if (app.detail_focus == .left) {
+                if (app.detail_view_mode == .network) {
+                    app.detailScrollDown();
+                } else if (app.detail_focus == .left) {
                     app.detailScrollDown();
                 } else {
                     // Right pane: try to move to next section, or scroll down if at last
@@ -326,8 +330,6 @@ fn executeAction(app: *state.AppState, action: keymap.Action) void {
                 app.refreshFilter();
             }
         },
-        .nice_up => executeRenice(app, -1),
-        .nice_down => executeRenice(app, 1),
         .dashboard_cpu => app.dashboard_graph_mode = .cpu,
         .dashboard_mem => app.dashboard_graph_mode = .memory,
     }
@@ -388,20 +390,6 @@ fn executeKill(app: *state.AppState, pid: std.posix.pid_t, force: bool) void {
         return;
     };
     app.buildView();
-}
-
-fn executeRenice(app: *state.AppState, delta: i32) void {
-    const rows = app.procs.render_rows.items;
-    if (rows.len == 0) return;
-
-    const idx = @min(app.selected_item, rows.len - 1);
-    const row = rows[idx];
-    const pid = row.pid;
-
-    _ = platform.renice(pid, delta) catch |err| {
-        app.showToastFmt("Renice failed: {}", .{err}, .err);
-        return;
-    };
 }
 
 // This is special as we may have arbitruary keys that can not map

@@ -1,9 +1,11 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const channel = @import("thread_channel");
 const procs = @import("procs");
 const zigtui = @import("zigtui");
 const model = @import("model");
 const keymap = @import("event_keymap");
+const mach_ports = @import("mach_ports");
 
 pub const SortColumn = model.SortColumn;
 pub const SortDirection = model.SortDirection;
@@ -383,6 +385,30 @@ pub const NetworkProtocolFilter = enum {
 };
 pub const DetailViewMode = enum { info, network };
 
+
+
+/// Cached Mach port info with timestamp and owning arena
+pub const CachedMachPortInfo = struct {
+    info: model.MachPortInfo,
+    cached_at_ns: i128,
+    arena: std.heap.ArenaAllocator,
+
+    pub fn deinit(self: *CachedMachPortInfo) void {
+        self.arena.deinit();
+    }
+};
+
+/// Cached VM map info with timestamp and owning arena
+pub const CachedVmMapInfo = struct {
+    info: model.VmMapInfo,
+    cached_at_ns: i128,
+    arena: std.heap.ArenaAllocator,
+
+    pub fn deinit(self: *CachedVmMapInfo) void {
+        self.arena.deinit();
+    }
+};
+
 /// Detail view section identifiers for accordion navigation
 pub const DetailSection = enum {
     coalition,
@@ -548,6 +574,22 @@ pub const AppState = struct {
     connection_history: [MAX_CONNECTION_HISTORY]HistoricalConnection = undefined,
     connection_history_count: u16 = 0,
 
+    // Mach ports cache (per-PID, collected via task_for_pid with entitlement)
+    mach_port_cache: std.AutoHashMap(model.pid_t, CachedMachPortInfo) = undefined,
+    mach_port_cache_initialized: bool = false,
+    // Mach port fetch in progress (to avoid duplicate fetches)
+    mach_port_fetch_pending: bool = false,
+    // Last Mach port fetch error (for display)
+    mach_port_last_error: ?[]const u8 = null,
+
+    // VM map cache (per-PID, collected via mach_vm_region_recurse with entitlement)
+    vm_map_cache: std.AutoHashMap(model.pid_t, CachedVmMapInfo) = undefined,
+    vm_map_cache_initialized: bool = false,
+    vm_map_fetch_pending: bool = false,
+    vm_map_last_error: ?[]const u8 = null,
+    vm_map_error_pid: ?model.pid_t = null,
+    vm_map_error_time_ns: i128 = 0,
+
     pub const MAX_CONNECTION_HISTORY = 512;
     pub const DetailFocus = enum { left, right };
     pub const DashboardFocus = enum { process_list, network_pane };
@@ -558,6 +600,10 @@ pub const AppState = struct {
             .procs = procs.Store.init(gpa),
             .pinned_pids = std.AutoHashMap(model.ProcIdentity, usize).init(gpa),
             .pinned_pids_initialized = true,
+            .mach_port_cache = std.AutoHashMap(model.pid_t, CachedMachPortInfo).init(gpa),
+            .mach_port_cache_initialized = true,
+            .vm_map_cache = std.AutoHashMap(model.pid_t, CachedVmMapInfo).init(gpa),
+            .vm_map_cache_initialized = true,
         };
     }
 
@@ -566,6 +612,20 @@ pub const AppState = struct {
         self.procs.deinit();
         if (self.pinned_pids_initialized) {
             self.pinned_pids.deinit();
+        }
+        if (self.mach_port_cache_initialized) {
+            var it = self.mach_port_cache.valueIterator();
+            while (it.next()) |entry| {
+                entry.arena.deinit();
+            }
+            self.mach_port_cache.deinit();
+        }
+        if (self.vm_map_cache_initialized) {
+            var it = self.vm_map_cache.valueIterator();
+            while (it.next()) |entry| {
+                entry.arena.deinit();
+            }
+            self.vm_map_cache.deinit();
         }
     }
 
@@ -725,7 +785,7 @@ pub const AppState = struct {
         const pids = hot.items(.pid);
         const start_times = hot.items(.start_time_ns);
         const cpu_percents = hot.items(.cpu_percent);
-        const mem_rsss = hot.items(.mem_rss);
+        const mems = hot.items(.mem);
         const cold = self.procs.cold.slice();
         const names = cold.items(.name);
         const paths = cold.items(.path);
@@ -763,7 +823,7 @@ pub const AppState = struct {
                         missing_rows[missing_count] = .{
                             .pid = pids[data_idx],
                             .cpu_percent = cpu_percents[data_idx],
-                            .mem_rss = mem_rsss[data_idx],
+                            .mem = mems[data_idx],
                             .name = names[data_idx],
                             .path = paths[data_idx],
                             .nice = nices[data_idx],
@@ -1636,6 +1696,7 @@ pub const AppState = struct {
         }
     }
 
+
     /// Check if the coalition section should be visible (has members)
     fn hasCoalitionMembers(self: *const AppState) bool {
         const pid = self.detail_pid orelse return false;
@@ -1724,7 +1785,182 @@ pub const AppState = struct {
     pub fn searchClear(self: *AppState) void {
         self.search_len = 0;
     }
+
+    /// Trigger a background fetch of Mach port information.
+    /// Uses task_for_pid directly via the com.apple.security.cs.debugger entitlement.
+    pub fn triggerMachPortsFetch(self: *AppState, pid: model.pid_t) void {
+        if (self.mach_port_fetch_pending) return;
+
+        // Check if cache is fresh
+        const now_ns = std.time.nanoTimestamp();
+        if (self.mach_port_cache.get(pid)) |cached| {
+            const age_ns = now_ns - cached.cached_at_ns;
+            if (age_ns < 2 * std.time.ns_per_s) return; // Cache is fresh
+        }
+
+        self.mach_port_fetch_pending = true;
+        self.mach_port_last_error = null;
+        const thread = std.Thread.spawn(.{}, fetchMachPortsWorker, .{
+            pid,
+            self.gpa,
+            self,
+        }) catch {
+            self.mach_port_fetch_pending = false;
+            return;
+        };
+        thread.detach();
+    }
+
+    fn fetchMachPortsWorker(
+        pid: model.pid_t,
+        gpa: std.mem.Allocator,
+        app: *AppState,
+    ) void {
+        defer app.mach_port_fetch_pending = false;
+
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        const alloc = arena.allocator();
+
+        const info = mach_ports.collectMachPorts(alloc, pid) catch |err| {
+            arena.deinit();
+            app.mach_port_last_error = switch (err) {
+                error.PermissionDenied => "Permission denied",
+                error.ProcessNotFound => "Process not found",
+                error.TaskForPidFailed => "task_for_pid failed (SIP-protected process)",
+                else => "Failed to get Mach ports",
+            };
+            return;
+        };
+
+        const model_info = convertMachPortInfo(alloc, info) catch {
+            arena.deinit();
+            app.mach_port_last_error = "Failed to parse Mach ports data";
+            return;
+        };
+
+        app.mach_port_last_error = null;
+        const now_ns = std.time.nanoTimestamp();
+
+        // Free old cache entry's arena if replacing
+        if (app.mach_port_cache.getPtr(pid)) |old| {
+            old.arena.deinit();
+        }
+
+        app.mach_port_cache.put(pid, .{
+            .info = model_info,
+            .cached_at_ns = now_ns,
+            .arena = arena,
+        }) catch {
+            arena.deinit();
+        };
+    }
+
+    /// Trigger a background fetch of VM map information.
+    /// Uses task_for_pid + mach_vm_region_recurse via the com.apple.security.cs.debugger entitlement.
+    pub fn triggerVmMapFetch(self: *AppState, pid: model.pid_t) void {
+        if (self.vm_map_fetch_pending) return;
+
+        // Check if cache is fresh (5 second TTL for VM map since it's more expensive)
+        const now_ns = std.time.nanoTimestamp();
+        if (self.vm_map_cache.get(pid)) |cached| {
+            const age_ns = now_ns - cached.cached_at_ns;
+            if (age_ns < 5 * std.time.ns_per_s) return;
+        }
+
+        // Don't retry errors for the same PID within 10 seconds
+        if (self.vm_map_last_error != null and self.vm_map_error_pid != null and self.vm_map_error_pid.? == pid) {
+            const error_age = now_ns - self.vm_map_error_time_ns;
+            if (error_age < 10 * std.time.ns_per_s) return;
+        }
+
+        self.vm_map_fetch_pending = true;
+        const thread = std.Thread.spawn(.{}, fetchVmMapWorker, .{
+            pid,
+            self.gpa,
+            self,
+        }) catch {
+            self.vm_map_fetch_pending = false;
+            return;
+        };
+        thread.detach();
+    }
+
+    fn fetchVmMapWorker(
+        pid: model.pid_t,
+        gpa: std.mem.Allocator,
+        app: *AppState,
+    ) void {
+        defer app.vm_map_fetch_pending = false;
+
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        const alloc = arena.allocator();
+        const pl = @import("platform");
+
+        const info = pl.collectVmMap(pid, alloc) catch |err| {
+            arena.deinit();
+            app.vm_map_last_error = switch (err) {
+                error.PermissionDenied => "Permission denied (SIP-protected)",
+                error.ProcessNotFound => "Process not found",
+                else => "Failed to collect VM map",
+            };
+            app.vm_map_error_pid = pid;
+            app.vm_map_error_time_ns = std.time.nanoTimestamp();
+            return;
+        };
+
+        app.vm_map_last_error = null;
+        app.vm_map_error_pid = null;
+        const now_ns = std.time.nanoTimestamp();
+
+        // Free old cache entry's arena if replacing
+        if (app.vm_map_cache.getPtr(pid)) |old| {
+            old.arena.deinit();
+        }
+
+        app.vm_map_cache.put(pid, .{
+            .info = info,
+            .cached_at_ns = now_ns,
+            .arena = arena,
+        }) catch {
+            arena.deinit();
+        };
+    }
 };
+
+/// Convert from mach_ports.MachPortInfo to model.MachPortInfo
+fn convertMachPortInfo(alloc: std.mem.Allocator, info: anytype) !model.MachPortInfo {
+    // Convert each port array
+    const send_rights = try convertPortArray(alloc, info.send_rights);
+    const receive_rights = try convertPortArray(alloc, info.receive_rights);
+    const port_sets = try convertPortArray(alloc, info.port_sets);
+    const dead_names = try convertPortArray(alloc, info.dead_names);
+
+    return model.MachPortInfo{
+        .pid = info.pid,
+        .send_rights = send_rights,
+        .receive_rights = receive_rights,
+        .port_sets = port_sets,
+        .dead_names = dead_names,
+    };
+}
+
+fn convertPortArray(alloc: std.mem.Allocator, ports: anytype) ![]model.MachPort {
+    if (ports.len == 0) return &[_]model.MachPort{};
+
+    const result = try alloc.alloc(model.MachPort, ports.len);
+    for (ports, 0..) |port, i| {
+        result[i] = .{
+            .name = port.name,
+            .port_type = @enumFromInt(@intFromEnum(port.port_type)),
+            .service_name = port.service_name,
+            .service_name_len = port.service_name_len,
+            .msg_count = port.msg_count,
+            .queue_limit = port.queue_limit,
+            .make_send_count = port.make_send_count,
+        };
+    }
+    return result;
+}
 
 pub const DrawContext = struct {
     state: *AppState,

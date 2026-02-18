@@ -30,9 +30,6 @@ pub fn resumeProcess(pid: std.posix.pid_t) PlatformError!void {
     return backend.resumeProcess(pid);
 }
 
-pub fn renice(pid: std.posix.pid_t, delta: i32) PlatformError!i32 {
-    return backend.renice(pid, delta);
-}
 pub const Capabilities = packed struct {
     can_signal: bool = false,
     has_cpu_time: bool = false,
@@ -81,4 +78,9 @@ pub fn countSocketsByType(pid: std.posix.pid_t) SocketCounts {
 /// Collect all TCP connections system-wide (includes PID for each connection)
 pub fn collectTcpConnections(arena: std.mem.Allocator) PlatformError![]model.TcpConnection {
     return backend.collectTcpConnections(arena);
+}
+
+/// Collect virtual memory map for a process
+pub fn collectVmMap(pid: std.posix.pid_t, arena: std.mem.Allocator) PlatformError!model.VmMapInfo {
+    return backend.collectVmMap(pid, arena);
 }

@@ -43,7 +43,7 @@ pub const Store = struct {
         return .{
             .pids = self.hot.items(.pid),
             .cpu_percents = self.hot.items(.cpu_percent),
-            .mem_rsss = self.hot.items(.mem_rss),
+            .mems = self.hot.items(.mem),
             .cold_names = self.cold.items(.name),
             .cold_paths = self.cold.items(.path),
             .sort_column = self.sort_column,
@@ -128,7 +128,7 @@ pub const Store = struct {
                 .pid = proc_ptr.pid,
                 .start_time_ns = proc_ptr.start_time_ns,
                 .cpu_percent = cpu_percent,
-                .mem_rss = proc_ptr.mem_rss,
+                .mem = if (proc_ptr.mem_phys > 0) proc_ptr.mem_phys else proc_ptr.mem_rss,
             });
         }
         std.debug.assert(self.hot.len == self.cold.len);
@@ -240,7 +240,7 @@ pub const Store = struct {
 
         const pids = self.hot.items(.pid);
         const cpus = self.hot.items(.cpu_percent);
-        const mems = self.hot.items(.mem_rss);
+        const mems = self.hot.items(.mem);
         const names = self.cold.items(.name);
         const paths = self.cold.items(.path);
         const nices = self.cold.items(.nice);
@@ -250,7 +250,7 @@ pub const Store = struct {
             self.render_rows.appendAssumeCapacity(.{
                 .pid = pids[di],
                 .cpu_percent = cpus[di],
-                .mem_rss = mems[di],
+                .mem = mems[di],
                 .name = names[di],
                 .path = paths[di],
                 .nice = nices[di],

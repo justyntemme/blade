@@ -131,6 +131,11 @@ pub fn collectSnapshot(arena: std.mem.Allocator) PlatformError!std.AutoHashMap(p
                 break :blk arena.dupe(u8, err_label) catch return error.OutOfMemory;
             };
 
+            // proc_pid_rusage: phys_footprint, disk I/O, wakeups (no entitlement needed)
+            var rusage: c.rusage_info_v4 = undefined;
+            const rusage_ret = c.proc_pid_rusage(pid, c.RUSAGE_INFO_V4, @ptrCast(&rusage));
+            const has_rusage = rusage_ret == 0;
+
             const proc = Proc{
                 .pid = pid,
                 .ppid = @intCast(proc_info.pbi_ppid),
@@ -140,9 +145,13 @@ pub fn collectSnapshot(arena: std.mem.Allocator) PlatformError!std.AutoHashMap(p
                 .name = name,
                 .path = path_str,
                 .mem_rss = if (task_size > 0) task_info.pti_resident_size else 0,
+                .mem_phys = if (has_rusage) rusage.ri_phys_footprint else 0,
                 .total_user = if (task_size > 0) task_info.pti_total_user else 0,
                 .total_system = if (task_size > 0) task_info.pti_total_system else 0,
                 .nice = @intCast(proc_info.pbi_nice),
+                .disk_read_bytes = if (has_rusage) rusage.ri_diskio_bytesread else 0,
+                .disk_write_bytes = if (has_rusage) rusage.ri_diskio_byteswritten else 0,
+                .idle_wakeups = if (has_rusage) rusage.ri_pkg_idle_wkups else 0,
             };
             proc_map.putAssumeCapacity(pid, proc);
         }
@@ -188,39 +197,6 @@ pub fn resumeProcess(pid: pid_t) PlatformError!void {
             else => PlatformError.Unexpected,
         };
     }
-}
-
-pub fn renice(pid: pid_t, delta: i32) PlatformError!i32 {
-    // Get current priority first
-    const PRIO_PROCESS = 0;
-    const current = c.getpriority(PRIO_PROCESS, @intCast(pid));
-    const get_errno = std.posix.errno(0);
-    // getpriority can return -1 legitimately, so check errno
-    if (current == -1 and get_errno != .SUCCESS) {
-        return switch (get_errno) {
-            .PERM => PlatformError.PermissionDenied,
-            .SRCH => PlatformError.ProcessNotFound,
-            else => PlatformError.Unexpected,
-        };
-    }
-
-    // Calculate new priority (clamped to -20..20)
-    var new_nice = current + delta;
-    if (new_nice < -20) new_nice = -20;
-    if (new_nice > 20) new_nice = 20;
-
-    // Set new priority
-    const result = c.setpriority(PRIO_PROCESS, @intCast(pid), new_nice);
-    const e = std.posix.errno(result);
-    if (e != .SUCCESS) {
-        return switch (e) {
-            .PERM, .ACCES => PlatformError.PermissionDenied,
-            .SRCH => PlatformError.ProcessNotFound,
-            else => PlatformError.Unexpected,
-        };
-    }
-
-    return new_nice;
 }
 
 pub fn capabilities() platform.Capabilities {
@@ -737,6 +713,76 @@ pub fn collectMountInfo() model.MountSnapshot {
     return snap;
 }
 
+/// Collect extended task info via proc_pid_rusage (baseline, no entitlement needed)
+/// enriched with Mach task_info() when task_for_pid succeeds (entitlement).
+/// Always returns at least partial data for any readable process.
+fn collectTaskExtendedInfo(pid: pid_t) model.TaskExtendedInfo {
+    var result = model.TaskExtendedInfo{};
+
+    // Baseline: proc_pid_rusage works without entitlement for same-user processes
+    var rusage: c.rusage_info_v4 = undefined;
+    if (c.proc_pid_rusage(pid, c.RUSAGE_INFO_V4, @ptrCast(&rusage)) == 0) {
+        result.phys_footprint = rusage.ri_phys_footprint;
+        result.faults = rusage.ri_pageins; // ri_pageins maps to page faults
+        result.platform_idle_wakeups = rusage.ri_pkg_idle_wkups;
+        result.interrupt_wakeups = rusage.ri_interrupt_wkups;
+        result.available = true;
+    }
+
+    // Enrichment: task_for_pid gives compressed breakdown, events detail, etc.
+    var task_port: c.mach_port_t = 0;
+    const kr = c.task_for_pid(c.mach_task_self(), pid, &task_port);
+    if (kr != c.KERN_SUCCESS) return result;
+    defer _ = c.mach_port_deallocate(c.mach_task_self(), task_port);
+
+    // TASK_VM_INFO — compressed, internal, reusable (phys_footprint already from rusage)
+    {
+        var vm_info: c.task_vm_info_data_t = undefined;
+        var count: c.mach_msg_type_number_t = @intCast(@sizeOf(c.task_vm_info_data_t) / @sizeOf(c.natural_t));
+        const vm_kr = c.task_info(task_port, c.TASK_VM_INFO, @ptrCast(&vm_info), &count);
+        if (vm_kr == c.KERN_SUCCESS) {
+            // Prefer task_info phys_footprint if rusage didn't provide it
+            if (result.phys_footprint == 0) {
+                result.phys_footprint = @intCast(@max(0, vm_info.phys_footprint));
+            }
+            result.compressed = @intCast(@max(0, vm_info.compressed));
+            result.internal = @intCast(@max(0, vm_info.internal));
+            result.reusable = @intCast(@max(0, vm_info.reusable));
+        }
+    }
+
+    // TASK_EVENTS_INFO — detailed faults, pageins, cow_faults, messages, syscalls, csw
+    {
+        var events_info: c.task_events_info_data_t = undefined;
+        var count: c.mach_msg_type_number_t = @intCast(@sizeOf(c.task_events_info_data_t) / @sizeOf(c.natural_t));
+        const ev_kr = c.task_info(task_port, c.TASK_EVENTS_INFO, @ptrCast(&events_info), &count);
+        if (ev_kr == c.KERN_SUCCESS) {
+            result.faults = @intCast(events_info.faults);
+            result.pageins = @intCast(events_info.pageins);
+            result.cow_faults = @intCast(events_info.cow_faults);
+            result.messages_sent = @intCast(events_info.messages_sent);
+            result.messages_received = @intCast(events_info.messages_received);
+            result.syscalls_mach = @intCast(events_info.syscalls_mach);
+            result.syscalls_unix = @intCast(events_info.syscalls_unix);
+            result.csw = @intCast(events_info.csw);
+        }
+    }
+
+    // TASK_POWER_INFO — idle wakeups, interrupt wakeups (more accurate than rusage)
+    {
+        var power_info: c.task_power_info_data_t = undefined;
+        var count: c.mach_msg_type_number_t = @intCast(@sizeOf(c.task_power_info_data_t) / @sizeOf(c.natural_t));
+        const pw_kr = c.task_info(task_port, c.TASK_POWER_INFO, @ptrCast(&power_info), &count);
+        if (pw_kr == c.KERN_SUCCESS) {
+            result.platform_idle_wakeups = power_info.task_platform_idle_wakeups;
+            result.interrupt_wakeups = power_info.task_interrupt_wakeups;
+        }
+    }
+
+    result.available = true;
+    return result;
+}
+
 pub fn collectProcessDetail(pid: pid_t, arena: std.mem.Allocator) PlatformError!model.ProcessDetail {
     // PROC_PIDTASKALLINFO = bsd + task in one syscall
     // SAFETY: proc_pidinfo(PROC_PIDTASKALLINFO) fully initializes this struct;
@@ -922,6 +968,7 @@ pub fn collectProcessDetail(pid: pid_t, arena: std.mem.Allocator) PlatformError!
         .fd_count = fd_count,
         .start_time_ns = start_sec * std.time.ns_per_s + start_usec * std.time.ns_per_us,
         .environ = environ,
+        .task_extended = collectTaskExtendedInfo(pid),
     };
 }
 
@@ -983,8 +1030,28 @@ pub fn collectThreads(pid: std.posix.pid_t, arena: std.mem.Allocator) PlatformEr
             // cpu_usage is in TH_USAGE_SCALE (1000 = 100%)
             const cpu_percent: f32 = @as(f32, @floatFromInt(basic_info.cpu_usage)) / 10.0;
 
+            // Get persistent thread ID and dispatch queue address via THREAD_IDENTIFIER_INFO
+            var persistent_id: u64 = 0;
+            var dispatch_qaddr: u64 = 0;
+            {
+                var ident_info: c.thread_identifier_info_data_t = undefined;
+                var ident_count: c.mach_msg_type_number_t = c.THREAD_IDENTIFIER_INFO_COUNT;
+                const ident_kr = c.thread_info(
+                    thread,
+                    c.THREAD_IDENTIFIER_INFO,
+                    @ptrCast(&ident_info),
+                    &ident_count,
+                );
+                if (ident_kr == c.KERN_SUCCESS) {
+                    persistent_id = ident_info.thread_id;
+                    dispatch_qaddr = ident_info.dispatch_qaddr;
+                }
+            }
+
             threads[valid_count] = .{
                 .tid = @intCast(thread),
+                .thread_id = persistent_id,
+                .dispatch_qaddr = dispatch_qaddr,
                 .cpu_percent = cpu_percent,
                 .user_time_us = user_time_us,
                 .system_time_us = system_time_us,
@@ -1530,4 +1597,240 @@ pub fn collectTcpConnections(arena: std.mem.Allocator) PlatformError![]model.Tcp
     }
 
     return connections.toOwnedSlice(arena) catch return error.OutOfMemory;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Virtual Memory Map via mach_vm_region_recurse
+// ═══════════════════════════════════════════════════════════════════════════
+
+const mach_vm = @cImport({
+    @cInclude("mach/mach.h");
+    @cInclude("mach/mach_vm.h");
+    @cInclude("mach/vm_region.h");
+});
+
+/// Classify a VM region by its user tag (VM_MEMORY_* constants from <mach/vm_statistics.h>)
+fn classifyRegion(user_tag: u32) model.VmRegionType {
+    return switch (user_tag) {
+        // Malloc family (tags 1-13)
+        1 => .malloc_small, // VM_MEMORY_MALLOC (generic)
+        2 => .malloc_small, // VM_MEMORY_MALLOC_SMALL
+        3 => .malloc_large, // VM_MEMORY_MALLOC_LARGE
+        4 => .malloc_large, // VM_MEMORY_MALLOC_HUGE
+        5 => .malloc_small, // VM_MEMORY_SBRK
+        6 => .malloc_small, // VM_MEMORY_REALLOC
+        7 => .malloc_tiny, // VM_MEMORY_MALLOC_TINY
+        8 => .malloc_large, // VM_MEMORY_MALLOC_LARGE_REUSABLE
+        9 => .malloc_large, // VM_MEMORY_MALLOC_LARGE_REUSED
+        10 => .malloc_small, // VM_MEMORY_ANALYSIS_TOOL
+        11 => .malloc_tiny, // VM_MEMORY_MALLOC_NANO
+        12 => .malloc_medium, // VM_MEMORY_MALLOC_MEDIUM
+        13 => .malloc_small, // VM_MEMORY_MALLOC_PROB_GUARD
+
+        // System/IPC
+        20 => .shared_memory, // VM_MEMORY_MACH_MSG
+        21 => .iokit, // VM_MEMORY_IOKIT
+
+        // Stack & Guard
+        30 => .stack, // VM_MEMORY_STACK
+        31 => .guard, // VM_MEMORY_GUARD
+
+        // Shared/Dylib
+        32 => .shared_memory, // VM_MEMORY_SHARED_PMAP
+        33 => .dylib, // VM_MEMORY_DYLIB
+        34 => .dylib, // VM_MEMORY_OBJC_DISPATCHERS
+        35 => .shared_memory, // VM_MEMORY_UNSHARED_PMAP
+        36 => .shared_memory, // VM_MEMORY_LIBCHANNEL
+
+        // Frameworks (tags 40-58)
+        40 => .mapped_file, // VM_MEMORY_APPKIT
+        41 => .mapped_file, // VM_MEMORY_FOUNDATION
+        42 => .mapped_file, // VM_MEMORY_COREGRAPHICS
+        43 => .mapped_file, // VM_MEMORY_CORESERVICES
+        44 => .mapped_file, // VM_MEMORY_JAVA
+        45 => .mapped_file, // VM_MEMORY_COREDATA
+        46 => .mapped_file, // VM_MEMORY_COREDATA_OBJECTIDS
+        50 => .mapped_file, // VM_MEMORY_ATS
+        51 => .mapped_file, // VM_MEMORY_LAYERKIT
+        52 => .mapped_file, // VM_MEMORY_CGIMAGE
+        53 => .malloc_small, // VM_MEMORY_TCMALLOC
+        54...58 => .mapped_file, // VM_MEMORY_COREGRAPHICS_DATA..XALLOC
+
+        // Dyld
+        60 => .dylib, // VM_MEMORY_DYLD
+        61 => .dylib, // VM_MEMORY_DYLD_MALLOC
+
+        // Databases & JS
+        62 => .mapped_file, // VM_MEMORY_SQLITE
+        63 => .shared_memory, // VM_MEMORY_JAVASCRIPT_CORE / WEBASSEMBLY
+        64...65 => .mapped_file, // VM_MEMORY_JAVASCRIPT_JIT_*
+
+        // Graphics & media (66-70)
+        66...70 => .mapped_file, // GLSL, OPENCL, COREIMAGE, WEBCORE, IMAGEIO
+
+        // System services & runtime (71-97)
+        71...72 => .mapped_file, // VM_MEMORY_COREPROFILE, ASSETSD
+        73 => .shared_memory, // VM_MEMORY_OS_ALLOC_ONCE
+        74 => .shared_memory, // VM_MEMORY_LIBDISPATCH
+        75...77 => .mapped_file, // VM_MEMORY_ACCELERATE, COREUI, COREUIFILE
+        78...87 => .mapped_file, // GENEALOGY..SKYWALK
+        88 => .iokit, // VM_MEMORY_IOSURFACE
+        89 => .shared_memory, // VM_MEMORY_LIBNETWORK
+        90...97 => .mapped_file, // AUDIO..QUICKLOOK_THUMBNAILS
+        103...107 => .mapped_file, // COREUI_CACHED..COMPOSITOR_SERVICES
+
+        // Rosetta (230-239)
+        230...239 => .mapped_file, // VM_MEMORY_ROSETTA*
+
+        // Application-specific (240-255)
+        240...255 => .mapped_file, // VM_MEMORY_APPLICATION_SPECIFIC_*
+
+        else => .other,
+    };
+}
+
+/// Collect virtual memory map for a process using mach_vm_region_recurse.
+/// Requires task_for_pid (com.apple.security.cs.debugger entitlement).
+pub fn collectVmMap(pid: pid_t, arena: std.mem.Allocator) PlatformError!model.VmMapInfo {
+    // Try task_for_pid first (gives submap detail), fall back to proc_pidinfo
+    if (collectVmMapViaTask(pid, arena)) |info| {
+        return info;
+    } else |_| {
+        return collectVmMapViaProc(pid, arena);
+    }
+}
+
+/// Collect VM map via task_for_pid + mach_vm_region_recurse (detailed, requires entitlement)
+fn collectVmMapViaTask(pid: pid_t, arena: std.mem.Allocator) PlatformError!model.VmMapInfo {
+    var task_port: c.mach_port_t = 0;
+    const kr = c.task_for_pid(c.mach_task_self(), pid, &task_port);
+    if (kr != c.KERN_SUCCESS) {
+        return error.PermissionDenied;
+    }
+    defer _ = c.mach_port_deallocate(c.mach_task_self(), task_port);
+
+    var regions: std.ArrayListUnmanaged(model.VmRegion) = .empty;
+    var summary = model.VmMapSummary{};
+
+    var address: mach_vm.mach_vm_address_t = 0;
+    var depth: mach_vm.natural_t = 0;
+
+    while (true) {
+        var size: mach_vm.mach_vm_size_t = 0;
+        var info: mach_vm.vm_region_submap_info_data_64_t = undefined;
+        var info_count: mach_vm.mach_msg_type_number_t = @intCast(@sizeOf(mach_vm.vm_region_submap_info_data_64_t) / @sizeOf(mach_vm.natural_t));
+
+        const region_kr = mach_vm.mach_vm_region_recurse(
+            task_port,
+            &address,
+            &size,
+            &depth,
+            @ptrCast(&info),
+            &info_count,
+        );
+
+        if (region_kr != c.KERN_SUCCESS) break;
+
+        if (info.is_submap != 0) {
+            depth += 1;
+            continue;
+        }
+
+        const user_tag: u32 = @intCast(info.user_tag);
+        const region_type = classifyRegion(user_tag);
+        const region_size: u64 = @intCast(size);
+        const page_size: u64 = 4096; // macOS always uses 4KB pages for vm_region
+        const resident_bytes: u64 = @as(u64, @intCast(info.pages_resident)) * page_size;
+
+        const region = model.VmRegion{
+            .address = @intCast(address),
+            .size = region_size,
+            .region_type = region_type,
+            .protection = @intCast(info.protection),
+            .max_protection = @intCast(info.max_protection),
+            .user_tag = user_tag,
+        };
+        regions.append(arena, region) catch return error.OutOfMemory;
+
+        updateVmSummary(&summary, region_type, region_size, resident_bytes);
+
+        address += size;
+        if (address == 0) break;
+    }
+
+    return model.VmMapInfo{
+        .pid = pid,
+        .regions = regions.toOwnedSlice(arena) catch return error.OutOfMemory,
+        .summary = summary,
+    };
+}
+
+/// Fallback: Collect VM map via proc_pidinfo (works on SIP-protected processes, no entitlement needed)
+fn collectVmMapViaProc(pid: pid_t, arena: std.mem.Allocator) PlatformError!model.VmMapInfo {
+    var regions: std.ArrayListUnmanaged(model.VmRegion) = .empty;
+    var summary = model.VmMapSummary{};
+
+    var address: u64 = 0;
+
+    while (true) {
+        var region_info: c.proc_regioninfo = undefined;
+        const ret = c.proc_pidinfo(
+            pid,
+            c.PROC_PIDREGIONINFO,
+            address,
+            &region_info,
+            @sizeOf(c.proc_regioninfo),
+        );
+
+        if (ret <= 0) break;
+
+        const user_tag: u32 = region_info.pri_user_tag;
+        const region_type = classifyRegion(user_tag);
+        const region_size: u64 = region_info.pri_size;
+
+        const region = model.VmRegion{
+            .address = region_info.pri_address,
+            .size = region_size,
+            .region_type = region_type,
+            .protection = @intCast(region_info.pri_protection),
+            .max_protection = @intCast(region_info.pri_max_protection),
+            .user_tag = user_tag,
+        };
+        regions.append(arena, region) catch return error.OutOfMemory;
+
+        // proc_regioninfo doesn't provide resident page counts
+        const resident_pages: u64 = region_info.pri_pages_resident;
+        const resident_bytes: u64 = resident_pages * 4096;
+        updateVmSummary(&summary, region_type, region_size, resident_bytes);
+
+        address = region_info.pri_address + region_info.pri_size;
+        if (address == 0) break;
+    }
+
+    // If we got zero regions, the process may not exist or be fully restricted
+    if (summary.region_count == 0) {
+        return error.ProcessNotFound;
+    }
+
+    return model.VmMapInfo{
+        .pid = pid,
+        .regions = regions.toOwnedSlice(arena) catch return error.OutOfMemory,
+        .summary = summary,
+    };
+}
+
+fn updateVmSummary(summary: *model.VmMapSummary, region_type: model.VmRegionType, region_size: u64, resident_bytes: u64) void {
+    summary.total_virtual += region_size;
+    summary.total_resident += resident_bytes;
+    summary.region_count += 1;
+    switch (region_type) {
+        .malloc_small, .malloc_medium, .malloc_large, .malloc_tiny => summary.malloc_size += region_size,
+        .stack => summary.stack_size += region_size,
+        .dylib => summary.dylib_size += region_size,
+        .mapped_file => summary.mapped_file_size += region_size,
+        .shared_memory => summary.shared_memory_size += region_size,
+        .iokit => summary.iokit_size += region_size,
+        .guard => summary.guard_size += region_size,
+        .other => summary.other_size += region_size,
+    }
 }

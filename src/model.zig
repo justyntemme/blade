@@ -29,9 +29,13 @@ pub const Proc = struct {
     name: []const u8 = "",
     path: []const u8 = "",
     mem_rss: u64 = 0,
+    mem_phys: u64 = 0, // phys_footprint from proc_pid_rusage (0 if unavailable)
     total_user: u64 = 0,
     total_system: u64 = 0,
     nice: i32 = 0,
+    disk_read_bytes: u64 = 0, // cumulative disk read (from proc_pid_rusage)
+    disk_write_bytes: u64 = 0, // cumulative disk write (from proc_pid_rusage)
+    idle_wakeups: u64 = 0, // cumulative package idle wakeups
 };
 
 pub const ProcessSnapshot = struct {
@@ -59,7 +63,7 @@ pub const ProcHot = struct {
     pid: std.posix.pid_t,
     start_time_ns: i128,
     cpu_percent: f32,
-    mem_rss: u64,
+    mem: u64, // phys_footprint when available, RSS as fallback
 };
 
 pub const ProcHotList = std.MultiArrayList(ProcHot);
@@ -83,6 +87,31 @@ pub const VisibleNode = struct {
     is_expanded: bool,
 };
 
+/// Extended task info from Mach task_info() calls (phys_footprint, compressed, faults, etc.)
+pub const TaskExtendedInfo = struct {
+    // VM info (TASK_VM_INFO)
+    phys_footprint: u64 = 0, // Physical memory footprint (what Activity Monitor shows)
+    compressed: u64 = 0, // Compressed memory size
+    internal: u64 = 0, // Internal (anonymous) memory
+    reusable: u64 = 0, // Reusable memory
+
+    // Events info (TASK_EVENTS_INFO)
+    faults: u64 = 0, // Page faults
+    pageins: u64 = 0, // Page-ins from disk
+    cow_faults: u64 = 0, // Copy-on-write faults
+    messages_sent: u64 = 0, // Mach messages sent
+    messages_received: u64 = 0, // Mach messages received
+    syscalls_mach: u64 = 0, // Mach system calls
+    syscalls_unix: u64 = 0, // Unix system calls
+    csw: u64 = 0, // Context switches
+
+    // Power info (TASK_POWER_INFO_V2 or TASK_POWER_INFO)
+    platform_idle_wakeups: u64 = 0, // Platform idle wakeups
+    interrupt_wakeups: u64 = 0, // Interrupt wakeups
+
+    available: bool = false, // Whether data was successfully collected
+};
+
 pub const ProcessDetail = struct {
     pid: pid_t,
     ppid: pid_t,
@@ -99,6 +128,7 @@ pub const ProcessDetail = struct {
     fd_count: u32,
     start_time_ns: i128,
     environ: []const []const u8,
+    task_extended: TaskExtendedInfo = .{},
 };
 
 pub const ThreadState = enum {
@@ -111,6 +141,8 @@ pub const ThreadState = enum {
 
 pub const ThreadInfo = struct {
     tid: u64,
+    thread_id: u64 = 0, // Persistent unique thread ID (from THREAD_IDENTIFIER_INFO)
+    dispatch_qaddr: u64 = 0, // GCD dispatch queue address
     cpu_percent: f32,
     user_time_us: u64,
     system_time_us: u64,
@@ -204,7 +236,7 @@ pub const OpenFile = struct {
 pub const RenderRow = struct {
     pid: pid_t,
     cpu_percent: f32,
-    mem_rss: u64,
+    mem: u64, // phys_footprint when available, RSS as fallback
     name: []const u8,
     path: []const u8,
     nice: i32,
@@ -221,7 +253,7 @@ pub const SortDirection = enum { asc, desc };
 pub const SortContext = struct {
     pids: []const pid_t,
     cpu_percents: []const f32,
-    mem_rsss: []const u64,
+    mems: []const u64,
     cold_names: []const []const u8,
     cold_paths: []const []const u8,
     sort_column: SortColumn,
@@ -422,6 +454,106 @@ pub const TrackedProcess = struct {
 };
 
 pub const NET_RATE_HISTORY_LEN = 60;
+
+// --- Mach Port types for privileged port inspection ---
+
+pub const MachPortType = enum(u8) {
+    send = 1,
+    receive = 2,
+    send_once = 3,
+    port_set = 4,
+    dead_name = 5,
+};
+
+pub const MachPort = struct {
+    name: u32,
+    port_type: MachPortType,
+    service_name: [64]u8 = [_]u8{0} ** 64,
+    service_name_len: u8 = 0,
+    // Receive status (only valid for receive rights)
+    msg_count: u32 = 0, // Messages currently in queue
+    queue_limit: u32 = 0, // Maximum queue depth
+    make_send_count: u32 = 0, // Number of send rights created
+
+    pub fn getServiceName(self: *const MachPort) []const u8 {
+        return self.service_name[0..self.service_name_len];
+    }
+};
+
+pub const MachPortInfo = struct {
+    pid: pid_t,
+    send_rights: []MachPort,
+    receive_rights: []MachPort,
+    port_sets: []MachPort,
+    dead_names: []MachPort,
+
+    pub fn totalCount(self: *const MachPortInfo) usize {
+        return self.send_rights.len + self.receive_rights.len +
+            self.port_sets.len + self.dead_names.len;
+    }
+};
+
+// --- Virtual Memory Map types ---
+
+pub const VmRegionType = enum {
+    malloc_small,
+    malloc_medium,
+    malloc_large,
+    malloc_tiny,
+    stack,
+    dylib,
+    mapped_file,
+    shared_memory,
+    iokit,
+    guard,
+    other,
+
+    pub fn label(self: VmRegionType) []const u8 {
+        return switch (self) {
+            .malloc_small => "Malloc Small",
+            .malloc_medium => "Malloc Medium",
+            .malloc_large => "Malloc Large",
+            .malloc_tiny => "Malloc Tiny",
+            .stack => "Stack",
+            .dylib => "Dylib/Framework",
+            .mapped_file => "Mapped File",
+            .shared_memory => "Shared Memory",
+            .iokit => "IOKit",
+            .guard => "Guard",
+            .other => "Other",
+        };
+    }
+};
+
+pub const VmRegion = struct {
+    address: u64,
+    size: u64,
+    region_type: VmRegionType,
+    protection: u8, // rwx bits
+    max_protection: u8,
+    user_tag: u32,
+};
+
+pub const VmMapSummary = struct {
+    total_virtual: u64 = 0,
+    total_resident: u64 = 0,
+    region_count: usize = 0,
+    // Per-type size totals
+    malloc_size: u64 = 0,
+    stack_size: u64 = 0,
+    dylib_size: u64 = 0,
+    mapped_file_size: u64 = 0,
+    shared_memory_size: u64 = 0,
+    iokit_size: u64 = 0,
+    guard_size: u64 = 0,
+    other_size: u64 = 0,
+};
+
+pub const VmMapInfo = struct {
+    pid: pid_t,
+    regions: []VmRegion,
+    summary: VmMapSummary,
+};
 
 pub const NetRateHistory = struct {
     samples: [NET_RATE_HISTORY_LEN]f32 = [_]f32{0} ** NET_RATE_HISTORY_LEN,
