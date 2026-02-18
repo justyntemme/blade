@@ -9,6 +9,13 @@ const _Style = tui.style.Style;
 const _Modifier = tui.style.Modifier;
 const _Color = tui.style.Color;
 
+/// Write text clipped to a right-edge x boundary. Nothing past max_x is written.
+fn setClipped(buf: *tui.render.Buffer, x: u16, y: u16, text: []const u8, style: _Style, max_x: u16) void {
+    if (x >= max_x) return;
+    const avail: usize = max_x - x;
+    buf.setString(x, y, text[0..@min(text.len, avail)], style);
+}
+
 fn cpuColor(cpu_percent: f32) _Color {
     if (cpu_percent > 50.0) return .red;
     if (cpu_percent > 25.0) return .yellow;
@@ -92,7 +99,7 @@ const column_layout = layout.Container.row(&[_]layout.Item{
 
 // detail_page_layout: [0]=header, [1]=body, [2]=footer
 const detail_page_layout = layout.Container.column(&[_]layout.Item{
-    .{ .sizing = .{ .fixed = 4 } },
+    .{ .sizing = .{ .fixed = 5 } },
     .{ .sizing = .{ .grow = 1.0 } },
     .{ .sizing = .{ .fixed = 1 } },
 });
@@ -3730,12 +3737,22 @@ fn renderDetailView(buf: *tui.render.Buffer, area: tui.render.Rect, app: *state.
     }) catch "???";
     buf.setString(info_x, header_rect.y + 2, info_line, lbl_style);
 
-    // --- Header separator (line 4 — thin rule) ---
+    // Line 4: [p]reserve indicator (applies to network connections + mach ports)
+    {
+        const preserve_label = app.preserve_log.label();
+        const preserve_color: _Color = if (app.preserve_log != .no) .light_green else .gray;
+        buf.setString(header_rect.x, header_rect.y + 3, "[", _Style{ .fg = .gray });
+        buf.setString(header_rect.x + 1, header_rect.y + 3, "p", _Style{ .fg = .light_cyan, .modifier = _Modifier{ .bold = true } });
+        buf.setString(header_rect.x + 2, header_rect.y + 3, "]reserve: ", _Style{ .fg = .gray });
+        buf.setString(header_rect.x + 12, header_rect.y + 3, preserve_label, _Style{ .fg = preserve_color });
+    }
+
+    // --- Header separator (line 5 — thin rule) ---
     {
         var sep_buf: [256]u8 = undefined;
         const sep_w: usize = @min(header_rect.width, sep_buf.len);
         @memset(sep_buf[0..sep_w], '-');
-        buf.setString(header_rect.x, header_rect.y + 3, sep_buf[0..sep_w], _Style{ .fg = .gray });
+        buf.setString(header_rect.x, header_rect.y + 4, sep_buf[0..sep_w], _Style{ .fg = .gray });
     }
 
     // --- Body rendering depends on view mode ---
@@ -4016,13 +4033,10 @@ fn renderMachPortsColumn(buf: *tui.render.Buffer, rect: layout.Rect, app: *state
         }
     }
 
-    // Trigger fetches for any coalition member PIDs not yet cached
-    for (show_pids[0..show_count]) |pid| {
-        if (!app.mach_port_cache.contains(pid)) {
-            app.triggerMachPortsFetch(pid);
-        }
-    }
+    // Batch fetch all coalition member PIDs not yet cached
+    app.triggerMachPortsBatchFetch(show_pids[0..show_count]);
 
+    const clip_x = rect.x + rect.width;
     var ln: u16 = 2;
     const max_ln = rect.height;
     var any_data = false;
@@ -4045,7 +4059,7 @@ fn renderMachPortsColumn(buf: *tui.render.Buffer, rect: layout.Rect, app: *state
 
             var name_buf: [48]u8 = undefined;
             const name_str = std.fmt.bufPrint(&name_buf, "{s}{s} ({d})", .{ prefix, name, pid }) catch "???";
-            buf.setString(rect.x + 1, rect.y + ln, name_str, name_style);
+            setClipped(buf, rect.x + 1, rect.y + ln, name_str, name_style, clip_x);
             ln += 1;
             if (ln >= max_ln) break;
 
@@ -4058,7 +4072,7 @@ fn renderMachPortsColumn(buf: *tui.render.Buffer, rect: layout.Rect, app: *state
                 info.port_sets.len,
                 info.dead_names.len,
             }) catch "???";
-            buf.setString(rect.x + 1, rect.y + ln, counts_str, dim_style);
+            setClipped(buf, rect.x + 1, rect.y + ln, counts_str, dim_style, clip_x);
             ln += 1;
 
             // Queued messages (if any)
@@ -4070,7 +4084,7 @@ fn renderMachPortsColumn(buf: *tui.render.Buffer, rect: layout.Rect, app: *state
                 if (ln >= max_ln) break;
                 var q_buf: [48]u8 = undefined;
                 const q_str = std.fmt.bufPrint(&q_buf, "{s}  queued: {d} msgs", .{ prefix, total_queued }) catch "";
-                buf.setString(rect.x + 1, rect.y + ln, q_str, dim_style);
+                setClipped(buf, rect.x + 1, rect.y + ln, q_str, dim_style, clip_x);
                 ln += 1;
             }
         } else {
@@ -4080,9 +4094,9 @@ fn renderMachPortsColumn(buf: *tui.render.Buffer, rect: layout.Rect, app: *state
 
     if (!any_data and ln == 2) {
         if (!all_cached) {
-            buf.setString(rect.x + 2, rect.y + ln, "Loading...", _Style{ .fg = .yellow });
+            setClipped(buf, rect.x + 2, rect.y + ln, "Loading...", _Style{ .fg = .yellow }, clip_x);
         } else {
-            buf.setString(rect.x + 2, rect.y + ln, "No port data (SIP)", dim_style);
+            setClipped(buf, rect.x + 2, rect.y + ln, "No port data (SIP)", dim_style, clip_x);
         }
     }
 }
@@ -4189,12 +4203,13 @@ fn renderNetworkConnectionsColumn(buf: *tui.render.Buffer, rect: layout.Rect, ap
     const use_sysctl_tcp = proc_tcp_count == 0 and sysctl_tcp_count > 0;
 
     if (!has_files and sysctl_tcp_count == 0) {
-        buf.setString(rect.x, rect.y, "No open file descriptors found", dim_style);
-        buf.setString(rect.x, rect.y + 1, "(checked process + all descendants)", dim_style);
+        const rx = rect.x + rect.width;
+        setClipped(buf, rect.x, rect.y, "No open file descriptors found", dim_style, rx);
+        setClipped(buf, rect.x, rect.y + 1, "(checked process + all descendants)", dim_style, rx);
         if (rect.height > 3) {
-            buf.setString(rect.x, rect.y + 3, "Sandboxed apps (Safari, Mail) delegate networking", _Style{ .fg = .yellow });
-            buf.setString(rect.x, rect.y + 4, "to XPC services. Search for 'WebKit' or 'Network'", _Style{ .fg = .yellow });
-            buf.setString(rect.x, rect.y + 5, "in the process list to find them.", _Style{ .fg = .yellow });
+            setClipped(buf, rect.x, rect.y + 3, "Sandboxed apps (Safari, Mail) delegate networking", _Style{ .fg = .yellow }, rx);
+            setClipped(buf, rect.x, rect.y + 4, "to XPC services. Search for 'WebKit' or 'Network'", _Style{ .fg = .yellow }, rx);
+            setClipped(buf, rect.x, rect.y + 5, "in the process list to find them.", _Style{ .fg = .yellow }, rx);
         }
         return;
     }
@@ -4212,16 +4227,17 @@ fn renderNetworkConnectionsColumn(buf: *tui.render.Buffer, rect: layout.Rect, ap
         (if (show_unix) unix_count else 0);
 
     if (filtered_count == 0) {
+        const rx = rect.x + rect.width;
         var msg_buf: [64]u8 = undefined;
         const msg = if (filter == .all)
             "No network connections"
         else
             std.fmt.bufPrint(&msg_buf, "No {s} connections", .{filter.label()}) catch "No connections";
-        buf.setString(rect.x, rect.y, msg, dim_style);
-        buf.setString(rect.x, rect.y + 1, "(process has other file descriptors but no matching sockets)", dim_style);
+        setClipped(buf, rect.x, rect.y, msg, dim_style, rx);
+        setClipped(buf, rect.x, rect.y + 1, "(has file descriptors but no matching sockets)", dim_style, rx);
         if (rect.height > 3) {
-            buf.setString(rect.x, rect.y + 3, "Sandboxed apps delegate networking to XPC services.", _Style{ .fg = .yellow });
-            buf.setString(rect.x, rect.y + 4, "Try searching for related service processes.", _Style{ .fg = .yellow });
+            setClipped(buf, rect.x, rect.y + 3, "Sandboxed apps delegate networking to XPC services.", _Style{ .fg = .yellow }, rx);
+            setClipped(buf, rect.x, rect.y + 4, "Try searching for related service processes.", _Style{ .fg = .yellow }, rx);
         }
         return;
     }
@@ -4244,12 +4260,11 @@ fn renderNetworkConnectionsColumn(buf: *tui.render.Buffer, rect: layout.Rect, ap
     }
     ln += 1;
 
-    // Second row: counts, filter, and preserve log mode
+    // Second row: counts and filter
     if (ln >= vis_start and ln < vis_end) {
         const y = rect.y + @as(u16, @intCast(ln - vis_start));
         var count_buf: [64]u8 = undefined;
-        const preserve_label = app.preserve_log.label();
-        const count_str = std.fmt.bufPrint(&count_buf, "[{s}] {d} TCP, {d} UDP, {d} Unix  [p]reserve: {s}", .{ filter.label(), tcp_count, udp_count, unix_count, preserve_label }) catch "";
+        const count_str = std.fmt.bufPrint(&count_buf, "[{s}] {d} TCP, {d} UDP, {d} Unix", .{ filter.label(), tcp_count, udp_count, unix_count }) catch "";
         buf.setString(rect.x, y, count_str, dim_style);
     }
     ln += 1;

@@ -665,13 +665,8 @@ pub const AppState = struct {
         }
         self.visible_pid_count = count;
 
-        // Pre-fetch Mach ports for first visible PID not yet cached
-        for (self.visible_pids[0..count]) |pid| {
-            if (!self.mach_port_cache.contains(pid)) {
-                self.triggerMachPortsFetch(pid);
-                break; // one at a time (single pending slot)
-            }
-        }
+        // Pre-fetch Mach ports for all visible PIDs (batch)
+        self.triggerMachPortsBatchFetch(self.visible_pids[0..count]);
     }
 
     /// Toggle preserve log mode (cycles: no -> yes -> fade -> no)
@@ -1347,7 +1342,28 @@ pub const AppState = struct {
 
         // Immediately trigger TCP and Mach port collection (don't wait for next batch)
         self.triggerTcpCollection();
-        self.triggerMachPortsFetch(pid);
+
+        // Batch fetch mach ports for main PID + all coalition members
+        var mach_pids: [64]model.pid_t = undefined;
+        var mach_count: usize = 0;
+        mach_pids[0] = pid;
+        mach_count = 1;
+
+        // Find coalition members
+        if (self.procs.pid_to_index.get(pid)) |idx| {
+            const detail_cid = self.procs.cold.items(.coalition_id)[idx];
+            if (detail_cid != 0) {
+                const all_pids = self.procs.hot.items(.pid);
+                const all_cids = self.procs.cold.items(.coalition_id);
+                for (all_pids, all_cids) |p, c| {
+                    if (c == detail_cid and p != pid and mach_count < mach_pids.len) {
+                        mach_pids[mach_count] = p;
+                        mach_count += 1;
+                    }
+                }
+            }
+        }
+        self.triggerMachPortsBatchFetch(mach_pids[0..mach_count]);
 
         const thread = std.Thread.spawn(.{}, collectDetailWorker, .{ self.detail_queue, pid, self.gpa }) catch {
             self.showToast("Detail collection failed", .err);
@@ -1793,21 +1809,36 @@ pub const AppState = struct {
         self.search_len = 0;
     }
 
-    /// Trigger a background fetch of Mach port information.
-    /// Uses task_for_pid directly via the com.apple.security.cs.debugger entitlement.
+    /// Trigger a background fetch of Mach port information for a single PID.
     pub fn triggerMachPortsFetch(self: *AppState, pid: model.pid_t) void {
+        var pids: [1]model.pid_t = .{pid};
+        self.triggerMachPortsBatchFetch(&pids);
+    }
+
+    /// Trigger a background batch fetch of Mach port information for multiple PIDs.
+    /// Fetches all uncached/stale PIDs sequentially in one background thread.
+    pub fn triggerMachPortsBatchFetch(self: *AppState, pids: []const model.pid_t) void {
         if (self.mach_port_fetch_pending) return;
 
-        // Check if cache is fresh
+        // Filter to PIDs that actually need fetching
         const now_ns = std.time.nanoTimestamp();
-        if (self.mach_port_cache.get(pid)) |cached| {
-            const age_ns = now_ns - cached.cached_at_ns;
-            if (age_ns < 2 * std.time.ns_per_s) return; // Cache is fresh
+        var fetch_pids: [64]model.pid_t = undefined;
+        var fetch_count: usize = 0;
+        for (pids) |pid| {
+            if (fetch_count >= fetch_pids.len) break;
+            if (self.mach_port_cache.get(pid)) |cached| {
+                const age_ns = now_ns - cached.cached_at_ns;
+                if (age_ns < 2 * std.time.ns_per_s) continue; // Cache is fresh
+            }
+            fetch_pids[fetch_count] = pid;
+            fetch_count += 1;
         }
+        if (fetch_count == 0) return;
 
         self.mach_port_fetch_pending = true;
-        const thread = std.Thread.spawn(.{}, fetchMachPortsWorker, .{
-            pid,
+        const thread = std.Thread.spawn(.{}, fetchMachPortsBatchWorker, .{
+            fetch_pids,
+            fetch_count,
             self.gpa,
             self,
         }) catch {
@@ -1817,76 +1848,52 @@ pub const AppState = struct {
         thread.detach();
     }
 
-    fn fetchMachPortsWorker(
-        pid: model.pid_t,
+    fn fetchMachPortsBatchWorker(
+        pids: [64]model.pid_t,
+        count: usize,
         gpa: std.mem.Allocator,
         app: *AppState,
     ) void {
         defer app.mach_port_fetch_pending = false;
 
-        var arena = std.heap.ArenaAllocator.init(gpa);
-        const alloc = arena.allocator();
+        for (pids[0..count]) |pid| {
+            var arena = std.heap.ArenaAllocator.init(gpa);
+            const alloc = arena.allocator();
 
-        const info = mach_ports.collectMachPorts(alloc, pid) catch {
-            // Cache empty result on failure (negative caching) so we don't retry every frame.
-            // The 2-second TTL will allow periodic retries.
-            const now_ns = std.time.nanoTimestamp();
-            if (app.mach_port_cache.getPtr(pid)) |old| {
-                old.arena.deinit();
-            }
-            const empty_info = model.MachPortInfo{
-                .pid = pid,
-                .send_rights = &[_]model.MachPort{},
-                .receive_rights = &[_]model.MachPort{},
-                .port_sets = &[_]model.MachPort{},
-                .dead_names = &[_]model.MachPort{},
+            const info = mach_ports.collectMachPorts(alloc, pid) catch {
+                // Negative cache: store empty result so we don't retry every frame
+                cacheMachPortResult(app, pid, null, arena);
+                continue;
             };
-            app.mach_port_cache.put(pid, .{
-                .info = empty_info,
-                .cached_at_ns = now_ns,
-                .arena = arena,
-            }) catch {
-                arena.deinit();
-            };
-            return;
-        };
 
-        const model_info = convertMachPortInfo(alloc, info) catch {
-            // Same negative caching for conversion failures
-            const now_ns = std.time.nanoTimestamp();
-            if (app.mach_port_cache.getPtr(pid)) |old| {
-                old.arena.deinit();
-            }
-            const empty_info = model.MachPortInfo{
-                .pid = pid,
-                .send_rights = &[_]model.MachPort{},
-                .receive_rights = &[_]model.MachPort{},
-                .port_sets = &[_]model.MachPort{},
-                .dead_names = &[_]model.MachPort{},
+            const model_info = convertMachPortInfo(alloc, info) catch {
+                cacheMachPortResult(app, pid, null, arena);
+                continue;
             };
-            app.mach_port_cache.put(pid, .{
-                .info = empty_info,
-                .cached_at_ns = now_ns,
-                .arena = arena,
-            }) catch {
-                arena.deinit();
-            };
-            return;
-        };
 
+            cacheMachPortResult(app, pid, model_info, arena);
+        }
+    }
+
+    fn cacheMachPortResult(app: *AppState, pid: model.pid_t, info: ?model.MachPortInfo, arena: std.heap.ArenaAllocator) void {
         const now_ns = std.time.nanoTimestamp();
-
-        // Free old cache entry's arena if replacing
         if (app.mach_port_cache.getPtr(pid)) |old| {
             old.arena.deinit();
         }
-
+        const store_info = info orelse model.MachPortInfo{
+            .pid = pid,
+            .send_rights = &[_]model.MachPort{},
+            .receive_rights = &[_]model.MachPort{},
+            .port_sets = &[_]model.MachPort{},
+            .dead_names = &[_]model.MachPort{},
+        };
         app.mach_port_cache.put(pid, .{
-            .info = model_info,
+            .info = store_info,
             .cached_at_ns = now_ns,
             .arena = arena,
         }) catch {
-            arena.deinit();
+            var a = arena;
+            a.deinit();
         };
     }
 
